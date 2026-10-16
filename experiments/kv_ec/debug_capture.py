@@ -26,6 +26,7 @@ PROCESS_EPOCH = str(uuid.uuid4())
 # Each TP worker has its own Python process. Keep attempt state here instead of
 # mutating the frozen+slots result processor.
 _ATTEMPTED = set()
+_SOURCE_IDENTITY_CACHE = {}
 
 
 class CaptureRejected(ValueError):
@@ -115,6 +116,9 @@ def source_identity(model_path):
     fingerprint; it is outside forward and logs no prompt or token content.
     """
     root = Path(model_path).resolve()
+    cached = _SOURCE_IDENTITY_CACHE.get(str(root))
+    if cached is not None:
+        return dict(cached)
     files = sorted(root.glob("*.safetensors"))
     require((root / "config.json").is_file() and bool(files), "local_model_files_required")
     hasher = hashlib.sha256()
@@ -126,8 +130,10 @@ def source_identity(model_path):
     repo = Path(__file__).resolve().parents[2]
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     diff = subprocess.check_output(["git", "diff", "HEAD", "--", "python"], cwd=repo)
-    return {"model_identifier": str(root), "model_sha256": hasher.hexdigest(),
-            "source_commit": commit, "core_diff_sha256": hashlib.sha256(diff).hexdigest()}
+    identity = {"model_identifier": str(root), "model_sha256": hasher.hexdigest(),
+                "source_commit": commit, "core_diff_sha256": hashlib.sha256(diff).hexdigest()}
+    _SOURCE_IDENTITY_CACHE[str(root)] = identity
+    return dict(identity)
 
 
 def _tp_rank(scheduler):
@@ -141,6 +147,7 @@ def select_raw_bytes(tensor, slots):
 
 
 def capture(scheduler, batch, req, config):
+    end_to_end_started = time.perf_counter_ns()
     validate_lifetime(scheduler, batch, req, config)
     # Import current checkout's exact classes ONLY after the lifetime checks.
     from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
@@ -170,12 +177,17 @@ def capture(scheduler, batch, req, config):
     device = pool.k_buffer[0].device
     require(device.type == "cuda" and torch.cuda.is_available(), "cuda_not_accessible")
     require(not torch.cuda.is_current_stream_capturing(), "capture_context_not_allowed")
+    phase = {}
+    started = time.perf_counter_ns()
     identity = source_identity(scheduler.server_args.model_path)
+    phase["model_fingerprint_ms"] = (time.perf_counter_ns() - started) / 1e6
     started = time.perf_counter()
     # Coarse debug fence: includes set_kv_buffer on any stream on this device.
     # Not a lifetime lock: ownership is protected by this stopped scheduler thread
     # plus the exclusions above, until all copies/checks return and normal free runs.
+    sync_started = time.perf_counter_ns()
     torch.cuda.synchronize(device)
+    phase["gpu_sync_ms"] = (time.perf_counter_ns() - sync_started) / 1e6
     row = req.req_pool_idx
     require(row not in req_pool.free_slots and row < req_pool.req_to_token.shape[0], "request_row_not_allocated")
     generation = int(req_pool.req_generation[row])
@@ -188,6 +200,7 @@ def capture(scheduler, batch, req, config):
     chunks, layer_records = [], []
     offset = 0
     kh, vh = hashlib.sha256(), hashlib.sha256()
+    gather_ms = d2h_ms = source_recheck_ms = 0.0
     for layer_id in layers:
         # Getter's layer loading semantics are excluded above, not ignored.
         k, v = pool.get_kv_buffer(layer_id)
@@ -197,12 +210,20 @@ def capture(scheduler, batch, req, config):
         require(k.is_contiguous() and v.is_contiguous() and k.ndim == v.ndim == 3 and
                 tuple(k.shape[1:]) == tuple(v.shape[1:]) == expected_tail, "unsupported_actual_tensor_layout")
         # Only selected token rows are read/copied; no entire-pool clone.
-        kb = select_raw_bytes(k, slots).to("cpu", non_blocking=False).numpy().copy()
-        vb = select_raw_bytes(v, slots).to("cpu", non_blocking=False).numpy().copy()
+        gather_started = time.perf_counter_ns()
+        k_selected = select_raw_bytes(k, slots)
+        v_selected = select_raw_bytes(v, slots)
+        gather_ms += (time.perf_counter_ns() - gather_started) / 1e6
+        d2h_started = time.perf_counter_ns()
+        kb = k_selected.to("cpu", non_blocking=False).numpy().copy()
+        vb = v_selected.to("cpu", non_blocking=False).numpy().copy()
+        d2h_ms += (time.perf_counter_ns() - d2h_started) / 1e6
         # Re-read selected SOURCE bytes before release to prove no local mutation.
         # This checks the selected range, not unrelated rows or other requests.
+        recheck_started = time.perf_counter_ns()
         require(np.array_equal(kb, select_raw_bytes(k, slots).cpu().numpy()) and
                 np.array_equal(vb, select_raw_bytes(v, slots).cpu().numpy()), "source_changed_during_copy")
+        source_recheck_ms += (time.perf_counter_ns() - recheck_started) / 1e6
         shape = [config.token_count, *expected_tail]
         record = {"layer_id": layer_id, "dtype": str(k.dtype), "original_shape": {"k": list(k.shape), "v": list(v.shape)},
                   "source_stride": {"k": list(k.stride()), "v": list(v.stride())},
@@ -241,7 +262,21 @@ def capture(scheduler, batch, req, config):
                 selected_copy_and_check_ms=(time.perf_counter() - started) * 1000,
                 snapshot_completion_status="complete")
     directory = config.output / config.snapshot_id
+    phase["kv_gather_ms"] = gather_ms
+    phase["d2h_ms"] = d2h_ms
+    phase["source_recheck_ms"] = source_recheck_ms
+    meta["performance_ms"] = phase
     write_rank_files(directory, payload, meta)
+    phase["snapshot_end_to_end_ms"] = (time.perf_counter_ns() - end_to_end_started) / 1e6
+    logger.info(
+        "KV_EC_DEBUG timing rank=%d snapshot=%s model_fingerprint_ms=%.3f "
+        "gpu_sync_ms=%.3f kv_gather_ms=%.3f d2h_ms=%.3f source_recheck_ms=%.3f "
+        "disk_write_ms=%.3f snapshot_end_to_end_ms=%.3f",
+        ps.tp_rank, config.snapshot_id, phase["model_fingerprint_ms"],
+        phase["gpu_sync_ms"], phase["kv_gather_ms"], phase["d2h_ms"],
+        phase["source_recheck_ms"], phase.get("disk_write_ms", float("nan")),
+        phase["snapshot_end_to_end_ms"],
+    )
     logger.info("KV_EC_DEBUG complete snapshot=%s rank=%d pool=%s bytes=%d K=%s V=%s source_unchanged=true",
                 config.snapshot_id, ps.tp_rank, meta["pool_class"], payload.size, meta["k_sha256"], meta["v_sha256"])
     return meta

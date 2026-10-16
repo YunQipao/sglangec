@@ -35,11 +35,15 @@ def write_rank_files(directory, payload, metadata):
     if payload.dtype != np.uint8 or payload.ndim != 1 or not payload.flags.c_contiguous:
         raise ValueError("flat contiguous raw bytes required")
     # No overwrite. A partial binary cannot pass validation without its sidecar.
+    disk_started = time.perf_counter_ns()
     with (directory / f"rank_{rank}.bin").open("xb") as f:
         f.write(payload.tobytes())
     with (directory / f"rank_{rank}.json").open("x") as f:
         json.dump(metadata, f, indent=2)
         f.write("\n")
+    performance = metadata.get("performance_ms")
+    if performance is not None:
+        performance["disk_write_ms"] = (time.perf_counter_ns() - disk_started) / 1e6
 
 
 def validate_payload(payload, meta):

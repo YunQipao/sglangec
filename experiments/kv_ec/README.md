@@ -300,6 +300,38 @@ curl --noproxy '*' --fail-with-body http://127.0.0.1:30182/v1/chat/completions \
 具体 CLI 以本地 `sglang serve --help` 为准；不是给现有服务强行切模式。
 在 hook 尚未实现前，任何启动命令都不会自动生成真实 Snapshot。
 
+## GPU Scratch Restore（离线实验）
+
+`gpu_scratch_restore.py` 读取已经完成的 `kv-ec-rank-bin-v1` 真实 TP=4
+目录，重新验证四个 Rank，生成 CPU XOR parity，分别模拟丢失 Rank 0--3，
+并把恢复的 BF16/FP16 原始字节复制到本进程新分配的临时 CUDA Tensor。
+它不连接 SGLang、不调用 NCCL、不调用 `set_kv_buffer`，也不会写入在线 KV Pool。
+GPU Tensor 会重新读取为字节并与丢失 Rank 的原始 payload 做 byte-exact 校验。
+
+GPU 服务器命令（每个场景建议先 `--warmup 2`，再重复 10 次）：
+
+```bash
+conda activate sglang-ec
+cd /media/sda1/iic_data/luotao/sglangec/sglang
+export OUT=/media/sda1/iic_data/luotao/kv_ec_runs
+
+CUDA_VISIBLE_DEVICES=0 \
+python experiments/kv_ec/gpu_scratch_restore.py \
+  kv_ec_runs/tp4-l0-128-20261016T141855 \
+  --device cuda:0 --warmup 2 --repeat 10 \
+  --output "$OUT/tp4-l0-128-20261016T141855-gpu-scratch.json"
+
+CUDA_VISIBLE_DEVICES=0 \
+python experiments/kv_ec/gpu_scratch_restore.py \
+  kv_ec_runs/tp4-all-256-20261016T142603 \
+  --device cuda:0 --warmup 2 --repeat 10 \
+  --output "$OUT/tp4-all-256-20261016T142603-gpu-scratch.json"
+```
+
+`xor` 和 `cpu_recovery` 是 CPU 保护路径指标；`h2d_restore` 和
+`gpu_verification` 是本实验的 scratch 验证额外开销。输出为每个丢失 Rank
+分别计算的 median/P95，不代表在线故障恢复或真实 KV 写回性能。
+
 ## 下一阶段：接入 CPU DRAM 在线保护
 
 先在可访问 GPU 的隔离实验进程验证上述只读 hook，与无 hook 的固定输入/seed 输出对比，
