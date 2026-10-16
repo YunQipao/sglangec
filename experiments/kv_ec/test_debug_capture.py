@@ -1,14 +1,18 @@
 """Synthetic/CPU tests ONLY; no claim of real KV or CUDA completion validation."""
 
 from copy import deepcopy
+import ast
+from dataclasses import dataclass, fields
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -18,6 +22,36 @@ from experiments.kv_ec.debug_capture import (
 )
 from experiments.kv_ec.rank_snapshot import validate_payload, verify, write_rank_files
 from experiments.kv_ec.snapshot import digest
+from experiments.kv_ec import debug_capture
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def result_processor_class():
+    """Execute the checkout's real class/methods without GPU-heavy imports.
+
+    Keep its actual fields, slots, frozen decorator and prefill method unchanged;
+    external inference dependencies are supplied by each CPU test.
+    """
+    path = ROOT / "python/sglang/srt/managers/scheduler_components/batch_result_processor.py"
+    node = next(n for n in ast.parse(path.read_text()).body
+                if isinstance(n, ast.ClassDef) and n.name == "SchedulerBatchResultProcessor")
+    module = ast.Module(body=ast.parse("from __future__ import annotations").body + [node],
+                        type_ignores=[])
+    namespace = {"dataclass": dataclass, "__name__": __name__, "os": os}
+    exec(compile(module, str(path), "exec"), namespace)
+    return namespace["SchedulerBatchResultProcessor"], namespace
+
+
+def frozen_processor(rank=0, tp=1):
+    cls, namespace = result_processor_class()
+    scheduler, batch, req, config = lifetime_fixture()
+    values = {f.name: None for f in fields(cls)}
+    values.update(server_args=scheduler.server_args, enable_overlap=False,
+                  tree_cache=scheduler.tree_cache, draft_worker=None,
+                  model_worker=NS(ps=NS(tp_rank=rank, tp_size=tp)))
+    return cls(**values), batch, req, config, namespace
 
 
 def lifetime_fixture():
@@ -129,6 +163,158 @@ class LifetimeTests(unittest.TestCase):
         expected = torch.cat([tensor[i].view(torch.uint8).reshape(-1) for i in slots])
         self.assertTrue(torch.equal(raw, expected))
         self.assertTrue(torch.equal(bits,before))
+
+
+class RealCallPathTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env = {"SGLANG_KV_EC_DEBUG": "1", "SGLANG_KV_EC_REQUEST_ID": "artificial",
+                    "SGLANG_KV_EC_SNAPSHOT_ID": "regression", "SGLANG_KV_EC_OUTPUT_DIR": self.tmp.name}
+        self.env_patch = patch.dict(os.environ, self.env, clear=True)
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.state_patch = patch.object(debug_capture, "_ATTEMPTED", set())
+        self.state_patch.start()
+        self.addCleanup(self.state_patch.stop)
+
+    def test_minimal_original_frozen_slots_failure(self):
+        @dataclass(kw_only=True, frozen=True, slots=True)
+        class Minimal:
+            model_worker: object
+
+        processor = Minimal(model_worker=NS(ps=NS(tp_rank=0)))
+        # This is the original failing statement, requiring no CUDA/SGLang.
+        with self.assertRaises(TypeError):
+            processor._kv_ec_debug_attempted = True
+
+    def test_real_frozen_fields_lifetime_and_success_delegation(self):
+        s, b, r, c, _ = frozen_processor()
+        self.assertFalse(hasattr(s, "ps"))
+        self.assertFalse(hasattr(s, "__dict__"))
+        validate_lifetime(s, b, r, c)
+        with patch.object(debug_capture, "capture", return_value={}) as capture_mock:
+            maybe_capture(s, b, r)
+        capture_mock.assert_called_once()
+        self.assertIs(capture_mock.call_args.args[0], s)
+        self.assertEqual(capture_mock.call_args.args[3].snapshot_id, "regression")
+
+    def test_default_disabled_and_non_target_never_capture(self):
+        s, b, r, _, _ = frozen_processor()
+        with patch.object(debug_capture, "capture") as capture_mock:
+            os.environ.pop("SGLANG_KV_EC_DEBUG")
+            maybe_capture(None, None, None)
+            os.environ["SGLANG_KV_EC_DEBUG"] = "1"
+            r.rid = "not-target"
+            maybe_capture(s, b, r)
+        capture_mock.assert_not_called()
+        self.assertFalse(debug_capture._ATTEMPTED)
+
+    def test_one_attempt_per_snapshot_request_rank_and_process(self):
+        s, b, r, _, _ = frozen_processor()
+        with patch.object(debug_capture, "capture") as capture_mock:
+            maybe_capture(s, b, r)
+            maybe_capture(s, b, r)
+            # A replacement result processor does not reset the protection.
+            s2, _, _, _, _ = frozen_processor()
+            maybe_capture(s2, b, r)
+            self.assertEqual(capture_mock.call_count, 1)
+            os.environ["SGLANG_KV_EC_SNAPSHOT_ID"] = "next"
+            maybe_capture(s, b, r)
+            os.environ["SGLANG_KV_EC_REQUEST_ID"] = r.rid = "next-request"
+            maybe_capture(s, b, r)
+            with patch.object(debug_capture.os, "getpid", return_value=-123):
+                maybe_capture(s, b, r)
+            self.assertEqual(capture_mock.call_count, 4)
+
+    def test_tp1_tp4_failure_sidecars_and_no_retry(self):
+        for tp in (1, 4):
+            os.environ["SGLANG_KV_EC_SNAPSHOT_ID"] = f"tp{tp}"
+            for rank in range(tp):
+                s, b, r, _, _ = frozen_processor(rank, tp)
+                with patch.object(debug_capture, "capture", side_effect=CaptureRejected("test_rejected")) as mock:
+                    maybe_capture(s, b, r)
+                    maybe_capture(s, b, r)
+                mock.assert_called_once()
+                path = Path(self.tmp.name) / f"tp{tp}" / f"rank_{rank}.error.json"
+                self.assertEqual(json.loads(path.read_text()), {
+                    "snapshot_completion_status": "failed", "reason": "test_rejected", "tp_rank": rank})
+
+    def test_real_capture_guard_rejection_is_reported(self):
+        s, b, r, _, _ = frozen_processor()
+        s.server_args.disable_overlap_schedule = False
+        # Not mocked: enters the existing real capture function, rejects before GPU imports.
+        maybe_capture(s, b, r)
+        error = json.loads((Path(self.tmp.name) / "regression/rank_0.error.json").read_text())
+        self.assertEqual(error["reason"], "overlap_not_supported")
+
+    def test_pdmux_rejected_from_server_args(self):
+        s, b, r, c, _ = frozen_processor()
+        s.server_args.enable_pdmux = True
+        with self.assertRaisesRegex(CaptureRejected, "offload_or_pdmux_not_supported"):
+            validate_lifetime(s, b, r, c)
+
+    def test_existing_evidence_is_not_overwritten_and_inference_continues(self):
+        s, b, r, _, _ = frozen_processor()
+        directory = Path(self.tmp.name) / "regression"
+        directory.mkdir()
+        error_path = directory / "rank_0.error.json"
+        error_path.write_text("prior evidence")
+        with patch.object(debug_capture, "capture", side_effect=FileExistsError), self.assertLogs(
+            debug_capture.logger, level="WARNING"
+        ) as logs:
+            maybe_capture(s, b, r)
+        self.assertEqual(error_path.read_text(), "prior evidence")
+        self.assertTrue(any("error sidecar failed" in line for line in logs.output))
+
+    def test_source_identity_actual_checkout_path(self):
+        model = Path(self.tmp.name) / "model"
+        model.mkdir()
+        (model / "config.json").write_text("{}")
+        (model / "model.safetensors").write_bytes(b"synthetic weights")
+        identity = debug_capture.source_identity(model)
+        self.assertEqual(identity["model_identifier"], str(model))
+        self.assertEqual(len(identity["model_sha256"]), 64)
+        self.assertEqual(len(identity["source_commit"]), 40)
+
+    def test_actual_prefill_method_continues_after_capture_error(self):
+        s, b, r, _, namespace = frozen_processor()
+        cls = type(s)
+        # Load the actual bridge file without importing the heavy SGLang package.
+        name = "sglang.srt.debug_utils.kv_ec"
+        spec = importlib.util.spec_from_file_location(name, ROOT / "python/sglang/srt/debug_utils/kv_ec.py")
+        bridge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bridge)
+        bridge._capture_module = debug_capture
+        namespace.update(get_memory=lambda: NS(enable_hisparse=False),
+                         maybe_cache_unfinished_req=Mock())
+        values = {f.name: getattr(s, f.name) for f in fields(s)}
+        allocator, streamer, reporter = Mock(), Mock(), Mock()
+        values.update(is_generation=True, token_to_kv_pool_allocator=allocator,
+                      output_streamer=streamer, metrics_reporter=reporter)
+        s = cls(**values)
+        r.time_stats = Mock()
+        r.update_finish_state = Mock()
+        r.return_sampling_mask = False
+        r.grammar = None
+        b.return_hidden_states = b.return_logprob = False
+        b.prefill_stats = b.dp_cooperation_info = None
+        result = NS(copy_done=None, routed_experts_output=None, indexer_topk_output=None,
+                    logits_output=NS(), next_token_ids=torch.tensor([42]),
+                    extend_input_len_per_req=None, extend_logprob_start_len_per_req=None,
+                    can_run_cuda_graph=False)
+        with patch.dict(sys.modules, {name: bridge}), patch.multiple(
+            cls, move_logprobs_to_cpu=Mock(), _validate_pp_skip_output_comm=Mock(),
+            _get_prefill_hidden_capture_mode=Mock(), _maybe_update_reasoning_tokens=Mock(),
+            _maybe_collect_customized_info=Mock()
+        ), patch.object(debug_capture, "capture", side_effect=CaptureRejected("test_rejected")):
+            s.process_batch_result_prefill(b, result)
+        self.assertEqual(r.output_ids, [42])
+        r.update_finish_state.assert_called_once()
+        allocator.free_group_end.assert_called_once()
+        streamer.stream_output.assert_called_once()
+        reporter.report_prefill_stats.assert_called_once()
+        self.assertTrue((Path(self.tmp.name) / "regression/rank_0.error.json").is_file())
 
 
 class RankFormatTests(unittest.TestCase):

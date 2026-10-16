@@ -1,0 +1,11 @@
+{
+  "snapshot_id": "tp1-capture-20261016T133950",
+  "tp": 1,
+  "provenance": "sglang_request",
+  "packed_byte_count": 524288,
+  "xor_performed": false,
+  "source_unchanged_recorded": true,
+  "node_failure_test": false,
+  "checks": [],
+  "status": "verified"
+}

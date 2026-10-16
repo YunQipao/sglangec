@@ -23,6 +23,9 @@ from .rank_snapshot import write_rank_files
 
 logger = logging.getLogger(__name__)
 PROCESS_EPOCH = str(uuid.uuid4())
+# Each TP worker has its own Python process. Keep attempt state here instead of
+# mutating the frozen+slots result processor.
+_ATTEMPTED = set()
 
 
 class CaptureRejected(ValueError):
@@ -84,7 +87,7 @@ def validate_lifetime(scheduler, batch, req, config):
     require(not a.enable_dp_attention and no_spec, "dp_or_speculation_not_supported")
     require(not a.enable_unified_memory and not a.enable_page_major_kv_layout, "nonstatic_layout_not_supported")
     require(not a.enable_hierarchical_cache and not a.enable_hisparse, "offload_not_supported")
-    require(a.cpu_offload_gb == 0 and not getattr(scheduler, "enable_pdmux", False), "offload_or_pdmux_not_supported")
+    require(a.cpu_offload_gb == 0 and not getattr(a, "enable_pdmux", False), "offload_or_pdmux_not_supported")
     require(str(a.disaggregation_mode) == "null", "disaggregation_not_supported")
     require(a.quantization is None and not a.enable_lora, "quantization_or_lora_not_supported")
     require(a.kv_cache_dtype == "auto", "kv_dtype_must_be_auto")
@@ -125,6 +128,11 @@ def source_identity(model_path):
     diff = subprocess.check_output(["git", "diff", "HEAD", "--", "python"], cwd=repo)
     return {"model_identifier": str(root), "model_sha256": hasher.hexdigest(),
             "source_commit": commit, "core_diff_sha256": hashlib.sha256(diff).hexdigest()}
+
+
+def _tp_rank(scheduler):
+    """Return the TP rank owned by the result processor's worker."""
+    return int(scheduler.model_worker.ps.tp_rank)
 
 
 def select_raw_bytes(tensor, slots):
@@ -243,23 +251,34 @@ def maybe_capture(scheduler, batch, req):
     if os.environ.get("SGLANG_KV_EC_DEBUG") != "1":
         return
     target = os.environ.get("SGLANG_KV_EC_REQUEST_ID")
-    if not target or req.rid != target or getattr(scheduler, "_kv_ec_debug_attempted", False):
+    if not target or req.rid != target:
         return
-    scheduler._kv_ec_debug_attempted = True
+    snapshot_id = os.environ.get("SGLANG_KV_EC_SNAPSHOT_ID", "")
+    try:
+        rank = _tp_rank(scheduler)
+    except Exception:
+        rank = -1
+    attempt_key = (os.getpid(), PROCESS_EPOCH, snapshot_id, target, rank)
+    if attempt_key in _ATTEMPTED:
+        return
+    _ATTEMPTED.add(attempt_key)
+    config = None
     try:
         config = CaptureConfig.from_env()
         capture(scheduler, batch, req, config)
     except Exception as exc:
         # Failure is local, never changes sampling or distributed control flow.
         reason = str(exc) if isinstance(exc, CaptureRejected) else type(exc).__name__
-        rank = getattr(getattr(getattr(scheduler, "model_worker", None), "ps", None), "tp_rank", -1)
         logger.warning("KV_EC_DEBUG rejected rank=%d reason=%s; inference continues", rank, reason)
         try:
-            config = CaptureConfig.from_env()
+            if config is None:
+                config = CaptureConfig.from_env()
             directory = config.output / config.snapshot_id
             directory.mkdir(parents=True, exist_ok=True)
-            with (directory / f"rank_{scheduler.ps.tp_rank}.error.json").open("x") as f:
+            with (directory / f"rank_{rank}.error.json").open("x") as f:
                 json.dump({"snapshot_completion_status": "failed", "reason": reason,
                            "tp_rank": rank}, f)
-        except Exception:
-            pass
+        except Exception as write_exc:
+            # Never overwrite prior evidence, but make sidecar failures visible.
+            logger.warning("KV_EC_DEBUG error sidecar failed rank=%d (%s)",
+                           rank, type(write_exc).__name__)
