@@ -2362,13 +2362,30 @@ def _freeze_gc_after_server_warmup(server_args: ServerArgs):
     if freeze_key:
         freeze_headers["Authorization"] = f"Bearer {freeze_key}"
     try:
-        res = requests.post(
-            server_args.url() + "/freeze_gc",
-            headers=freeze_headers,
-            timeout=10,
-            verify=server_args.ssl_verify(),
-        )
-        res.raise_for_status()
+        # With --skip-server-warmup this thread can run before Uvicorn binds
+        # its socket. Retry connection failures, not HTTP errors or read
+        # timeouts (the freeze operation may already have reached workers).
+        deadline = time.monotonic() + 10
+        with requests.Session() as session:
+            # This is an internal request to our own server, never a proxy.
+            session.trust_env = False
+            while True:
+                try:
+                    res = session.post(
+                        server_args.url() + "/freeze_gc",
+                        headers=freeze_headers,
+                        timeout=max(0.001, deadline - time.monotonic()),
+                        verify=server_args.ssl_verify(),
+                    )
+                    res.raise_for_status()
+                    break
+                except (requests.exceptions.SSLError, requests.exceptions.Timeout):
+                    raise
+                except requests.exceptions.ConnectionError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(0.1, remaining))
     except requests.exceptions.RequestException:
         logger.warning("post-warmup freeze_gc failed", exc_info=True)
 

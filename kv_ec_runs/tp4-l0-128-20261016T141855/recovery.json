@@ -1,0 +1,46 @@
+{
+  "snapshot_id": "tp4-l0-128-20261016T141855",
+  "tp": 4,
+  "provenance": "sglang_request",
+  "packed_byte_count": 131072,
+  "xor_performed": true,
+  "source_unchanged_recorded": true,
+  "node_failure_test": false,
+  "checks": [
+    {
+      "lost_rank": 0,
+      "byte_exact": true,
+      "sha256_equal": true,
+      "all_K_V_checksums_equal": true,
+      "dtype_shape_valid": true,
+      "recovery_ms": 0.101737
+    },
+    {
+      "lost_rank": 1,
+      "byte_exact": true,
+      "sha256_equal": true,
+      "all_K_V_checksums_equal": true,
+      "dtype_shape_valid": true,
+      "recovery_ms": 0.045004
+    },
+    {
+      "lost_rank": 2,
+      "byte_exact": true,
+      "sha256_equal": true,
+      "all_K_V_checksums_equal": true,
+      "dtype_shape_valid": true,
+      "recovery_ms": 0.035523
+    },
+    {
+      "lost_rank": 3,
+      "byte_exact": true,
+      "sha256_equal": true,
+      "all_K_V_checksums_equal": true,
+      "dtype_shape_valid": true,
+      "recovery_ms": 0.033644
+    }
+  ],
+  "xor_ms": 0.123133,
+  "parity_sha256": "2c77f1869c97e47208cf2e0384fc8a8e6f03027e81ab393f87769e67237a2f31",
+  "status": "verified"
+}
