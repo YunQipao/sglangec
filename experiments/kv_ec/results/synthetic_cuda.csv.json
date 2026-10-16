@@ -1,0 +1,35 @@
+{
+  "kind": "synthetic_cuda",
+  "real_sglang_kv": false,
+  "node_failure_test": false,
+  "python": "3.12.15",
+  "torch": "2.13.0+cu130",
+  "torch_cuda_runtime": "13.0",
+  "numpy": "2.3.5",
+  "warmup": 10,
+  "iterations": 30,
+  "seed": 20261016,
+  "cpu_threads": 1,
+  "utc": "2026-10-16T06:12:15.253024+00:00",
+  "timing": "wall clock; excludes allocation, H2D setup, validation; includes output allocation for XOR/recovery",
+  "d2h": "sum wall time of sequential blocking copies of N blocks to pinned CPU DRAM",
+  "devices": [
+    {
+      "ordinal": 0,
+      "name": "NVIDIA GeForce RTX 4090"
+    },
+    {
+      "ordinal": 1,
+      "name": "NVIDIA GeForce RTX 4090"
+    },
+    {
+      "ordinal": 2,
+      "name": "NVIDIA GeForce RTX 4090"
+    },
+    {
+      "ordinal": 3,
+      "name": "NVIDIA GeForce RTX 4090"
+    }
+  ],
+  "sglang_installed_version": "0.5.18"
+}

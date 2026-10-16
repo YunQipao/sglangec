@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -263,6 +264,12 @@ class SchedulerBatchResultProcessor:
                     continue
 
                 if req.inflight_middle_chunks <= 0:
+                    # Opt-in, isolated research snapshot: before token append/cache/free.
+                    # The helper fails closed and never changes request or KV ownership.
+                    if os.environ.get("SGLANG_KV_EC_DEBUG") == "1":
+                        from sglang.srt.debug_utils.kv_ec import maybe_capture_prefill
+
+                        maybe_capture_prefill(self, batch, req)
                     req.time_stats.set_prefill_finished_time()
 
                     # req output_ids are set here
