@@ -1,0 +1,398 @@
+"""CPU DRAM parity-only checkpoint manager and Unix-socket service.
+
+The manager owns only pending rank buffers while a checkpoint is incomplete.
+After four valid TP=4 ranks arrive, it replaces them with one XOR parity block
+and immutable metadata. It never writes rank files and never touches SGLang.
+"""
+
+from collections import OrderedDict
+from dataclasses import dataclass, field
+import argparse
+from copy import deepcopy
+import hashlib
+import json
+import logging
+from pathlib import Path
+import queue
+import resource
+import socket
+import threading
+import time
+
+import numpy as np
+
+if __package__:
+    from .checkpoint_protocol import recv_message, send_message
+    from .rank_snapshot import validate_payload
+    from .xor_codec import encode, recover
+else:
+    from checkpoint_protocol import recv_message, send_message
+    from rank_snapshot import validate_payload
+    from xor_codec import encode, recover
+
+logger = logging.getLogger(__name__)
+
+
+PENDING, COMMITTED, FAILED, EXPIRED = "PENDING", "COMMITTED", "FAILED", "EXPIRED"
+
+
+def _identity(metadata):
+    keys = ("snapshot_id", "request_id", "model_identifier", "model_sha256", "provenance",
+            "source_commit", "core_diff_sha256", "tp_size", "layers",
+            "token_start", "token_count", "token_ids_sha256", "dtype",
+            "packed_byte_count", "pool_class", "lifetime", "completion_dependency")
+    return tuple((key, json.dumps(metadata.get(key), sort_keys=True)) for key in keys)
+
+
+def _layout_identity(metadata):
+    return tuple((record.get("layer_id"), record.get("dtype"),
+                   json.dumps(record.get("packed_shape"), sort_keys=True),
+                   record.get("k_offset"), record.get("k_nbytes"),
+                   record.get("v_offset"), record.get("v_nbytes"))
+                  for record in metadata.get("layer_records", []))
+
+
+@dataclass
+class Checkpoint:
+    snapshot_id: str
+    created: float
+    deadline: float
+    state: str = PENDING
+    ranks: dict = field(default_factory=dict)
+    parity: np.ndarray | None = None
+    metadata: dict | None = None
+    error: str | None = None
+    oracle: dict | None = None
+
+
+class ParityManager:
+    """Thread-safe TP=4 manager; no cross-rank blocking or collectives."""
+
+    def __init__(self, *, timeout=30.0, max_pending=1, retain_oracle=False, test_oracle=False):
+        if timeout <= 0 or max_pending < 1:
+            raise ValueError("timeout and max_pending must be positive")
+        self.timeout = float(timeout)
+        self.max_pending = int(max_pending)
+        self.retain_oracle = bool(retain_oracle)
+        self.test_oracle = test_oracle
+        self._checkpoints = OrderedDict()
+        self._lock = threading.Lock()
+
+    def submit(self, metadata, payload):
+        """Submit one CPU-owned rank. Returns status without waiting for peers."""
+        try:
+            snapshot_id = metadata.get("snapshot_id")
+            rank = int(metadata.get("tp_rank", -1))
+            with self._lock:
+                existing = self._checkpoints.get(snapshot_id)
+                if existing is not None and existing.state == PENDING and existing.ranks:
+                    first_metadata = next(iter(existing.ranks.values()))[1]
+                    if (_identity(metadata) != _identity(first_metadata)
+                            or _layout_identity(metadata) != _layout_identity(first_metadata)):
+                        existing.state, existing.error = FAILED, "METADATA_MISMATCH"
+                        existing.ranks.clear()
+                        existing.oracle = None
+                        return {"state": FAILED, "reason": existing.error}
+            self._validate_submission(metadata, payload)
+            snapshot_id = metadata["snapshot_id"]
+            rank = int(metadata["tp_rank"])
+            now = time.monotonic()
+            with self._lock:
+                self._expire_locked(now)
+                checkpoint = self._checkpoints.get(snapshot_id)
+                if checkpoint is None:
+                    active = sum(c.state == PENDING for c in self._checkpoints.values())
+                    if active >= self.max_pending or len(self._checkpoints) >= 16:
+                        return {"state": FAILED, "reason": "PENDING_CAPACITY"}
+                    checkpoint = Checkpoint(snapshot_id, now, now + self.timeout)
+                    self._checkpoints[snapshot_id] = checkpoint
+                if checkpoint.state != PENDING:
+                    if checkpoint.state == COMMITTED:
+                        return {"state": FAILED, "reason": "CHECKPOINT_CLOSED", "checkpoint_state": COMMITTED}
+                    return {"state": checkpoint.state, "reason": checkpoint.error}
+                first_metadata = next(iter(checkpoint.ranks.values()))[1] if checkpoint.ranks else None
+                if checkpoint.ranks and (
+                    _identity(metadata) != _identity(first_metadata)
+                    or _layout_identity(metadata) != _layout_identity(first_metadata)
+                ):
+                    checkpoint.state, checkpoint.error = FAILED, "METADATA_MISMATCH"
+                    checkpoint.ranks.clear()
+                    checkpoint.oracle = None
+                    return {"state": FAILED, "reason": checkpoint.error}
+                if rank in checkpoint.ranks:
+                    checkpoint.state, checkpoint.error = FAILED, "DUPLICATE_RANK"
+                    checkpoint.ranks.clear()
+                    checkpoint.oracle = None
+                    return {"state": FAILED, "reason": "DUPLICATE_RANK"}
+                checkpoint.ranks[rank] = (np.ascontiguousarray(payload, dtype=np.uint8).copy(), deepcopy(metadata))
+                if self.retain_oracle:
+                    checkpoint.oracle = checkpoint.oracle or {}
+                    checkpoint.oracle[rank] = checkpoint.ranks[rank][0].copy()
+                if len(checkpoint.ranks) < 4:
+                    return {"state": PENDING, "ranks": sorted(checkpoint.ranks)}
+                blocks = [checkpoint.ranks[i][0] for i in range(4)]
+                xor_started = time.perf_counter()
+                checkpoint.parity = encode(blocks)
+                xor_ms = (time.perf_counter() - xor_started) * 1000
+                oracle_checks = []
+                oracle_started = time.perf_counter()
+                if self.test_oracle:
+                    for lost in range(4):
+                        restored = recover([None if i == lost else b for i, b in enumerate(blocks)], checkpoint.parity)
+                        if not np.array_equal(restored, blocks[lost]):
+                            raise ValueError("oracle recovery mismatch")
+                        oracle_checks.append({"lost_rank": lost, "byte_exact": True})
+                    del restored
+                checkpoint.metadata = dict(next(iter(checkpoint.ranks.values()))[1])
+                checkpoint.metadata.update(state=COMMITTED, parity_bytes=int(checkpoint.parity.size),
+                                          parity_sha256=hashlib.sha256(checkpoint.parity).hexdigest(),
+                                          committed_at=time.time(), xor_ms=xor_ms,
+                                          oracle_validation_ms=(time.perf_counter()-oracle_started)*1000,
+                                          parity_commit_ms=(time.monotonic()-checkpoint.created)*1000,
+                                          oracle_checks=oracle_checks,
+                                          peak_process_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,
+                                          steady_parity_bytes=int(checkpoint.parity.nbytes))
+                checkpoint.metadata["rank_hashes"] = {
+                    str(i): {key: checkpoint.ranks[i][1][key] for key in ("sha256", "k_sha256", "v_sha256")}
+                    for i in range(4)
+                }
+                checkpoint.state = COMMITTED
+                # Input rank buffers are never retained after commit unless the
+                # explicit test-only oracle was requested.
+                checkpoint.ranks.clear()
+                logger.info("KV_EC parity COMMITTED snapshot=%s bytes=%d xor_ms=%.3f", snapshot_id, checkpoint.parity.size, xor_ms)
+                return self._status_locked(checkpoint)
+        except Exception as exc:
+            with self._lock:
+                checkpoint = self._checkpoints.get(metadata.get("snapshot_id"))
+                if checkpoint is None and len(self._checkpoints) < 16:
+                    checkpoint = Checkpoint(metadata.get("snapshot_id"), time.monotonic(), time.monotonic())
+                    self._checkpoints[metadata.get("snapshot_id")] = checkpoint
+                if checkpoint is not None and checkpoint.state == PENDING:
+                    checkpoint.state, checkpoint.error = FAILED, type(exc).__name__
+                    checkpoint.ranks.clear()
+                    checkpoint.oracle = None
+                    checkpoint.parity = None
+            logger.warning("KV_EC parity submission failed (%s)", type(exc).__name__)
+            return {"state": FAILED, "reason": type(exc).__name__}
+
+    def _validate_submission(self, metadata, payload):
+        if not isinstance(metadata.get("snapshot_id"), str) or not metadata["snapshot_id"]:
+            raise ValueError("snapshot_id required")
+        for key in ("request_id", "model_identifier", "model_sha256", "source_commit", "core_diff_sha256", "token_ids_sha256"):
+            if not isinstance(metadata.get(key), str) or not metadata[key]:
+                raise ValueError("checkpoint identity incomplete")
+        if metadata.get("tp_size") != 4 or not 0 <= metadata.get("tp_rank", -1) < 4:
+            raise ValueError("TP=4 required")
+        if metadata.get("dtype") != "torch.bfloat16":
+            raise ValueError("BF16 required")
+        if metadata.get("provenance") not in ("sglang_request", "synthetic_fixture"):
+            raise ValueError("explicit request provenance required")
+        if metadata.get("snapshot_completion_status") != "complete":
+            raise ValueError("incomplete snapshot")
+        if metadata.get("provenance") == "sglang_request":
+            count = metadata.get("token_count")
+            if not isinstance(count, int) or count not in (128, 256, 512):
+                raise ValueError("prototype supports 128/256/512 tokens")
+            for record in metadata.get("layer_records", []):
+                if any(record["packed_shape"][kind] != [count, 2, 128] for kind in ("k", "v")):
+                    raise ValueError("Qwen3 TP4 shape required")
+        payload = np.asarray(payload)
+        if payload.dtype != np.uint8 or payload.ndim != 1:
+            raise ValueError("flat uint8 payload required")
+        if payload.size != metadata.get("packed_byte_count"):
+            raise ValueError("payload length mismatch")
+        if payload.size > 64 * 1024**2:
+            raise ValueError("checkpoint byte budget exceeded")
+        if hashlib.sha256(payload).hexdigest() != metadata.get("sha256"):
+            raise ValueError("payload checksum mismatch")
+        # Full layer/K/V checksums and shape metadata are validated before the
+        # manager takes ownership of the bytes.
+        validate_payload(payload, metadata)
+
+    def _expire_locked(self, now):
+        for checkpoint in self._checkpoints.values():
+            if checkpoint.state == PENDING and now >= checkpoint.deadline:
+                checkpoint.state, checkpoint.error = EXPIRED, "TIMEOUT"
+                checkpoint.ranks.clear()
+                checkpoint.oracle = None
+
+    def _status_locked(self, checkpoint):
+        result = {"snapshot_id": checkpoint.snapshot_id, "state": checkpoint.state}
+        if checkpoint.error:
+            result["reason"] = checkpoint.error
+        if checkpoint.state == PENDING:
+            result["ranks"] = sorted(checkpoint.ranks)
+        if checkpoint.state == COMMITTED:
+            result.update(deepcopy(checkpoint.metadata))
+        return result
+
+    def status(self, snapshot_id):
+        with self._lock:
+            self._expire_locked(time.monotonic())
+            checkpoint = self._checkpoints.get(snapshot_id)
+            return {"snapshot_id": snapshot_id, "state": "UNKNOWN"} if checkpoint is None else self._status_locked(checkpoint)
+
+    def release(self, snapshot_id):
+        """Explicitly end a checkpoint's protection and drop its DRAM parity."""
+        with self._lock:
+            self._checkpoints.pop(snapshot_id, None)
+
+    def recover_for_test(self, snapshot_id, lost_rank):
+        """Explicit test oracle; production manager does not retain originals."""
+        if not self.retain_oracle:
+            raise RuntimeError("test oracle is disabled")
+        with self._lock:
+            checkpoint = self._checkpoints[snapshot_id]
+            if checkpoint.state != COMMITTED or checkpoint.oracle is None:
+                raise RuntimeError("checkpoint is not committed")
+            blocks = [checkpoint.oracle[i] for i in range(4)]
+            return recover([None if i == lost_rank else block for i, block in enumerate(blocks)], checkpoint.parity)
+
+
+class ParityManagerServer:
+    def __init__(self, path, manager=None):
+        self.path = Path(path)
+        self.manager = manager or ParityManager()
+        self._stop = threading.Event()
+        self._server = None
+        self.ready = threading.Event()
+
+    def serve_forever(self):
+        if self.path.exists():
+            raise FileExistsError("refusing to replace existing socket")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            self._server = server
+            server.bind(str(self.path))
+            self.path.chmod(0o600)
+            server.listen(16)
+            server.settimeout(0.5)
+            self.ready.set()
+            while not self._stop.is_set():
+                try:
+                    conn, _ = server.accept()
+                except socket.timeout:
+                    with self.manager._lock:
+                        self.manager._expire_locked(time.monotonic())
+                    continue
+                except OSError:
+                    if self._stop.is_set():
+                        break
+                    raise
+                self._handle(conn)
+        self.path.unlink(missing_ok=True)
+
+    def _handle(self, conn):
+        with conn:
+            conn.settimeout(2)
+            try:
+                metadata, payload = recv_message(conn)
+                if metadata.get("kind") == "status":
+                    response = self.manager.status(metadata.get("snapshot_id"))
+                else:
+                    response = self.manager.submit(metadata, np.frombuffer(payload, dtype=np.uint8))
+            except Exception as exc:
+                response = {"state": FAILED, "reason": type(exc).__name__}
+            try:
+                send_message(conn, {"kind": "response", **response}, b"")
+            except OSError:
+                pass
+
+    def stop(self):
+        self._stop.set()
+        if self._server:
+            try:
+                self._server.close()
+            except OSError:
+                pass
+
+
+class AsyncParityClient:
+    """Bounded, fire-and-forget Worker-side IPC client.
+
+    The submit call only copies an owned CPU payload into a bounded queue. A
+    background thread performs socket transfer and never participates in model
+    collectives or scheduler control flow.
+    """
+
+    def __init__(self, path, *, max_queue=1, timeout=0.25):
+        if max_queue < 1 or timeout <= 0:
+            raise ValueError("bounded queue and positive timeout required")
+        self.path = str(path)
+        self.timeout = float(timeout)
+        self.queue = queue.Queue(maxsize=max_queue)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="kv-ec-parity-ipc", daemon=True)
+        self._thread.start()
+
+    def submit(self, metadata, payload):
+        started = time.perf_counter_ns()
+        try:
+            payload = bytes(payload)
+            self.queue.put_nowait((deepcopy(metadata), payload))
+            return {"accepted": True, "enqueue_ms": (time.perf_counter_ns() - started) / 1e6}
+        except queue.Full:
+            return {"accepted": False, "reason": "QUEUE_FULL", "enqueue_ms": (time.perf_counter_ns() - started) / 1e6}
+
+    def _run(self):
+        while not self._stop.is_set() or not self.queue.empty():
+            try:
+                metadata, payload = self.queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            try:
+                response = submit_once(self.path, metadata, payload, timeout=self.timeout)
+                logger.info("KV_EC parity IPC snapshot=%s rank=%s state=%s ipc_ms=%.3f",
+                            metadata.get("snapshot_id"), metadata.get("tp_rank"),
+                            response.get("state"), response.get("ipc_ms", -1.0))
+            except Exception as exc:
+                logger.warning("KV_EC parity IPC failed snapshot=%s rank=%s (%s)",
+                               metadata.get("snapshot_id"), metadata.get("tp_rank"),
+                               type(exc).__name__)
+            finally:
+                self.queue.task_done()
+                # Do not pin the last full rank payload in an idle worker's
+                # local variables after the queue task has completed.
+                del metadata, payload
+
+    def close(self, *, drain=False):
+        self._stop.set()
+        # Bounded join even when the manager is unavailable. Never called by
+        # the scheduler; queued data is owned only by this background client.
+        self._thread.join(timeout=(self.timeout * (self.queue.maxsize + 1) + 1) if drain else 0)
+
+
+def submit_once(path, metadata, payload, timeout=0.25):
+    started = time.perf_counter_ns()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout)
+        client.connect(str(path))
+        send_message(client, metadata, bytes(payload))
+        response, _ = recv_message(client)
+    response["ipc_ms"] = (time.perf_counter_ns() - started) / 1e6
+    return response
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--socket", type=Path, required=True)
+    parser.add_argument("--timeout", type=float, default=30)
+    parser.add_argument("--max-pending", type=int, default=1)
+    parser.add_argument("--test-oracle", action="store_true", help="verify all erasures transiently before releasing inputs")
+    parser.add_argument("--status", help="query a snapshot instead of starting a server")
+    parser.add_argument("--output", type=Path, help="exclusive-create status report (metadata only)")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO)
+    if args.status:
+        encoded = json.dumps(submit_once(args.socket, {"kind": "status", "snapshot_id": args.status}, b"", timeout=2), indent=2)
+        if args.output:
+            with args.output.open("x") as stream:
+                stream.write(encoded + "\n")
+        print(encoded)
+        return
+    ParityManagerServer(args.socket, ParityManager(timeout=args.timeout, max_pending=args.max_pending, test_oracle=args.test_oracle)).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -105,7 +105,7 @@ def assemble(directory):
     if tp not in (1, 2, 4):
         raise ValueError("TP must be 1, 2 or 4")
     expected = {f"rank_{r}.json" for r in range(tp)}
-    if {p.name for p in directory.glob("rank_*.json")} != expected:
+    if {p.name for p in directory.glob("rank_*.json") if not p.name.endswith(".timing.json")} != expected:
         raise ValueError("missing, duplicate or unexpected rank sidecars")
     if {p.name for p in directory.glob("rank_*.bin")} != {f"rank_{r}.bin" for r in range(tp)}:
         raise ValueError("missing or unexpected rank binaries")

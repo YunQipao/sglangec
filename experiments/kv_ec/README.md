@@ -1,5 +1,9 @@
 # KV EC 第一阶段：源码分析、CPU XOR 与 Snapshot 格式
 
+CPU DRAM parity-only 最小在线原型：见 [PARITY_ONLY.md](PARITY_ONLY.md)，
+包括状态机、IPC、内存策略、手动 GPU 命令与测量限制。以下早期阶段证据描述
+保留作历史记录，不代表新增在线实验已在本会话完成。
+
 ## 范围与证据等级
 
 分析版本：本地 `v0.5.18`，commit `71de97b264b04dcd514cf904003028aefe9775c8`。

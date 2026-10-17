@@ -27,6 +27,7 @@ PROCESS_EPOCH = str(uuid.uuid4())
 # mutating the frozen+slots result processor.
 _ATTEMPTED = set()
 _SOURCE_IDENTITY_CACHE = {}
+_PARITY_CLIENTS = {}
 
 
 class CaptureRejected(ValueError):
@@ -116,6 +117,11 @@ def source_identity(model_path):
     fingerprint; it is outside forward and logs no prompt or token content.
     """
     root = Path(model_path).resolve()
+    prepared = os.environ.get("SGLANG_KV_EC_PREPARED_IDENTITY")
+    if prepared:
+        identity = json.loads(prepared)
+        require(identity["model_identifier"] == str(root), "prepared_model_mismatch")
+        return dict(identity)
     cached = _SOURCE_IDENTITY_CACHE.get(str(root))
     if cached is not None:
         return dict(cached)
@@ -213,6 +219,9 @@ def capture(scheduler, batch, req, config):
         gather_started = time.perf_counter_ns()
         k_selected = select_raw_bytes(k, slots)
         v_selected = select_raw_bytes(v, slots)
+        # Complete gather before timing D2H; otherwise its asynchronous GPU
+        # work would be incorrectly charged to the blocking CPU copy.
+        torch.cuda.current_stream(device).synchronize()
         gather_ms += (time.perf_counter_ns() - gather_started) / 1e6
         d2h_started = time.perf_counter_ns()
         kb = k_selected.to("cpu", non_blocking=False).numpy().copy()
@@ -266,8 +275,39 @@ def capture(scheduler, batch, req, config):
     phase["d2h_ms"] = d2h_ms
     phase["source_recheck_ms"] = source_recheck_ms
     meta["performance_ms"] = phase
-    write_rank_files(directory, payload, meta)
+    parity_socket = os.environ.get("SGLANG_KV_EC_PARITY_SOCKET")
+    if parity_socket:
+        # The client owns a bytes copy in a bounded background queue. No rank
+        # file is written and this scheduler thread never waits for peers.
+        from .parity_manager import AsyncParityClient
+
+        client = _PARITY_CLIENTS.get(parity_socket)
+        if client is None:
+            client = AsyncParityClient(
+                parity_socket,
+                max_queue=int(os.environ.get("SGLANG_KV_EC_PARITY_QUEUE", "1")),
+                timeout=float(os.environ.get("SGLANG_KV_EC_PARITY_TIMEOUT", "0.25")),
+            )
+            _PARITY_CLIENTS[parity_socket] = client
+        enqueue = client.submit(meta, payload)
+        phase["ipc_enqueue_ms"] = enqueue["enqueue_ms"]
+        meta["parity_protection"] = "ENQUEUED" if enqueue["accepted"] else enqueue["reason"]
+        if not enqueue["accepted"]:
+            logger.warning("KV_EC parity not protected snapshot=%s rank=%d reason=%s",
+                           config.snapshot_id, ps.tp_rank, enqueue["reason"])
+    else:
+        write_rank_files(directory, payload, meta)
     phase["snapshot_end_to_end_ms"] = (time.perf_counter_ns() - end_to_end_started) / 1e6
+    phase["scheduler_blocking_ms"] = phase["snapshot_end_to_end_ms"]
+    phase["steady_snapshot_ms"] = phase["snapshot_end_to_end_ms"] - phase["model_fingerprint_ms"]
+    directory.mkdir(parents=True, exist_ok=True)
+    # Final timing data is separate from the immutable rank evidence. Its own
+    # small diagnostic write is explicitly outside scheduler_blocking_ms.
+    with (directory / f"rank_{ps.tp_rank}.timing.json").open("x") as stream:
+        json.dump({"snapshot_id": config.snapshot_id, "tp_rank": ps.tp_rank,
+                   "parity_protection": meta.get("parity_protection", "DEBUG_DISK_ONLY"),
+                   "performance_ms": phase,
+                   "diagnostic_write_included": False}, stream, indent=2)
     logger.info(
         "KV_EC_DEBUG timing rank=%d snapshot=%s model_fingerprint_ms=%.3f "
         "gpu_sync_ms=%.3f kv_gather_ms=%.3f d2h_ms=%.3f source_recheck_ms=%.3f "
