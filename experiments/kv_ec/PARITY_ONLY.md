@@ -139,6 +139,61 @@ no `rank_N.bin` or `rank_N.json`; only diagnostic timing/error JSON is allowed.
 The 128/512-token all-layer parity sizes are 4.5/18 MiB respectively.
 Query/save commit only for parity mode; baseline/debug have no manager checkpoint.
 
+## Protection modes and timing accounting
+
+`launch_debug.py --mode capture` selects `DEBUG_SAFE`: full selected-source
+recheck, per-segment and aggregate SHA-256, strict lifetime/metadata guards,
+and (when requested) disk evidence. `--mode parity` selects experimental
+`FAST_PARITY`: it retains request/model/token-range/TP/layout/snapshot and
+payload integrity validation, but omits the second full selected-source read
+and rank-file writes. It never reads a released slot and still uses a bounded
+background IPC queue; a full queue is reported as failure, never COMMITTED.
+Both modes are disabled unless explicitly selected by the launcher.
+
+Rank timing JSON separates CPU wall-clock regions: slot metadata preparation,
+GPU gather, GPU fence wait, blocking D2H, source recheck, SHA-256,
+`numpy.concatenate`, IPC/object enqueue and a residual `unaccounted_ms`.
+`gpu_sync_ms` is a CPU wait around CUDA work; it is not a CUDA-event kernel
+duration. Regions are non-nested for accounting, while the final residual
+includes object construction, metadata checks, final lifetime guards and any
+future uninstrumented work. The diagnostic JSON write is measured separately
+and excluded from `scheduler_blocking_ms`.
+
+For the current path, GPU D2H produces one owned numpy chunk per K/V segment;
+`AsyncParityClient.submit` makes one immutable queue copy of the packed payload,
+and `checkpoint_protocol.send_message` makes the socket-side immutable bytes
+conversion (plus kernel/socket buffering). The manager then validates its
+received buffer and releases all four rank buffers immediately after XOR
+COMMITTED; it retains only parity and metadata.
+
+The current synchronous D2H path may use pinned host buffers when available,
+but keeps the stream/device fence. An asynchronous stream/event copy is not
+enabled: no slot lease proves that the request's physical slots cannot be
+freed or reused before the copy completes. Removing that fence would be an
+incorrect performance result.
+
+Useful CPU-only checks from the repository root (the managed environment in
+this host has no torch/GPU) are:
+
+```bash
+python -m py_compile experiments/kv_ec/{debug_capture,parity_manager,launch_debug}.py
+PYTHONPATH=. python -m pytest -q experiments/kv_ec/test_parity_manager.py
+PYTHONPATH=. python -m pytest -q experiments/kv_ec/test_kv_ec.py
+```
+
+On a GPU host, use a fresh snapshot ID for each trial and run the existing
+launcher/request flow, then query the manager and compare output IDs:
+
+```bash
+python -m experiments.kv_ec.parity_manager --socket "$RUN/manager.sock" --test-oracle
+python -m experiments.kv_ec.launch_debug --mode parity --tp 4 --gpus 0,1,2,3 \
+  --parity-socket "$RUN/manager.sock" --snapshot-id "$SNAP" --request-id "$RID" \
+  --token-count 256 --layers all --output "$OUT" --port 30281
+python -m experiments.kv_ec.request_debug request --url http://127.0.0.1:30281 \
+  --request-id "$RID" --prompt-tokens 768 --stream-metrics --output "$OUT/response.json"
+python -m experiments.kv_ec.parity_manager --socket "$RUN/manager.sock" --status "$SNAP"
+```
+
 Save the final live status in a fresh metadata-only report:
 
 ```bash

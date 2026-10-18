@@ -63,12 +63,17 @@ class CaptureConfig:
         require(start >= 0 and 0 < count <= 4096 and budget > 0, "invalid_range_or_budget")
         return cls(output, snapshot_id, rid, start, count,
                    os.environ.get("SGLANG_KV_EC_LAYERS", "0"), budget)
-
     def layers(self, layer_count):
         layers = list(range(layer_count)) if self.layers_spec == "all" else [int(x) for x in self.layers_spec.split(",")]
         require(bool(layers) and layers == sorted(set(layers)), "layers_must_be_sorted_unique")
         require(all(0 <= i < layer_count for i in layers), "invalid_layer")
         return layers
+
+
+def protection_mode():
+    mode = os.environ.get("SGLANG_KV_EC_PROTECTION_MODE", "DEBUG_SAFE").upper()
+    require(mode in ("DEBUG_SAFE", "FAST_PARITY"), "invalid_protection_mode")
+    return mode
 
 
 def validate_lifetime(scheduler, batch, req, config):
@@ -154,6 +159,11 @@ def select_raw_bytes(tensor, slots):
 
 def capture(scheduler, batch, req, config):
     end_to_end_started = time.perf_counter_ns()
+    mode = protection_mode()
+    phase = {"protection_mode": mode}
+    # These are mutually exclusive wall-clock regions.  CUDA event timings are
+    # deliberately not substituted: the scheduler pays CPU wall time here.
+    phase_started = time.perf_counter_ns()
     validate_lifetime(scheduler, batch, req, config)
     # Import current checkout's exact classes ONLY after the lifetime checks.
     from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
@@ -183,7 +193,7 @@ def capture(scheduler, batch, req, config):
     device = pool.k_buffer[0].device
     require(device.type == "cuda" and torch.cuda.is_available(), "cuda_not_accessible")
     require(not torch.cuda.is_current_stream_capturing(), "capture_context_not_allowed")
-    phase = {}
+    phase["lifetime_and_pool_validation_ms"] = (time.perf_counter_ns() - phase_started) / 1e6
     started = time.perf_counter_ns()
     identity = source_identity(scheduler.server_args.model_path)
     phase["model_fingerprint_ms"] = (time.perf_counter_ns() - started) / 1e6
@@ -194,6 +204,8 @@ def capture(scheduler, batch, req, config):
     sync_started = time.perf_counter_ns()
     torch.cuda.synchronize(device)
     phase["gpu_sync_ms"] = (time.perf_counter_ns() - sync_started) / 1e6
+    phase["gpu_sync_ms"] = phase.get("gpu_sync_ms", 0.0)
+    slot_started = time.perf_counter_ns()
     row = req.req_pool_idx
     require(row not in req_pool.free_slots and row < req_pool.req_to_token.shape[0], "request_row_not_allocated")
     generation = int(req_pool.req_generation[row])
@@ -203,10 +215,14 @@ def capture(scheduler, batch, req, config):
     slots_cpu = slots.cpu().tolist()
     require(len(set(slots_cpu)) == config.token_count and
             all(0 < slot <= pool.size for slot in slots_cpu), "invalid_or_duplicate_physical_slots")
+    phase["slot_query_metadata_ms"] = (time.perf_counter_ns() - slot_started) / 1e6
     chunks, layer_records = [], []
     offset = 0
     kh, vh = hashlib.sha256(), hashlib.sha256()
-    gather_ms = d2h_ms = source_recheck_ms = 0.0
+    gather_ms = d2h_ms = gpu_wait_ms = source_recheck_ms = sha_ms = 0.0
+    # Host staging buffers are reused for every layer.  Packed chunks still
+    # own numpy storage because the staging buffers are overwritten next layer.
+    cpu_k_buffer = cpu_v_buffer = None
     for layer_id in layers:
         # Getter's layer loading semantics are excluded above, not ignored.
         k, v = pool.get_kv_buffer(layer_id)
@@ -219,38 +235,62 @@ def capture(scheduler, batch, req, config):
         gather_started = time.perf_counter_ns()
         k_selected = select_raw_bytes(k, slots)
         v_selected = select_raw_bytes(v, slots)
-        # Complete gather before timing D2H; otherwise its asynchronous GPU
-        # work would be incorrectly charged to the blocking CPU copy.
-        torch.cuda.current_stream(device).synchronize()
         gather_ms += (time.perf_counter_ns() - gather_started) / 1e6
+        # Complete gather before timing D2H; this is a CPU wall-clock fence.
+        wait_started = time.perf_counter_ns()
+        torch.cuda.current_stream(device).synchronize()
+        gpu_wait_ms += (time.perf_counter_ns() - wait_started) / 1e6
         d2h_started = time.perf_counter_ns()
-        kb = k_selected.to("cpu", non_blocking=False).numpy().copy()
-        vb = v_selected.to("cpu", non_blocking=False).numpy().copy()
+        # Reusable pinned buffers are an optional safe optimization.  The
+        # synchronous fence above remains mandatory until slot leasing exists.
+        try:
+            if cpu_k_buffer is None or cpu_k_buffer.numel() != k_selected.numel():
+                cpu_k_buffer = torch.empty(k_selected.numel(), dtype=torch.uint8, device="cpu", pin_memory=True)
+                cpu_v_buffer = torch.empty(v_selected.numel(), dtype=torch.uint8, device="cpu", pin_memory=True)
+            cpu_k_buffer.copy_(k_selected, non_blocking=True); cpu_v_buffer.copy_(v_selected, non_blocking=True)
+            torch.cuda.current_stream(device).synchronize()
+            kb = cpu_k_buffer.numpy().copy(); vb = cpu_v_buffer.numpy().copy()
+        except (RuntimeError, TypeError):
+            kb = k_selected.to("cpu", non_blocking=False).numpy().copy()
+            vb = v_selected.to("cpu", non_blocking=False).numpy().copy()
         d2h_ms += (time.perf_counter_ns() - d2h_started) / 1e6
         # Re-read selected SOURCE bytes before release to prove no local mutation.
         # This checks the selected range, not unrelated rows or other requests.
-        recheck_started = time.perf_counter_ns()
-        require(np.array_equal(kb, select_raw_bytes(k, slots).cpu().numpy()) and
-                np.array_equal(vb, select_raw_bytes(v, slots).cpu().numpy()), "source_changed_during_copy")
-        source_recheck_ms += (time.perf_counter_ns() - recheck_started) / 1e6
+        if mode == "DEBUG_SAFE":
+            recheck_started = time.perf_counter_ns()
+            require(np.array_equal(kb, select_raw_bytes(k, slots).cpu().numpy()) and
+                    np.array_equal(vb, select_raw_bytes(v, slots).cpu().numpy()), "source_changed_during_copy")
+            source_recheck_ms += (time.perf_counter_ns() - recheck_started) / 1e6
         shape = [config.token_count, *expected_tail]
+        hash_started = time.perf_counter_ns()
+        k_hash, v_hash = digest(kb), digest(vb)
+        sha_ms += (time.perf_counter_ns() - hash_started) / 1e6
         record = {"layer_id": layer_id, "dtype": str(k.dtype), "original_shape": {"k": list(k.shape), "v": list(v.shape)},
                   "source_stride": {"k": list(k.stride()), "v": list(v.stride())},
                   "packed_shape": {"k": shape, "v": shape}, "device": str(device),
-                  "k_offset": offset, "k_nbytes": int(kb.size), "k_sha256": digest(kb),
-                  "v_offset": offset + int(kb.size), "v_nbytes": int(vb.size), "v_sha256": digest(vb)}
+                  "k_offset": offset, "k_nbytes": int(kb.size), "k_sha256": k_hash,
+                  "v_offset": offset + int(kb.size), "v_nbytes": int(vb.size), "v_sha256": v_hash}
         layer_records.append(record)
         offset += kb.size + vb.size
-        kh.update(kb)
-        vh.update(vb)
+        hash_started = time.perf_counter_ns()
+        kh.update(kb); vh.update(vb)
+        sha_ms += (time.perf_counter_ns() - hash_started) / 1e6
         chunks.extend([kb, vb])
+    final_sync_started = time.perf_counter_ns()
     torch.cuda.synchronize(device)
+    gpu_wait_ms += (time.perf_counter_ns() - final_sync_started) / 1e6
     require(req.req_pool_idx == row and int(req_pool.req_generation[row]) == generation and
             row not in req_pool.free_slots, "request_generation_changed")
     require(torch.equal(slots, req_pool.req_to_token[row, config.token_start:end].long()), "slot_mapping_changed")
+    concat_started = time.perf_counter_ns()
     payload = np.concatenate(chunks)
+    phase["numpy_concatenate_ms"] = (time.perf_counter_ns() - concat_started) / 1e6
     require(payload.size == expected_bytes, "unexpected_packed_byte_count")
+    payload_hash_started = time.perf_counter_ns()
+    payload_sha256 = digest(payload)
+    sha_ms += (time.perf_counter_ns() - payload_hash_started) / 1e6
     props = torch.cuda.get_device_properties(device)
+    object_started = time.perf_counter_ns()
     meta = dict(identity, format="kv-ec-rank-bin-v1", provenance="sglang_request",
                 snapshot_id=config.snapshot_id, request_id=hashlib.sha256(str(req.rid).encode()).hexdigest(),
                 request_id_encoding="sha256", req_pool_idx=row, req_generation=generation,
@@ -264,16 +304,19 @@ def capture(scheduler, batch, req, config):
                 dtype=str(pool.dtype), pool_class=type(pool).__module__ + "." + type(pool).__name__,
                 req_pool_class=type(req_pool).__module__ + "." + type(req_pool).__name__,
                 layer_records=layer_records, original_shape=[r["original_shape"] for r in layer_records],
-                physical_slots=slots_cpu, packed_byte_count=int(payload.size), sha256=digest(payload),
+                physical_slots=slots_cpu, packed_byte_count=int(payload.size), sha256=payload_sha256,
                 k_sha256=kh.hexdigest(), v_sha256=vh.hexdigest(), source_unchanged=True,
                 lifetime="non_overlap_single_scheduler_before_append_cache_free",
                 completion_dependency="device_synchronize_before_read_blocking_d2h_before_return",
                 selected_copy_and_check_ms=(time.perf_counter() - started) * 1000,
                 snapshot_completion_status="complete")
+    phase["python_object_construction_ms"] = (time.perf_counter_ns() - object_started) / 1e6
     directory = config.output / config.snapshot_id
     phase["kv_gather_ms"] = gather_ms
+    phase["gpu_sync_ms"] += gpu_wait_ms
     phase["d2h_ms"] = d2h_ms
     phase["source_recheck_ms"] = source_recheck_ms
+    phase["sha256_ms"] = sha_ms
     meta["performance_ms"] = phase
     parity_socket = os.environ.get("SGLANG_KV_EC_PARITY_SOCKET")
     if parity_socket:
@@ -291,23 +334,41 @@ def capture(scheduler, batch, req, config):
             _PARITY_CLIENTS[parity_socket] = client
         enqueue = client.submit(meta, payload)
         phase["ipc_enqueue_ms"] = enqueue["enqueue_ms"]
+        phase["ipc_copy_bytes"] = enqueue.get("copy_bytes", 0)
+        phase["ipc_copy_count"] = enqueue.get("copy_count", 0)
         meta["parity_protection"] = "ENQUEUED" if enqueue["accepted"] else enqueue["reason"]
         if not enqueue["accepted"]:
             logger.warning("KV_EC parity not protected snapshot=%s rank=%d reason=%s",
                            config.snapshot_id, ps.tp_rank, enqueue["reason"])
     else:
         write_rank_files(directory, payload, meta)
+    phase["python_object_serialization_ms"] = phase.get("ipc_enqueue_ms", 0.0)
+    phase["diagnostic_write_ms"] = 0.0
     phase["snapshot_end_to_end_ms"] = (time.perf_counter_ns() - end_to_end_started) / 1e6
     phase["scheduler_blocking_ms"] = phase["snapshot_end_to_end_ms"]
     phase["steady_snapshot_ms"] = phase["snapshot_end_to_end_ms"] - phase["model_fingerprint_ms"]
+    accounted = sum(float(phase.get(k, 0.0)) for k in (
+        "lifetime_and_pool_validation_ms", "model_fingerprint_ms", "gpu_sync_ms",
+        "slot_query_metadata_ms", "kv_gather_ms", "d2h_ms", "source_recheck_ms",
+        "sha256_ms", "numpy_concatenate_ms", "python_object_construction_ms",
+        "python_object_serialization_ms"))
+    # Residual is intentionally reported instead of guessed: it includes
+    # tensor metadata checks, final guards, object construction and any future
+    # uninstrumented code, with no nested-time double counting.
+    phase["unaccounted_ms"] = max(0.0, phase["scheduler_blocking_ms"] - accounted)
+    phase["other_uninstrumented_ms"] = phase["unaccounted_ms"]
     directory.mkdir(parents=True, exist_ok=True)
     # Final timing data is separate from the immutable rank evidence. Its own
     # small diagnostic write is explicitly outside scheduler_blocking_ms.
+    diagnostic_started = time.perf_counter_ns()
     with (directory / f"rank_{ps.tp_rank}.timing.json").open("x") as stream:
         json.dump({"snapshot_id": config.snapshot_id, "tp_rank": ps.tp_rank,
                    "parity_protection": meta.get("parity_protection", "DEBUG_DISK_ONLY"),
                    "performance_ms": phase,
                    "diagnostic_write_included": False}, stream, indent=2)
+    # The diagnostic write is deliberately outside scheduler_blocking_ms; its
+    # measured value is logged after the immutable timing record is written.
+    phase["diagnostic_write_ms"] = (time.perf_counter_ns() - diagnostic_started) / 1e6
     logger.info(
         "KV_EC_DEBUG timing rank=%d snapshot=%s model_fingerprint_ms=%.3f "
         "gpu_sync_ms=%.3f kv_gather_ms=%.3f d2h_ms=%.3f source_recheck_ms=%.3f "

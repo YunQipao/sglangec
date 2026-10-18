@@ -63,6 +63,7 @@ def recv_message(sock):
 def send_message(sock, metadata, payload):
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         raise TypeError("checkpoint payload must be bytes-like")
+    # One explicit immutable conversion is the socket-side payload copy.
     payload = bytes(payload)
     metadata = dict(metadata, payload_bytes=len(payload))
     sock.sendall(encode_header(metadata))

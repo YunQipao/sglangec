@@ -329,11 +329,17 @@ class AsyncParityClient:
     def submit(self, metadata, payload):
         started = time.perf_counter_ns()
         try:
+            # Queue ownership requires one immutable bytes copy.  The socket
+            # writer may perform one additional kernel-facing bytes conversion;
+            # expose both counts so rank timing never hides transport copies.
             payload = bytes(payload)
+            copied = len(payload)
             self.queue.put_nowait((deepcopy(metadata), payload))
-            return {"accepted": True, "enqueue_ms": (time.perf_counter_ns() - started) / 1e6}
+            return {"accepted": True, "enqueue_ms": (time.perf_counter_ns() - started) / 1e6,
+                    "copy_bytes": copied, "copy_count": 1}
         except queue.Full:
-            return {"accepted": False, "reason": "QUEUE_FULL", "enqueue_ms": (time.perf_counter_ns() - started) / 1e6}
+            return {"accepted": False, "reason": "QUEUE_FULL", "enqueue_ms": (time.perf_counter_ns() - started) / 1e6,
+                    "copy_bytes": 0, "copy_count": 0}
 
     def _run(self):
         while not self._stop.is_set() or not self.queue.empty():
@@ -368,7 +374,7 @@ def submit_once(path, metadata, payload, timeout=0.25):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(timeout)
         client.connect(str(path))
-        send_message(client, metadata, bytes(payload))
+        send_message(client, metadata, payload)
         response, _ = recv_message(client)
     response["ipc_ms"] = (time.perf_counter_ns() - started) / 1e6
     return response

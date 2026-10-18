@@ -40,6 +40,7 @@ def main():
             p.error("port unavailable; choose another port, do not kill other services")
     os.environ.update(CUDA_VISIBLE_DEVICES=args.gpus, CUDA_DEVICE_ORDER="PCI_BUS_ID",
                       SGLANG_KV_EC_DEBUG="0" if args.mode == "baseline" else "1",
+                      SGLANG_KV_EC_PROTECTION_MODE=("FAST_PARITY" if args.mode == "parity" else "DEBUG_SAFE"),
                       SGLANG_KV_EC_OUTPUT_DIR=str(args.output), SGLANG_KV_EC_SNAPSHOT_ID=args.snapshot_id,
                       SGLANG_KV_EC_REQUEST_ID=args.request_id, SGLANG_KV_EC_TOKEN_START="0",
                       SGLANG_KV_EC_TOKEN_COUNT=str(args.token_count), SGLANG_KV_EC_LAYERS=args.layers)
@@ -60,7 +61,8 @@ def main():
         with (args.output / (args.snapshot_id + "-initialization.json")).open("x") as stream:
             json.dump({"identity": identity, "model_fingerprint_initialization_ms": initialization_ms}, stream, indent=2)
         print("KV_EC model fingerprint initialized before server startup:", initialization_ms, "ms", flush=True)
-    # Both modes use identical inference settings; only the hook switch differs.
+    # Both protected modes use identical inference settings; only protection
+    # validation/transport work differs. FAST_PARITY remains experimental.
     argv = [sys.executable, "-m", "sglang.launch_server", "--model-path", args.model,
             "--host", "127.0.0.1", "--port", str(args.port), "--tp-size", str(args.tp),
             "--mem-fraction-static", "0.60", "--context-length", "4096", "--dtype", "bfloat16",
