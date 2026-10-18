@@ -1,0 +1,17 @@
+{
+  "snapshot_id": "parity-256-20261018T070108",
+  "tp_rank": 0,
+  "parity_protection": "ENQUEUED",
+  "performance_ms": {
+    "model_fingerprint_ms": 0.09904,
+    "gpu_sync_ms": 0.053865,
+    "kv_gather_ms": 4.374821999999999,
+    "d2h_ms": 8.893985999999998,
+    "source_recheck_ms": 12.666631000000002,
+    "ipc_enqueue_ms": 6.608208,
+    "snapshot_end_to_end_ms": 131.905846,
+    "scheduler_blocking_ms": 131.905846,
+    "steady_snapshot_ms": 131.806806
+  },
+  "diagnostic_write_included": false
+}
