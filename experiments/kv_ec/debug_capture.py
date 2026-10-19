@@ -170,6 +170,8 @@ def capture(scheduler, batch, req, config):
     require(defer_checksum_setting in ("0", "1"), "invalid_checksum_deferral_setting")
     deferred_checksums = (mode == "FAST_PARITY" and bool(parity_socket)
                           and defer_checksum_setting == "1")
+    scheduler_lease = None
+    slot_generations = None
     phase = {"protection_mode": mode, "transfer_mode": transfer,
              "timing_schema": "kv-ec-exclusive-wall-v2", "detailed": detailed,
              "cpu_profile_enabled": os.environ.get("SGLANG_KV_EC_CPU_PROFILE") == "1",
@@ -233,6 +235,22 @@ def capture(scheduler, batch, req, config):
         slots_cpu = slots.cpu().tolist()
         require(len(set(slots_cpu)) == config.token_count and
                 all(0 < slot <= pool.size for slot in slots_cpu), "invalid_or_duplicate_physical_slots")
+        if os.environ.get("SGLANG_KV_EC_SCHEDULER_LEASE") == "1":
+            from .scheduler_recovery_guard import SchedulerLeaseTransaction
+
+            scheduler_lease = SchedulerLeaseTransaction.begin(
+                scheduler,
+                req,
+                token_start=config.token_start,
+                token_count=config.token_count,
+                snapshot_id=config.snapshot_id,
+                slots=tuple(slots_cpu),
+                req_generation=generation,
+            )
+            slot_generations = list(
+                scheduler_lease.metadata["slot_generations_before"]
+            )
+            phase["scheduler_lease"] = dict(scheduler_lease.metadata)
     chunks, layer_records = [], []
     offset = 0
     kh, vh = hashlib.sha256(), hashlib.sha256()
@@ -330,6 +348,11 @@ def capture(scheduler, batch, req, config):
             del k_selected, v_selected, kb, vb
     with timing.region("final_device_sync_ms"):
         torch.cuda.synchronize(device)
+    if scheduler_lease is not None:
+        with timing.region("scheduler_lease_validation_ms"):
+            phase["scheduler_lease"] = scheduler_lease.complete(
+                scheduler, req, slots=tuple(slots_cpu)
+            )
     with timing.region("final_request_generation_check_ms"):
         require(req.req_pool_idx == row and int(req_pool.req_generation[row]) == generation and
                 row not in req_pool.free_slots, "request_generation_changed")
@@ -350,7 +373,7 @@ def capture(scheduler, batch, req, config):
     meta = dict(identity, format="kv-ec-rank-bin-v1", provenance="sglang_request",
                 snapshot_id=config.snapshot_id, request_id=request_hash,
                 request_id_encoding="sha256", req_pool_idx=row, req_generation=generation,
-                slot_generation=None, process_epoch=PROCESS_EPOCH, pid=os.getpid(),
+                slot_generation=slot_generations, process_epoch=PROCESS_EPOCH, pid=os.getpid(),
                 tp_rank=ps.tp_rank, tp_size=ps.tp_size, gpu_id=ps.gpu_id,
                 cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
                 cuda_device=str(device), gpu_name=props.name, gpu_uuid=str(getattr(props, "uuid", "unavailable")),
@@ -515,6 +538,16 @@ def maybe_capture(scheduler, batch, req):
         # Failure is local, never changes sampling or distributed control flow.
         reason = str(exc) if isinstance(exc, CaptureRejected) else type(exc).__name__
         logger.warning("KV_EC_DEBUG rejected rank=%d reason=%s; inference continues", rank, reason)
+        try:
+            from .scheduler_recovery_guard import abort_scheduler_lease
+
+            abort_scheduler_lease(snapshot_id, req, scheduler)
+        except Exception as abort_exc:
+            logger.warning(
+                "KV_EC scheduler lease abort failed rank=%d (%s)",
+                rank,
+                type(abort_exc).__name__,
+            )
         try:
             if config is None:
                 config = replace(CaptureConfig.from_env(), snapshot_id=snapshot_id, target_rid=target)

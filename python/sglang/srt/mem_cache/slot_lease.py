@@ -65,9 +65,13 @@ class SlotLeaseRegistry:
         self._expire()
         return len(self._leases)
 
-    def enable(self) -> None:
+    def enable(self, active_slots: Iterable[int] = ()) -> None:
         if self._closed:
             raise SlotLeaseRejected("registry_closed")
+        for slot in active_slots:
+            slot = int(slot)
+            if 0 < slot < self._generation.numel() and self._generation[slot] == 0:
+                self._generation[slot] = 1
         self._enabled = True
 
     def disable(self) -> None:

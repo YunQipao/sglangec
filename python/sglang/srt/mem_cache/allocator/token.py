@@ -84,14 +84,16 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         else:
             self.free_group.append(self._copy_for_free_group(free_index))
 
-    def enable_slot_leases(self, *, timeout_s: float = 5.0) -> None:
+    def enable_slot_leases(
+        self, *, timeout_s: float = 5.0, active_slots=None
+    ) -> None:
         if timeout_s != self.slot_lease_registry._timeout_s:
             if self.slot_lease_registry.active_lease_count:
                 raise SlotLeaseRejected("active_leases")
             self.slot_lease_registry = SlotLeaseRegistry(
                 self.size, timeout_s=timeout_s
             )
-        self.slot_lease_registry.enable()
+        self.slot_lease_registry.enable(active_slots or ())
 
     def slot_generations(self, slots: torch.Tensor | list[int]) -> tuple[int, ...]:
         values = [int(slot) for slot in (slots.tolist() if isinstance(slots, torch.Tensor) else slots)]

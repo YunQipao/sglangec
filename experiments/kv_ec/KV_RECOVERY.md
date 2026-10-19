@@ -59,8 +59,10 @@ are:
 5. `abort_recovery`: release the lease and leave original KV untouched.
 
 The ordinary page-size-one `TokenToKVPoolAllocator` now exposes an opt-in local
-slot-generation registry and allocator-side free/reuse guards. This is still
-not a scheduler-owned recovery transaction and no production path is enabled.
+slot-generation registry and allocator-side free/reuse guards. An additional
+opt-in Scheduler transaction can pin one request's local slots, record a real
+CUDA event, re-read request/slot generations, and release the lease. It is
+local to each TP rank and is not a global recovery commit.
 The registry requires a worker-created CUDA event; completion booleans are not
 accepted. Timeout or registry shutdown never makes an in-flight slot reusable.
 
@@ -76,10 +78,11 @@ when `SGLANG_KV_EC_RECOVERY_GUARD=1`. It reads the real scheduler's:
 
 It checks the supported mode (TP=4, one request, no overlap, no prefix cache,
 no chunked prefill), records a SHA256 of the physical-slot list, and never
-stores the raw mapping in the diagnostic output. The scheduler guard itself
-does not start an allocator lease, so its result remains
-`state=READ_ONLY_BLOCKED` and `writeback_supported=false`. The hook does not
-call `begin_recovery`, `set_kv_buffer`, or any allocator mutation.
+stores the raw mapping in the diagnostic output. The guard itself remains
+read-only (`state=READ_ONLY_BLOCKED`). The separate transaction is enabled
+only with `SGLANG_KV_EC_SCHEDULER_LEASE=1`; it reports `LOCAL_RELEASED` only
+after a real CUDA Event completes and the mapping and generations are
+revalidated. It never calls `set_kv_buffer`.
 
 For the ordinary page-size-one allocator, `alloc`, `free`, grouped
 `free_group_end`, `clear`, and `resize` are guarded through the registry.

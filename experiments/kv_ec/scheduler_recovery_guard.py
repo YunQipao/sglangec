@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import uuid
 from typing import Any
 
 import torch
@@ -34,6 +35,8 @@ class SchedulerMapping:
     slot_generation_available: bool
     writeback_supported: bool
     reason: str
+    slot_generations: tuple[int, ...] = ()
+    request_version: str = ""
 
 
 def guard_enabled() -> bool:
@@ -80,7 +83,28 @@ def read_scheduler_mapping(
                   .detach().to("cpu", dtype=torch.int64).tolist())
     _require(len(set(slots)) == token_count and all(slot > 0 for slot in slots),
              "physical_slot_mapping_invalid")
-    # The current allocator has no physical slot generation or lease API.
+    allocator = getattr(scheduler, "token_to_kv_pool_allocator", None)
+    generations = ()
+    supported = False
+    reason = "allocator_slot_generation_unavailable"
+    if (
+        getattr(allocator, "page_size", None) == 1
+        and callable(getattr(allocator, "slot_generations", None))
+    ):
+        try:
+            generations = tuple(allocator.slot_generations(slots))
+            supported = len(generations) == len(slots) and all(
+                generation > 0 for generation in generations
+            )
+            if not supported:
+                reason = "allocator_slot_generation_invalid"
+            else:
+                reason = "allocator_slot_generation_available"
+        except Exception:
+            reason = "allocator_slot_generation_unavailable"
+    request_version = os.environ.get(
+        "SGLANG_KV_EC_REQUEST_VERSION", f"req-generation-{generation}"
+    )
     return SchedulerMapping(
         tp_rank=int(ps.tp_rank),
         tp_size=int(ps.tp_size),
@@ -90,9 +114,11 @@ def read_scheduler_mapping(
         token_start=token_start,
         token_count=token_count,
         physical_slots=slots,
-        slot_generation_available=False,
+        slot_generation_available=supported,
         writeback_supported=False,
-        reason="allocator_has_no_slot_generation_or_lease",
+        reason=reason,
+        slot_generations=generations,
+        request_version=request_version,
     )
 
 
@@ -126,6 +152,8 @@ class RecoveryGuard:
             "slot_generation_available": mapping.slot_generation_available,
             "writeback_supported": mapping.writeback_supported,
             "reason": mapping.reason,
+            "slot_generations": list(mapping.slot_generations),
+            "request_version": mapping.request_version,
         }
 
     def before_free(self, slots: Any, *, tp_rank: int) -> None:
@@ -145,3 +173,210 @@ class RecoveryGuard:
     def close(self) -> None:
         self.manager.close()
         self._active_lease = None
+
+
+_ACTIVE_SCHEDULER_LEASES: dict[str, "SchedulerLeaseTransaction"] = {}
+
+
+class SchedulerLeaseTransaction:
+    """One-rank, non-destructive Scheduler-owned allocator transaction.
+
+    This transaction intentionally has no cross-rank commit and no writeback.
+    It only proves that the local allocator can pin the observed slots across
+    a CUDA completion event and revalidate the mapping before releasing them.
+    """
+
+    def __init__(self, key: str, allocator: Any, lease_id: str, metadata: dict):
+        self.key = key
+        self.allocator = allocator
+        self.lease_id = lease_id
+        self.metadata = dict(metadata)
+        self._active = True
+
+    @classmethod
+    def begin(
+        cls,
+        scheduler: Any,
+        req: Any,
+        *,
+        token_start: int,
+        token_count: int,
+        snapshot_id: str,
+        slots: tuple[int, ...],
+        req_generation: int,
+    ) -> "SchedulerLeaseTransaction":
+        allocator = getattr(scheduler, "token_to_kv_pool_allocator", None)
+        _require(
+            getattr(allocator, "page_size", None) == 1,
+            "slot_lease_requires_page_size_one_allocator",
+        )
+        required = (
+            "enable_slot_leases",
+            "slot_generations",
+            "begin_slot_lease",
+            "validate_slot_lease",
+            "record_slot_lease_cuda_event",
+            "release_slot_lease",
+        )
+        _require(all(callable(getattr(allocator, name, None)) for name in required),
+                 "allocator_slot_lease_api_unavailable")
+        allocator.enable_slot_leases(
+            timeout_s=float(os.environ.get("SGLANG_KV_EC_LEASE_TIMEOUT_S", "5")),
+            active_slots=slots,
+        )
+        generations = tuple(allocator.slot_generations(list(slots)))
+        _require(len(generations) == len(slots) and all(g > 0 for g in generations),
+                 "slot_generation_unavailable")
+        rank = int(scheduler.model_worker.ps.tp_rank)
+        tp_size = int(scheduler.model_worker.ps.tp_size)
+        _require(tp_size == 4 and 0 <= rank < tp_size, "only_tp4_supported")
+        request_version = os.environ.get(
+            "SGLANG_KV_EC_REQUEST_VERSION", f"req-generation-{req_generation}"
+        )
+        manager_epoch = os.environ.get(
+            "SGLANG_KV_EC_MANAGER_EPOCH", "local-scheduler-epoch"
+        )
+        transaction_id = os.environ.get(
+            "SGLANG_KV_EC_TRANSACTION_ID", f"{snapshot_id}:{req.rid}"
+        )
+        lease_id = (
+            f"{snapshot_id}-{req.rid}-rank{rank}-"
+            f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        )
+        allocator.begin_slot_lease(
+            lease_id,
+            manager_epoch=os.environ.get(
+                "SGLANG_KV_EC_MANAGER_EPOCH", "local-scheduler-epoch"),
+            request_id=str(req.rid),
+            request_version=request_version,
+            slots=list(slots),
+        )
+        key = f"{os.getpid()}:{rank}:{snapshot_id}:{req.rid}"
+        txn = cls(
+            key,
+            allocator,
+            lease_id,
+            {
+                "state": "ACTIVE",
+                "lease_id": lease_id,
+                "tp_rank": rank,
+                "tp_size": tp_size,
+                "request_id": str(req.rid),
+                "request_version": request_version,
+                "manager_epoch": manager_epoch,
+                "checkpoint_version": snapshot_id,
+                "transaction_id": transaction_id,
+                "req_generation": int(req_generation),
+                "token_start": int(token_start),
+                "token_count": int(token_count),
+                "slot_count": len(slots),
+                "slot_generations_before": list(generations),
+                "event_recorded": False,
+                "event_complete": False,
+                "writeback_supported": False,
+                "cross_rank_coordinated": False,
+                "global_commit": False,
+            },
+        )
+        _ACTIVE_SCHEDULER_LEASES[key] = txn
+        return txn
+
+    def complete(self, scheduler: Any, req: Any, *, slots: tuple[int, ...]) -> dict:
+        if not self._active:
+            raise RecoveryGuardRejected("scheduler_lease_not_active")
+        event = self.allocator.record_slot_lease_cuda_event(
+            self.lease_id,
+            stream=torch.cuda.current_stream(),
+        )
+        self.metadata["event_recorded"] = True
+        try:
+            event.synchronize()
+            self.metadata["event_complete"] = bool(event.query())
+        except Exception as exc:
+            raise RecoveryGuardRejected("cuda_event_completion_failed") from exc
+        _require(self.metadata["event_complete"], "cuda_event_incomplete")
+        epoch = self.metadata["manager_epoch"]
+        _require(
+            os.environ.get("SGLANG_KV_EC_MANAGER_EPOCH", "local-scheduler-epoch")
+            == epoch,
+            "manager_epoch_changed",
+        )
+        current_generation = int(
+            scheduler.req_to_token_pool.req_generation[req.req_pool_idx]
+        )
+        _require(
+            current_generation == self.metadata["req_generation"],
+            "request_generation_changed",
+        )
+        current_slots = tuple(
+            int(x)
+            for x in scheduler.req_to_token_pool.req_to_token[
+                req.req_pool_idx,
+                self.metadata["token_start"] : self.metadata["token_start"]
+                + self.metadata["token_count"],
+            ]
+            .detach()
+            .to("cpu", dtype=torch.int64)
+            .tolist()
+        )
+        _require(current_slots == tuple(slots), "slot_mapping_changed")
+        generations = tuple(self.allocator.slot_generations(list(current_slots)))
+        _require(
+            generations == tuple(self.metadata["slot_generations_before"]),
+            "slot_generation_changed",
+        )
+        self.allocator.validate_slot_lease(
+            self.lease_id,
+            manager_epoch=epoch,
+            request_id=str(req.rid),
+            request_version=self.metadata["request_version"],
+            slots=list(current_slots),
+        )
+        self.allocator.release_slot_lease(self.lease_id, manager_epoch=epoch)
+        self.metadata.update(
+            {
+                "state": "LOCAL_RELEASED",
+                "slot_generations_after": list(generations),
+                "allocator_available_size_after": int(
+                    self.allocator.available_size()
+                ),
+            }
+        )
+        self._active = False
+        _ACTIVE_SCHEDULER_LEASES.pop(self.key, None)
+        return dict(self.metadata)
+
+    def abort(self) -> None:
+        if not self._active:
+            return
+        # A failed transaction is deliberately fail-closed.  If an event can
+        # be recorded and synchronized, release safely; otherwise leave the
+        # allocator owner in place instead of guessing that GPU work finished.
+        try:
+            if torch.cuda.is_available():
+                event = self.allocator.record_slot_lease_cuda_event(
+                    self.lease_id, stream=torch.cuda.current_stream()
+                )
+                event.synchronize()
+                if event.query():
+                    self.allocator.release_slot_lease(
+                        self.lease_id,
+                        manager_epoch=self.metadata["manager_epoch"],
+                    )
+                    self._active = False
+        except Exception:
+            pass
+        finally:
+            if not self._active:
+                _ACTIVE_SCHEDULER_LEASES.pop(self.key, None)
+            else:
+                self.metadata["state"] = "ABORTED_FAIL_CLOSED"
+
+
+def abort_scheduler_lease(snapshot_id: str, req: Any, scheduler: Any) -> None:
+    rank = getattr(getattr(scheduler, "model_worker", None), "ps", None)
+    rank = getattr(rank, "tp_rank", -1)
+    key_prefix = f"{os.getpid()}:{rank}:{snapshot_id}:{getattr(req, 'rid', '')}"
+    for key, txn in list(_ACTIVE_SCHEDULER_LEASES.items()):
+        if key == key_prefix:
+            txn.abort()
