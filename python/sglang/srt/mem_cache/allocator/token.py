@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from sglang.srt.mem_cache.allocator.base import BaseTokenToKVPoolAllocator
+from sglang.srt.mem_cache.slot_lease import SlotLease, SlotLeaseRegistry
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import KVCache
@@ -37,9 +38,11 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         need_sort: bool,
     ):
         super().__init__(size, 1, dtype, device, kvcache, need_sort)
+        self.slot_lease_registry = SlotLeaseRegistry(size)
         self.clear()
 
     def clear(self):
+        self.slot_lease_registry.clear()
         # The padded slot 0 is used for writing dummy outputs from padded tokens.
         self.free_pages = torch.arange(
             1, self.size + 1, dtype=torch.int64, device=self.device
@@ -60,6 +63,7 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             return None
 
         select_index = self.free_pages[:need_size]
+        self.slot_lease_registry.on_alloc(select_index.tolist())
         self.free_pages = self.free_pages[need_size:]
         return select_index
 
@@ -68,12 +72,55 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             return
 
         if self.is_not_in_free_group:
+            self.slot_lease_registry.on_free(free_index.tolist())
             if self.need_sort:
                 self.release_pages = torch.cat((self.release_pages, free_index))
             else:
                 self.free_pages = torch.cat((self.free_pages, free_index))
         else:
             self.free_group.append(self._copy_for_free_group(free_index))
+
+    def enable_slot_leases(self, *, timeout_s: float = 5.0) -> None:
+        if timeout_s != self.slot_lease_registry._timeout_s:
+            self.slot_lease_registry = SlotLeaseRegistry(
+                self.size, timeout_s=timeout_s
+            )
+        self.slot_lease_registry.enable()
+
+    def slot_generations(self, slots: torch.Tensor | list[int]) -> tuple[int, ...]:
+        values = [int(slot) for slot in (slots.tolist() if isinstance(slots, torch.Tensor) else slots)]
+        if any(slot <= 0 or slot >= self.slot_lease_registry.generation.numel() for slot in values):
+            raise ValueError("slot out of bounds")
+        return tuple(int(self.slot_lease_registry.generation[slot].item()) for slot in values)
+
+    def begin_slot_lease(
+        self, lease_id: str, *, manager_epoch: str, request_id: str,
+        request_version: str, slots: torch.Tensor | list[int],
+    ) -> SlotLease:
+        values = [int(slot) for slot in (slots.tolist() if isinstance(slots, torch.Tensor) else slots)]
+        return self.slot_lease_registry.begin(
+            lease_id, manager_epoch=manager_epoch, request_id=request_id,
+            request_version=request_version, slots=values,
+            generations=self.slot_generations(values),
+        )
+
+    def validate_slot_lease(
+        self, lease_id: str, *, manager_epoch: str, request_id: str,
+        request_version: str, slots: torch.Tensor | list[int],
+    ) -> SlotLease:
+        values = [int(slot) for slot in (slots.tolist() if isinstance(slots, torch.Tensor) else slots)]
+        return self.slot_lease_registry.validate(
+            lease_id, manager_epoch=manager_epoch, request_id=request_id,
+            request_version=request_version, slots=values,
+        )
+
+    def release_slot_lease(self, lease_id: str, *, manager_epoch: str) -> None:
+        self.slot_lease_registry.release(
+            lease_id, manager_epoch=manager_epoch, cuda_event_complete=True
+        )
+
+    def mark_slot_lease_cuda_complete(self, lease_id: str) -> None:
+        self.slot_lease_registry.mark_cuda_complete(lease_id)
 
     def get_cpu_copy(self, indices, mamba_indices=None):
         return self._kvcache.get_cpu_copy(indices, mamba_indices=mamba_indices)

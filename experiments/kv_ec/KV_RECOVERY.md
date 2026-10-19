@@ -84,6 +84,20 @@ hook can pass a shared guard into `ReqToTokenPool.free`, allocator `free`/
 Prefix-cache insertion/eviction and paged/SWA/HISparse/unified allocators are
 not covered by this experiment.
 
+## Page-size-one allocator integration
+
+The opt-in `TokenToKVPoolAllocator.slot_lease_registry` now maintains a local
+generation counter for every physical token slot. `alloc()` increments the
+counter, while `free()` and grouped frees reject currently leased slots.
+`begin_slot_lease`, `validate_slot_lease`, and `release_slot_lease` are exposed
+only on this allocator. The default is disabled and no KV tensor is modified.
+
+This covers only the ordinary `page_size=1` allocator used by the controlled
+TP=4 BF16 NHD experiment. It does **not** cover `PagedTokenToKVPoolAllocator`,
+SWA, HiSparse, Unified, NPU, DCP, prefix-cache ownership, or every allocation
+kernel path. Therefore `writeback_supported` remains false and this is not
+permission to run a destructive experiment.
+
 ## CPU checks
 
 ```bash

@@ -89,8 +89,12 @@ def validate_payload(payload, meta, *, verify_checksums=True):
             if verify_checksums and segment_sha256 != record[kind + "_sha256"]:
                 raise ValueError("layer K/V checksum mismatch")
             layer_hashes[(record["layer_id"], kind)] = segment_sha256
-            # Metadata can reconstruct the exact tensor view without float casts.
-            restored_view = torch.from_numpy(segment).view(dtype).reshape(shape)
+            # Metadata can reconstruct the exact tensor view without float
+            # casts. ``np.frombuffer(bytes)`` may be read-only; make an
+            # independent writable view before handing it to PyTorch so its
+            # documented storage contract is satisfied even if a downstream
+            # validator mutates the temporary tensor.
+            restored_view = torch.from_numpy(segment.copy()).view(dtype).reshape(shape)
             if list(restored_view.shape) != shape or str(restored_view.dtype) != meta["dtype"]:
                 raise ValueError("tensor metadata roundtrip failed")
             hashes[kind].update(segment)
