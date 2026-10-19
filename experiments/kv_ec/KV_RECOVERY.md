@@ -58,8 +58,11 @@ are:
 4. `commit_recovery`: release the lease only after validation and writeback.
 5. `abort_recovery`: release the lease and leave original KV untouched.
 
-The current allocator does not expose these hooks or physical slot generations,
-so this prototype remains simulation-only. No production path is enabled.
+The ordinary page-size-one `TokenToKVPoolAllocator` now exposes an opt-in local
+slot-generation registry and allocator-side free/reuse guards. This is still
+not a scheduler-owned recovery transaction and no production path is enabled.
+The registry requires a worker-created CUDA event; completion booleans are not
+accepted. Timeout or registry shutdown never makes an in-flight slot reusable.
 
 ## Read-only Scheduler integration
 
@@ -73,16 +76,16 @@ when `SGLANG_KV_EC_RECOVERY_GUARD=1`. It reads the real scheduler's:
 
 It checks the supported mode (TP=4, one request, no overlap, no prefix cache,
 no chunked prefill), records a SHA256 of the physical-slot list, and never
-stores the raw mapping in the diagnostic output. Because the current allocator
-has no physical slot generation, the result is always
+stores the raw mapping in the diagnostic output. The scheduler guard itself
+does not start an allocator lease, so its result remains
 `state=READ_ONLY_BLOCKED` and `writeback_supported=false`. The hook does not
 call `begin_recovery`, `set_kv_buffer`, or any allocator mutation.
 
-The real release and allocation paths remain **uncovered** until a small core
-hook can pass a shared guard into `ReqToTokenPool.free`, allocator `free`/
-`free_segment(s)`, and every `alloc`/`alloc_extend`/`alloc_decode` variant.
-Prefix-cache insertion/eviction and paged/SWA/HISparse/unified allocators are
-not covered by this experiment.
+For the ordinary page-size-one allocator, `alloc`, `free`, grouped
+`free_group_end`, `clear`, and `resize` are guarded through the registry.
+`merge_and_sort_free` only moves already-freed pages and cannot bypass the
+guard. Prefix-cache insertion/eviction and paged/SWA/HiSparse/unified
+allocators, plus `alloc_extend`/`alloc_decode`, are not covered.
 
 ## Page-size-one allocator integration
 

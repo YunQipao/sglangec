@@ -28,7 +28,7 @@ class SlotLease:
     slots: tuple[int, ...]
     generations: tuple[int, ...]
     deadline: float
-    cuda_event_complete: bool = False
+    cuda_event: object | None = None
     expired: bool = False
 
 
@@ -60,6 +60,11 @@ class SlotLeaseRegistry:
     def generation(self) -> torch.Tensor:
         return self._generation
 
+    @property
+    def active_lease_count(self) -> int:
+        self._expire()
+        return len(self._leases)
+
     def enable(self) -> None:
         if self._closed:
             raise SlotLeaseRejected("registry_closed")
@@ -71,7 +76,7 @@ class SlotLeaseRegistry:
         self._enabled = False
 
     def on_alloc(self, slots: Iterable[int]) -> None:
-        if not self.enabled:
+        if not self.enabled and not self._closed:
             return
         values = tuple(int(slot) for slot in slots)
         self._expire()
@@ -83,7 +88,7 @@ class SlotLeaseRegistry:
             self._generation[slot] += 1
 
     def on_free(self, slots: Iterable[int]) -> None:
-        if not self.enabled:
+        if not self.enabled and not self._closed:
             return
         self._expire()
         conflict = {int(slot) for slot in slots} & set(self._owners)
@@ -135,27 +140,63 @@ class SlotLeaseRegistry:
             self._owners[slot] = lease_id
         return lease
 
-    def mark_cuda_complete(self, lease_id: str) -> None:
+    def record_cuda_event(self, lease_id: str, *, stream=None) -> object:
+        """Record a real CUDA event owned by the worker stream."""
         if self._closed:
             raise SlotLeaseRejected("registry_closed")
         self._expire()
         lease = self._leases.get(lease_id)
         if lease is None:
             raise SlotLeaseRejected("unknown_lease")
-        updated = SlotLease(
-            lease_id=lease.lease_id,
-            manager_epoch=lease.manager_epoch,
-            request_id=lease.request_id,
-            request_version=lease.request_version,
-            slots=lease.slots,
-            generations=lease.generations,
-            deadline=lease.deadline,
-            cuda_event_complete=True,
-            expired=lease.expired,
-        )
+        if lease.expired:
+            raise SlotLeaseRejected("lease_expired")
+        if not torch.cuda.is_available():
+            raise SlotLeaseRejected("cuda_unavailable")
+        event = torch.cuda.Event(enable_timing=False, blocking=False)
+        event.record(stream)
+        updated = self._replace(lease, cuda_event=event)
         self._leases[lease_id] = updated
-        if updated.expired:
+        return event
+
+    def attach_cuda_event(self, lease_id: str, event: object) -> None:
+        """Attach a worker-created event; completion is checked via query()."""
+        if self._closed:
+            raise SlotLeaseRejected("registry_closed")
+        self._expire()
+        lease = self._leases.get(lease_id)
+        if lease is None:
+            raise SlotLeaseRejected("unknown_lease")
+        if not callable(getattr(event, "query", None)):
+            raise SlotLeaseRejected("invalid_cuda_event")
+        updated = self._replace(lease, cuda_event=event)
+        self._leases[lease_id] = updated
+        if updated.expired and self._event_complete(updated):
             self._release(updated)
+
+    @staticmethod
+    def _replace(lease: SlotLease, **changes) -> SlotLease:
+        values = {
+            "lease_id": lease.lease_id,
+            "manager_epoch": lease.manager_epoch,
+            "request_id": lease.request_id,
+            "request_version": lease.request_version,
+            "slots": lease.slots,
+            "generations": lease.generations,
+            "deadline": lease.deadline,
+            "cuda_event": lease.cuda_event,
+            "expired": lease.expired,
+        }
+        values.update(changes)
+        return SlotLease(**values)
+
+    @staticmethod
+    def _event_complete(lease: SlotLease) -> bool:
+        if lease.cuda_event is None:
+            return False
+        try:
+            return bool(lease.cuda_event.query())
+        except Exception as exc:
+            raise SlotLeaseRejected("cuda_event_query_failed") from exc
 
     def validate(
         self,
@@ -169,7 +210,7 @@ class SlotLeaseRegistry:
         lease = self._get(lease_id)
         if lease.expired:
             raise SlotLeaseRejected("lease_expired")
-        if not lease.cuda_event_complete:
+        if not self._event_complete(lease):
             raise SlotLeaseRejected("cuda_event_incomplete")
         if manager_epoch != lease.manager_epoch:
             raise SlotLeaseRejected("manager_epoch_changed")
@@ -185,21 +226,19 @@ class SlotLeaseRegistry:
 
     def release(
         self, lease_id: str, *, manager_epoch: str,
-        cuda_event_complete: bool = False,
     ) -> None:
         lease = self._get(lease_id)
         if lease.expired:
             raise SlotLeaseRejected("lease_expired")
         if manager_epoch != lease.manager_epoch:
             raise SlotLeaseRejected("manager_epoch_changed")
-        if not lease.cuda_event_complete and not cuda_event_complete:
+        if not self._event_complete(lease):
             raise SlotLeaseRejected("cuda_event_incomplete")
         self._release(lease)
 
     def close(self) -> None:
+        # Fail closed: never make in-flight GPU slots reusable on shutdown.
         self._closed = True
-        for lease in list(self._leases.values()):
-            self._release(lease)
 
     def clear(self) -> None:
         if self._leases:
@@ -222,7 +261,7 @@ class SlotLeaseRegistry:
         now = self._clock()
         for lease in list(self._leases.values()):
             if now >= lease.deadline and not lease.expired:
-                if not lease.cuda_event_complete:
+                if lease.cuda_event is None or not self._event_complete(lease):
                     self._leases[lease.lease_id] = SlotLease(
                         lease_id=lease.lease_id,
                         manager_epoch=lease.manager_epoch,
@@ -231,7 +270,7 @@ class SlotLeaseRegistry:
                         slots=lease.slots,
                         generations=lease.generations,
                         deadline=lease.deadline,
-                        cuda_event_complete=False,
+                        cuda_event=lease.cuda_event,
                         expired=True,
                     )
                     continue

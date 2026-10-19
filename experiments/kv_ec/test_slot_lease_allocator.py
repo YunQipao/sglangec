@@ -9,6 +9,14 @@ from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.slot_lease import SlotLeaseRejected
 
 
+class _Event:
+    def __init__(self, complete=False):
+        self.complete = complete
+
+    def query(self):
+        return self.complete
+
+
 class SlotLeaseAllocatorTests(unittest.TestCase):
     def allocator(self):
         return TokenToKVPoolAllocator(
@@ -42,7 +50,11 @@ class SlotLeaseAllocatorTests(unittest.TestCase):
                 "lease", manager_epoch="m1", request_id="r1",
                 request_version="v1", slots=slots,
             )
-        allocator.mark_slot_lease_cuda_complete("lease")
+        event = _Event()
+        allocator.attach_slot_lease_cuda_event("lease", event)
+        with self.assertRaisesRegex(SlotLeaseRejected, "cuda_event"):
+            allocator.release_slot_lease("lease", manager_epoch="m1")
+        event.complete = True
         allocator.validate_slot_lease(
             "lease", manager_epoch="m1", request_id="r1",
             request_version="v1", slots=slots,
@@ -61,7 +73,7 @@ class SlotLeaseAllocatorTests(unittest.TestCase):
             "lease", manager_epoch="m1", request_id="r1",
             request_version="v1", slots=slots,
         )
-        allocator.mark_slot_lease_cuda_complete("lease")
+        allocator.attach_slot_lease_cuda_event("lease", _Event(True))
         with self.assertRaisesRegex(SlotLeaseRejected, "manager_epoch"):
             allocator.validate_slot_lease(
                 "lease", manager_epoch="m2", request_id="r1",
@@ -83,7 +95,7 @@ class SlotLeaseAllocatorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(SlotLeaseRejected, "active_leases"):
             allocator.clear()
-        allocator.mark_slot_lease_cuda_complete("lease")
+        allocator.attach_slot_lease_cuda_event("lease", _Event(True))
         allocator.release_slot_lease("lease", manager_epoch="m1")
         allocator.clear()
         self.assertEqual(int(allocator.slot_lease_registry.generation[1]), 0)
@@ -110,8 +122,47 @@ class SlotLeaseAllocatorTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(SlotLeaseRejected, "protected_slot_free"):
             allocator.free(slots)
-        allocator.mark_slot_lease_cuda_complete("lease")
+        allocator.attach_slot_lease_cuda_event("lease", _Event(True))
         allocator.free(slots)
+
+    def test_free_group_checks_protected_slots_before_mutating_pool(self):
+        allocator = self.allocator()
+        allocator.enable_slot_leases()
+        slots = allocator.alloc(2)
+        allocator.begin_slot_lease(
+            "lease", manager_epoch="m1", request_id="r1",
+            request_version="v1", slots=slots[:1],
+        )
+        available_before = allocator.available_size()
+        allocator.free_group_begin()
+        allocator.free(slots)
+        with self.assertRaisesRegex(SlotLeaseRejected, "protected_slot_free"):
+            allocator.free_group_end()
+        self.assertEqual(allocator.available_size(), available_before)
+        self.assertEqual(len(allocator.free_group), 0)
+
+    def test_registry_cannot_be_replaced_while_lease_is_active(self):
+        allocator = self.allocator()
+        allocator.enable_slot_leases()
+        slots = allocator.alloc(1)
+        allocator.begin_slot_lease(
+            "lease", manager_epoch="m1", request_id="r1",
+            request_version="v1", slots=slots,
+        )
+        with self.assertRaisesRegex(SlotLeaseRejected, "active_leases"):
+            allocator.enable_slot_leases(timeout_s=10)
+
+    def test_close_is_fail_closed_and_does_not_reuse_protected_slot(self):
+        allocator = self.allocator()
+        allocator.enable_slot_leases()
+        slots = allocator.alloc(1)
+        allocator.begin_slot_lease(
+            "lease", manager_epoch="m1", request_id="r1",
+            request_version="v1", slots=slots,
+        )
+        allocator.slot_lease_registry.close()
+        with self.assertRaisesRegex(SlotLeaseRejected, "protected_slot_free"):
+            allocator.free(slots)
 
 
 if __name__ == "__main__":

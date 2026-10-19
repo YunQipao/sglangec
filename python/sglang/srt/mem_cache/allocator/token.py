@@ -20,7 +20,11 @@ from typing import TYPE_CHECKING
 import torch
 
 from sglang.srt.mem_cache.allocator.base import BaseTokenToKVPoolAllocator
-from sglang.srt.mem_cache.slot_lease import SlotLease, SlotLeaseRegistry
+from sglang.srt.mem_cache.slot_lease import (
+    SlotLease,
+    SlotLeaseRegistry,
+    SlotLeaseRejected,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import KVCache
@@ -82,6 +86,8 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def enable_slot_leases(self, *, timeout_s: float = 5.0) -> None:
         if timeout_s != self.slot_lease_registry._timeout_s:
+            if self.slot_lease_registry.active_lease_count:
+                raise SlotLeaseRejected("active_leases")
             self.slot_lease_registry = SlotLeaseRegistry(
                 self.size, timeout_s=timeout_s
             )
@@ -114,13 +120,17 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             request_version=request_version, slots=values,
         )
 
-    def release_slot_lease(self, lease_id: str, *, manager_epoch: str) -> None:
-        self.slot_lease_registry.release(
-            lease_id, manager_epoch=manager_epoch, cuda_event_complete=True
-        )
+    def record_slot_lease_cuda_event(self, lease_id: str, *, stream=None) -> object:
+        """Record completion on the worker's actual CUDA stream."""
+        return self.slot_lease_registry.record_cuda_event(lease_id, stream=stream)
 
-    def mark_slot_lease_cuda_complete(self, lease_id: str) -> None:
-        self.slot_lease_registry.mark_cuda_complete(lease_id)
+    def attach_slot_lease_cuda_event(self, lease_id: str, event: object) -> None:
+        """Attach a worker-created CUDA event for controlled integration tests."""
+        self.slot_lease_registry.attach_cuda_event(lease_id, event)
+
+    def release_slot_lease(self, lease_id: str, *, manager_epoch: str) -> None:
+        """Release only after the recorded CUDA event reports completion."""
+        self.slot_lease_registry.release(lease_id, manager_epoch=manager_epoch)
 
     def get_cpu_copy(self, indices, mamba_indices=None):
         return self._kvcache.get_cpu_copy(indices, mamba_indices=mamba_indices)
