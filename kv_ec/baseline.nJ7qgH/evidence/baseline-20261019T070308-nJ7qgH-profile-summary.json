@@ -1,0 +1,78 @@
+{
+  "snapshot_id": "baseline-20261019T070308-nJ7qgH",
+  "records": [
+    {
+      "snapshot_id": "baseline-20261019T070308-nJ7qgH-ecwarmup-1",
+      "request_id": "kv-ec-artificial-request-ecwarmup-1",
+      "kind": "ec_warmup",
+      "client_metrics_ms": {
+        "request_total_ms": 895.7149139605463,
+        "ttft_ms": 193.67238483391702,
+        "tpot_ms": 46.80283527510861,
+        "note": "client streaming TTFT and amortized TPOT, includes HTTP/SSE overhead"
+      }
+    },
+    {
+      "snapshot_id": "baseline-20261019T070308-nJ7qgH-ecwarmup-2",
+      "request_id": "kv-ec-artificial-request-ecwarmup-2",
+      "kind": "ec_warmup",
+      "client_metrics_ms": {
+        "request_total_ms": 909.5232251565903,
+        "ttft_ms": 194.0181921236217,
+        "tpot_ms": 47.700335535531245,
+        "note": "client streaming TTFT and amortized TPOT, includes HTTP/SSE overhead"
+      }
+    },
+    {
+      "snapshot_id": "baseline-20261019T070308-nJ7qgH-measure-1",
+      "request_id": "kv-ec-artificial-request-measure-1",
+      "kind": "measurement",
+      "client_metrics_ms": {
+        "request_total_ms": 845.1304179616272,
+        "ttft_ms": 193.00622306764126,
+        "tpot_ms": 43.47494632626573,
+        "note": "client streaming TTFT and amortized TPOT, includes HTTP/SSE overhead"
+      }
+    },
+    {
+      "snapshot_id": "baseline-20261019T070308-nJ7qgH-measure-2",
+      "request_id": "kv-ec-artificial-request-measure-2",
+      "kind": "measurement",
+      "client_metrics_ms": {
+        "request_total_ms": 843.838594853878,
+        "ttft_ms": 192.9768738336861,
+        "tpot_ms": 43.390781401346125,
+        "note": "client streaming TTFT and amortized TPOT, includes HTTP/SSE overhead"
+      }
+    },
+    {
+      "snapshot_id": "baseline-20261019T070308-nJ7qgH-measure-3",
+      "request_id": "kv-ec-artificial-request-measure-3",
+      "kind": "measurement",
+      "client_metrics_ms": {
+        "request_total_ms": 844.9013498611748,
+        "ttft_ms": 192.69698485732079,
+        "tpot_ms": 43.48029100025693,
+        "note": "client streaming TTFT and amortized TPOT, includes HTTP/SSE overhead"
+      }
+    }
+  ],
+  "note": "sequential same-process requests, NOT independent model starts; profiler runs are diagnostic only",
+  "metrics": {
+    "ttft_ms": {
+      "median": 192.9768738336861,
+      "p95": 193.00622306764126,
+      "n": 3
+    },
+    "tpot_ms": {
+      "median": 43.47494632626573,
+      "p95": 43.48029100025693,
+      "n": 3
+    },
+    "request_total_ms": {
+      "median": 844.9013498611748,
+      "p95": 845.1304179616272,
+      "n": 3
+    }
+  }
+}

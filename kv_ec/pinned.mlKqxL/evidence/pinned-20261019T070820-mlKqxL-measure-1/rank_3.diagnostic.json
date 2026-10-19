@@ -1,0 +1,8 @@
+{
+  "snapshot_id": "pinned-20261019T070820-mlKqxL-measure-1",
+  "tp_rank": 3,
+  "diagnostic_write_ms": 1.350004,
+  "info_log_ms": 0.126071,
+  "scheduler_through_diagnostics_ms": 96.928198,
+  "tail_record_own_write_included": false
+}

@@ -1,0 +1,8 @@
+{
+  "snapshot_id": "blocking-20261019T071423-52TffD-ecwarmup-2",
+  "tp_rank": 0,
+  "diagnostic_write_ms": 4.909808,
+  "info_log_ms": 0.1139,
+  "scheduler_through_diagnostics_ms": 84.274449,
+  "tail_record_own_write_included": false
+}
