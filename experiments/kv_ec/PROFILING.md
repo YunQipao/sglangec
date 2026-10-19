@@ -53,9 +53,15 @@ and numpy copy path, with the same completion fences. No silent fallback:
 pinned allocation failure rejects this capture and inference continues without
 protection. This makes A/B results attributable to the selected path.
 
-The scheduler still hashes the payload three times (segments, aggregate K/V,
-whole payload). Counted `sha256_scanned_bytes` excludes the small identity/token
-hashes. We intentionally measure before moving or deleting any checks.
+DEBUG_SAFE still hashes the payload three times (segments, aggregate K/V,
+whole payload) in the worker. FAST_PARITY computes one complete payload SHA in
+the worker, which is the transmission-integrity commitment, and marks the
+segment/K/V aggregate hashes as `checksum_deferred`. The Manager computes and
+checks those remaining hashes after it owns its immutable CPU copy, before it
+accepts a rank or can COMMIT. This moves two scans out of the scheduler hot
+path; it does not remove checksum validation. `sha256_scanned_bytes` reports
+worker scans only, and `checksum_location` identifies the split. A corrupt
+payload still fails against the worker's payload SHA.
 
 `--ec-warmups 2 --ec-repeat 10` enables a bounded explicit request plan:
 `RID-ecwarmup-1/2`, then `RID-measure-1..10`; snapshot IDs use the same suffixes
@@ -82,7 +88,7 @@ immutability, accounting balance, no silent pinned failure, explicit plan
 matching, separate event metrics and readable cProfile output. They are NOT
 real GPU tests. Existing TP=2/4 and real snapshot CPU regressions remain required.
 
-Local verification on 2026-10-19: 60 tests ran successfully, with two Unix
+Local verification on 2026-10-19: 62 tests ran successfully, with two Unix
 socket subtests skipped because the tool sandbox forbids binding sockets.
 Compilation and `git diff --check` passed. CUDA was unavailable; real socket,
 GPU correctness and latency results are still pending server verification.

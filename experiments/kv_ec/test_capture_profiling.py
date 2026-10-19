@@ -149,7 +149,10 @@ class ProfilingTests(unittest.TestCase):
             meta, payload = client.queue.get_nowait()
             validate_payload(np.frombuffer(payload, dtype=np.uint8).copy(), meta)
             self.assertEqual(phase["d2h_bytes"], len(payload))
-            self.assertEqual(phase["sha256_scanned_bytes"], 3 * len(payload))
+            expected_scanned = len(payload) if mode == "FAST_PARITY" else 3 * len(payload)
+            self.assertEqual(phase["sha256_scanned_bytes"], expected_scanned)
+            self.assertEqual(phase["checksum_location"],
+                             "worker_payload_manager_segments" if mode == "FAST_PARITY" else "worker")
             for key in ("layer_getter_validation_ms", "segment_sha256_ms", "aggregate_kv_sha256_ms",
                         "payload_sha256_ms", "final_slot_mapping_check_ms", "client_import_lookup_ms",
                         "client_initialization_ms", "host_buffer_release_ms"):

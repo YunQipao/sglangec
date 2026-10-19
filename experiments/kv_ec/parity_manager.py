@@ -208,11 +208,22 @@ class ParityManager:
             raise ValueError("payload length mismatch")
         if payload.size > 64 * 1024**2:
             raise ValueError("checkpoint byte budget exceeded")
+        deferred = metadata.get("checksum_deferred") is True
         if hashlib.sha256(payload).hexdigest() != metadata.get("sha256"):
             raise ValueError("payload checksum mismatch")
-        # Full layer/K/V checksums and shape metadata are validated before the
-        # manager takes ownership of the bytes.
-        validate_payload(payload, metadata)
+        # FAST_PARITY may defer checksum calculation, but only explicitly. The
+        # manager validates the complete CPU-owned payload before taking the
+        # rank into the checkpoint, then writes the derived digests into the
+        # metadata used for COMMITTED rank identity and future recovery checks.
+        derived = validate_payload(payload, metadata, verify_checksums=not deferred)
+        if deferred:
+            metadata["sha256"] = derived["sha256"]
+            metadata["k_sha256"] = derived["k_sha256"]
+            metadata["v_sha256"] = derived["v_sha256"]
+            for record in metadata["layer_records"]:
+                for kind in ("k", "v"):
+                    record[kind + "_sha256"] = derived["layer_sha256"][(record["layer_id"], kind)]
+            metadata["checksum_deferred"] = False
 
     def _expire_locked(self, now):
         for checkpoint in self._checkpoints.values():

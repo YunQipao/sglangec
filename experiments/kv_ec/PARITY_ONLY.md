@@ -168,6 +168,13 @@ includes object construction, metadata checks, final lifetime guards and any
 future uninstrumented work. The diagnostic JSON write is measured separately
 and excluded from `scheduler_blocking_ms`.
 
+In FAST_PARITY, the worker keeps the complete payload SHA as a transmission
+commitment, while the Manager derives and verifies per-layer and aggregate K/V
+SHA values after taking its immutable CPU copy. The submission carries an
+explicit `checksum_deferred` marker; it is cleared only after Manager
+validation. DEBUG_SAFE keeps all checksum scans in the worker. Deferral moves
+CPU work out of the scheduler path but does not weaken COMMITTED validation.
+
 For the current path, GPU D2H produces one owned numpy chunk per K/V segment;
 `AsyncParityClient.submit` makes one immutable queue copy of the packed payload,
 and `submit_once` / `checkpoint_protocol.send_message` reuse those immutable

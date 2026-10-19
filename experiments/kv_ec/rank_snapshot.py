@@ -46,7 +46,9 @@ def write_rank_files(directory, payload, metadata):
         performance["disk_write_ms"] = (time.perf_counter_ns() - disk_started) / 1e6
 
 
-def validate_payload(payload, meta):
+def validate_payload(payload, meta, *, verify_checksums=True):
+    if meta.get("checksum_deferred") is True:
+        verify_checksums = False
     if meta["format"] != FORMAT or meta["snapshot_completion_status"] != "complete":
         raise ValueError("incomplete or unsupported rank snapshot")
     if meta["provenance"] not in ("sglang_request", "synthetic_fixture"):
@@ -55,7 +57,8 @@ def validate_payload(payload, meta):
         raise ValueError("unsupported dtype or missing read-only verification")
     if payload.dtype != np.uint8 or payload.ndim != 1 or payload.size != meta["packed_byte_count"]:
         raise ValueError("rank payload length/type mismatch")
-    if digest(payload) != meta["sha256"]:
+    payload_sha256 = digest(payload)
+    if verify_checksums and payload_sha256 != meta["sha256"]:
         raise ValueError("rank payload checksum mismatch")
     if len(meta["physical_slots"]) != meta["token_count"] or meta["req_pool_idx"] <= 0 or meta["req_generation"] <= 0:
         raise ValueError("invalid request/slot metadata")
@@ -68,6 +71,7 @@ def validate_payload(payload, meta):
         raise ValueError("layer order mismatch")
     offset = 0
     hashes = {"k": hashlib.sha256(), "v": hashlib.sha256()}
+    layer_hashes = {}
     dtype = getattr(torch, meta["dtype"].removeprefix("torch."))
     for record in records:
         if record["dtype"] != meta["dtype"]:
@@ -81,8 +85,10 @@ def validate_payload(payload, meta):
             if record[kind + "_offset"] != offset or offset + nbytes > payload.size:
                 raise ValueError("noncanonical offsets or truncated data")
             segment = payload[offset:offset + nbytes]
-            if digest(segment) != record[kind + "_sha256"]:
+            segment_sha256 = digest(segment)
+            if verify_checksums and segment_sha256 != record[kind + "_sha256"]:
                 raise ValueError("layer K/V checksum mismatch")
+            layer_hashes[(record["layer_id"], kind)] = segment_sha256
             # Metadata can reconstruct the exact tensor view without float casts.
             restored_view = torch.from_numpy(segment).view(dtype).reshape(shape)
             if list(restored_view.shape) != shape or str(restored_view.dtype) != meta["dtype"]:
@@ -92,8 +98,18 @@ def validate_payload(payload, meta):
     if offset != payload.size:
         raise ValueError("unaccounted bytes")
     for kind, hasher in hashes.items():
-        if hasher.hexdigest() != meta[kind + "_sha256"]:
+        aggregate_sha256 = hasher.hexdigest()
+        if verify_checksums and aggregate_sha256 != meta[kind + "_sha256"]:
             raise ValueError("aggregate K/V checksum mismatch")
+    # Deferred FAST_PARITY submissions use this derived record to move all
+    # checksum work to the manager after it owns an immutable CPU copy.
+    if not verify_checksums:
+        return {
+            "sha256": payload_sha256,
+            "k_sha256": hashes["k"].hexdigest(),
+            "v_sha256": hashes["v"].hexdigest(),
+            "layer_sha256": layer_hashes,
+        }
 
 
 def assemble(directory):

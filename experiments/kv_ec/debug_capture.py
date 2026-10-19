@@ -372,8 +372,22 @@ def capture(scheduler, batch, req, config):
                     timeout=float(os.environ.get("SGLANG_KV_EC_PARITY_TIMEOUT", "0.25")),
                 )
                 _PARITY_CLIENTS[parity_socket] = client
+        # FAST_PARITY keeps all structural/lifetime checks in this scheduler
+        # thread, but defers redundant full-payload/K/V digest scans to the
+        # manager after its immutable CPU copy is owned. DEBUG_SAFE retains the
+        # original worker-side checks and metadata.
+        submit_meta = meta
+        if mode == "FAST_PARITY":
+            submit_meta = dict(meta)
+            submit_meta["checksum_deferred"] = True
+            submit_meta.pop("k_sha256", None)
+            submit_meta.pop("v_sha256", None)
+            submit_meta["layer_records"] = [dict(record) for record in meta["layer_records"]]
+            for record in submit_meta["layer_records"]:
+                record.pop("k_sha256", None)
+                record.pop("v_sha256", None)
         with timing.region("ipc_enqueue_total_ms"):
-            enqueue = client.submit(meta, payload)
+            enqueue = client.submit(submit_meta, payload)
         phase["ipc_enqueue_ms"] = enqueue["enqueue_ms"]
         phase["ipc_enqueue_details"] = enqueue
         phase["ipc_copy_bytes"] = enqueue.get("copy_bytes", 0)
@@ -402,7 +416,8 @@ def capture(scheduler, batch, req, config):
     phase["steady_snapshot_ms"] = phase["scheduler_capture_ms"] - phase["model_fingerprint_ms"]
     phase["other_uninstrumented_ms"] = phase["unaccounted_ms"]
     phase["cuda_event_layers"] = event_measurements
-    phase["sha256_scanned_bytes"] = payload_bytes * 3
+    phase["sha256_scanned_bytes"] = payload_bytes if mode == "FAST_PARITY" and parity_socket else payload_bytes * 3
+    phase["checksum_location"] = "worker_payload_manager_segments" if mode == "FAST_PARITY" and parity_socket else "worker"
     phase["numpy_concatenate_copy_bytes"] = payload_bytes
     phase["scheduler_blocking_scope"] = "capture through host cleanup; diagnostic tail reported separately"
     phase["scheduler_blocking_ms"] = phase["scheduler_capture_ms"]

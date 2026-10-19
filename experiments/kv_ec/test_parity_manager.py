@@ -37,6 +37,36 @@ def metadata_and_blocks(tp=4, layers=(0,), count=4):
 
 
 class ManagerTests(unittest.TestCase):
+    def test_deferred_fast_checksum_is_derived_and_committed(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        for meta in metadata:
+            meta.pop("k_sha256", None)
+            meta.pop("v_sha256", None)
+            for record in meta["layer_records"]:
+                record.pop("k_sha256", None)
+                record.pop("v_sha256", None)
+            meta["checksum_deferred"] = True
+        manager = ParityManager(test_oracle=True)
+        self.assertEqual(manager.submit(metadata[0], blocks[0])["state"], PENDING)
+        status = manager.submit(metadata[1], blocks[1])
+        self.assertEqual(status["state"], COMMITTED)
+        self.assertEqual(status["parity_bytes"], blocks[0].size)
+        self.assertEqual(len(status["oracle_checks"]), 2)
+        self.assertEqual(set(status["rank_hashes"]), {"0", "1"})
+
+    def test_deferred_fast_checksum_corruption_fails_closed(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        for meta in metadata:
+            meta.pop("k_sha256", None)
+            meta.pop("v_sha256", None)
+            for record in meta["layer_records"]:
+                record.pop("k_sha256", None)
+                record.pop("v_sha256", None)
+            meta["checksum_deferred"] = True
+        blocks[1][0] ^= 1
+        manager = ParityManager()
+        manager.submit(metadata[0], blocks[0])
+        self.assertEqual(manager.submit(metadata[1], blocks[1])["state"], FAILED)
     def test_tp2_commit_and_each_erasure_releases_sources(self):
         blocks, metadata = metadata_and_blocks(tp=2)
         originals = [block.copy() for block in blocks]
