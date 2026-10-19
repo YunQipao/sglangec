@@ -1,0 +1,39 @@
+{
+  "kind": "real_server_artificial_prompt",
+  "request_id": "model-warmup-hash1-20261019T091826-1",
+  "model_identifier": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+  "input_token_count": 768,
+  "input_ids_sha256": "c7d0884c059a295b8b3352d41ef73584361c1906f46c08e0e3a81c614b90bb0f",
+  "output_ids": [
+    448,
+    20443,
+    584,
+    1273,
+    821,
+    13,
+    84648,
+    6500,
+    3412,
+    448,
+    20443,
+    584,
+    1273,
+    821,
+    13,
+    84648
+  ],
+  "sampling": {
+    "temperature": 0,
+    "max_new_tokens": 16
+  },
+  "finish_reason": {
+    "type": "length",
+    "length": 16
+  },
+  "client_metrics_ms": {
+    "request_total_ms": 850.4338290076703,
+    "ttft_ms": 192.67318700440228,
+    "tpot_ms": 43.85070946688453,
+    "note": "client streaming TTFT and amortized TPOT, includes HTTP/SSE overhead"
+  }
+}
