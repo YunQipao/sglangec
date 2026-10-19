@@ -115,6 +115,24 @@ class CrossRankLeaseTests(unittest.TestCase):
         with self.assertRaisesRegex(LeaseRejected, "invalid_transition"):
             manager.release_global("tx-timeout")
 
+    def test_duplicate_transition_message_fails_closed(self):
+        manager = self.coordinator()
+        tx = "tx-duplicate"
+        manager.prepare(tx, observations(), checkpoint_version="cp-v1")
+        manager.mark_local_leased(tx, 0)
+        with self.assertRaisesRegex(LeaseRejected, "duplicate_local_lease"):
+            manager.mark_local_leased(tx, 0)
+        for rank in (1, 2, 3):
+            manager.mark_local_leased(tx, rank)
+        manager.mark_cuda_completed(tx, 0)
+        with self.assertRaisesRegex(LeaseRejected, "duplicate_cuda_completed"):
+            manager.mark_cuda_completed(tx, 0)
+        for rank in (1, 2, 3):
+            manager.mark_cuda_completed(tx, rank)
+        manager.mark_validated(tx, 0)
+        with self.assertRaisesRegex(LeaseRejected, "duplicate_validation"):
+            manager.mark_validated(tx, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

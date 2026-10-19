@@ -142,6 +142,36 @@ This command only aggregates already `COMMITTED` Manager metadata; it does
 not create a checkpoint or perform GPU writeback. A missing or failed chunk
 causes a nonzero exit and no `COMPLETE` report.
 
+`cross_rank_control.py` provides the separate, metadata-only Unix control
+plane for the next integration stage. Its protocol is:
+
+```text
+prepare -> local_leased (all ranks)
+        -> cuda_completed (all ranks)
+        -> validated (all ranks)
+        -> release_global
+```
+
+The control server owns the CPU coordinator and never calls NCCL or touches
+GPU memory. Workers must create and query their own CUDA Events before sending
+the corresponding messages. A timeout, duplicate transition, coordinator
+restart, or rank failure is terminal and cannot produce `GLOBAL_RELEASED`;
+failed transactions require all four `abort_ack` messages before coordinated
+slot ownership is cleared.
+
+Start it separately from the Parity Manager:
+
+```bash
+python -m experiments.kv_ec.cross_rank_control \
+  --socket "$RUN/control.sock" \
+  --manager-epoch "$MANAGER_EPOCH" \
+  --timeout 30
+```
+
+This is currently a protocol/IPC validation endpoint, not a live Scheduler
+hook. The live GPU experiment must remain read-only until each rank can bind
+its real local Lease and CUDA Event to these messages.
+
 ## CPU checks
 
 ```bash

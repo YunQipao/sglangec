@@ -1,0 +1,8 @@
+{
+  "snapshot_id": "full-20261019T143318-chunk-1",
+  "tp_rank": 2,
+  "diagnostic_write_ms": 1.615968,
+  "info_log_ms": 0.135319,
+  "scheduler_through_diagnostics_ms": 105.911227,
+  "tail_record_own_write_included": false
+}

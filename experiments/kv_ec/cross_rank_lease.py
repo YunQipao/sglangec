@@ -119,6 +119,8 @@ class CrossRankLeaseCoordinator:
                 f"invalid_transition:{txn.state.value}->LOCAL_LEASED"
             )
         self._require_rank(txn, tp_rank)
+        if tp_rank in txn.leased:
+            raise LeaseRejected("duplicate_local_lease")
         txn.leased.add(tp_rank)
         if len(txn.leased) == txn.observations[tp_rank].tp_size:
             txn.state = CrossRankLeaseState.ALL_RANKS_READY
@@ -132,6 +134,8 @@ class CrossRankLeaseCoordinator:
         self._require_rank(txn, tp_rank)
         if tp_rank not in txn.leased:
             raise LeaseRejected("rank_not_locally_leased")
+        if tp_rank in txn.cuda_completed:
+            raise LeaseRejected("duplicate_cuda_completed")
         txn.cuda_completed.add(tp_rank)
         if len(txn.cuda_completed) == txn.observations[tp_rank].tp_size:
             txn.state = CrossRankLeaseState.CUDA_COMPLETED
@@ -143,6 +147,8 @@ class CrossRankLeaseCoordinator:
         self._require_rank(txn, tp_rank)
         if tp_rank not in txn.cuda_completed:
             raise LeaseRejected("rank_cuda_incomplete")
+        if tp_rank in txn.validated:
+            raise LeaseRejected("duplicate_validation")
         txn.validated.add(tp_rank)
         if len(txn.validated) == txn.observations[tp_rank].tp_size:
             txn.state = CrossRankLeaseState.ALL_RANKS_VALIDATED
