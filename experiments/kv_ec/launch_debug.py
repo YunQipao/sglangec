@@ -23,6 +23,8 @@ def main():
     p.add_argument("--snapshot-id", required=True)
     p.add_argument("--request-id", default="kv-ec-artificial-request")
     p.add_argument("--token-count", type=int, choices=(128, 256, 512), default=128)
+    p.add_argument("--chunk-size", type=int, choices=(128, 256, 512),
+                   help="capture a complete prompt as independent logical chunks")
     p.add_argument("--layers", choices=("0", "all"), default="0")
     p.add_argument("--transfer", choices=("pinned", "blocking"), default="pinned",
                    help="safe D2H A/B; pinned allocation errors reject capture rather than silently changing mode")
@@ -32,6 +34,8 @@ def main():
     p.add_argument("--ec-warmups", type=int, default=0)
     p.add_argument("--ec-repeat", type=int, default=1, help="explicit bounded capture plan, total warmups+repeat <=16")
     args = p.parse_args()
+    if args.chunk_size is not None and args.token_count != args.chunk_size:
+        p.error("--chunk-size must equal --token-count")
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from experiments.kv_ec.capture_plan import capture_plan
     try:
@@ -45,7 +49,17 @@ def main():
         p.error("select exactly TP distinct physical GPU indices")
     if not args.output.is_absolute():
         p.error("output must be absolute")
-    if any((args.output / snapshot_id).exists() for snapshot_id in plan.values()):
+    chunk_plan = {}
+    for request, snapshot in plan.items():
+        if args.chunk_size is None:
+            chunk_plan[request] = [snapshot]
+        else:
+            chunk_plan[request] = [
+                f"{snapshot}-chunk-{index}"
+                for index in range(1, 1 + (768 + args.chunk_size - 1) // args.chunk_size)
+            ]
+    if any((args.output / snapshot_id).exists()
+           for snapshots in chunk_plan.values() for snapshot_id in snapshots):
         p.error("snapshot directory exists; use a new snapshot-id (never overwrite evidence)")
     # Read-only readiness check: not an authorization to take over this port.
     with socket.socket() as sock:
@@ -63,7 +77,19 @@ def main():
                       SGLANG_KV_EC_PROFILE_DETAIL="1" if args.profile_detail else "0",
                       SGLANG_KV_EC_CUDA_EVENTS="1" if args.cuda_events else "0",
                       SGLANG_KV_EC_CPU_PROFILE="1" if args.cpu_profile else "0",
-                      SGLANG_KV_EC_CAPTURE_PLAN=json.dumps(plan))
+                      SGLANG_KV_EC_CAPTURE_PLAN=json.dumps(plan),
+                      SGLANG_KV_EC_CHUNK_PLAN=json.dumps(chunk_plan),
+                      SGLANG_KV_EC_REQUEST_VERSION=os.environ.get(
+                          "SGLANG_KV_EC_REQUEST_VERSION", "request-v1"),
+                      SGLANG_KV_EC_CHECKPOINT_VERSION=os.environ.get(
+                          "SGLANG_KV_EC_CHECKPOINT_VERSION", args.snapshot_id),
+                      SGLANG_KV_EC_MANAGER_EPOCH=os.environ.get(
+                          "SGLANG_KV_EC_MANAGER_EPOCH", "local-scheduler-epoch"))
+    if args.chunk_size is not None:
+        # Three chunks are submitted independently. Keep their bounded IPC
+        # ownership explicit; the Manager must be started with matching
+        # --max-pending capacity.
+        os.environ["SGLANG_KV_EC_PARITY_QUEUE"] = str(len(chunk_plan[args.request_id]))
     os.environ.pop("SGLANG_KV_EC_PARITY_SOCKET", None)
     os.environ.pop("SGLANG_KV_EC_PREPARED_IDENTITY", None)
     if args.mode == "parity":

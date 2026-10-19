@@ -120,6 +120,28 @@ overlap, mixed request versions, checkpoint versions, manager epochs, or
 incomplete TP rank sets. Only `COMPLETE` represents a full prefill protection
 point.
 
+The controlled launcher can now request those captures with
+`--chunk-size 256` (and `--token-count 256`). It creates
+`<base>-chunk-1..3`, and the capture hook reads the three disjoint ranges from
+the same live request before normal cache release. Start the Manager with
+`--max-pending 3`; this is required because the chunks are independent
+checkpoints. Validate them with:
+
+```bash
+python -m experiments.kv_ec.complete_prefill \
+  --socket "$RUN/manager.sock" \
+  --base-snapshot "$SNAP" \
+  --request-id kv-ec-artificial-request \
+  --request-version request-v1 \
+  --checkpoint-version "$SNAP" \
+  --manager-epoch local-scheduler-epoch \
+  --output "$OUT/$SNAP-complete.json"
+```
+
+This command only aggregates already `COMMITTED` Manager metadata; it does
+not create a checkpoint or perform GPU writeback. A missing or failed chunk
+causes a nonzero exit and no `COMPLETE` report.
+
 ## CPU checks
 
 ```bash

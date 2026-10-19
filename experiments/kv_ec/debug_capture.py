@@ -373,6 +373,9 @@ def capture(scheduler, batch, req, config):
     meta = dict(identity, format="kv-ec-rank-bin-v1", provenance="sglang_request",
                 snapshot_id=config.snapshot_id, request_id=request_hash,
                 request_id_encoding="sha256", req_pool_idx=row, req_generation=generation,
+                request_version=os.environ.get("SGLANG_KV_EC_REQUEST_VERSION", "request-v1"),
+                checkpoint_version=os.environ.get("SGLANG_KV_EC_CHECKPOINT_VERSION", config.snapshot_id),
+                manager_epoch=os.environ.get("SGLANG_KV_EC_MANAGER_EPOCH", "local-scheduler-epoch"),
                 slot_generation=slot_generations, process_epoch=PROCESS_EPOCH, pid=os.getpid(),
                 tp_rank=ps.tp_rank, tp_size=ps.tp_size, gpu_id=ps.gpu_id,
                 cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -489,6 +492,8 @@ def maybe_capture(scheduler, batch, req):
     target = os.environ.get("SGLANG_KV_EC_REQUEST_ID")
     snapshot_id = os.environ.get("SGLANG_KV_EC_SNAPSHOT_ID", "")
     raw_plan = os.environ.get("SGLANG_KV_EC_CAPTURE_PLAN")
+    raw_chunk_plan = os.environ.get("SGLANG_KV_EC_CHUNK_PLAN")
+    chunk_snapshots = None
     if raw_plan:
         try:
             plan = json.loads(raw_plan)
@@ -505,43 +510,73 @@ def maybe_capture(scheduler, batch, req):
             return
     elif not target or req.rid != target:
         return
+    if raw_chunk_plan:
+        try:
+            chunk_plan = json.loads(raw_chunk_plan)
+            require(isinstance(chunk_plan, dict) and req.rid in chunk_plan, "invalid_chunk_plan")
+            chunk_snapshots = chunk_plan[req.rid]
+            require(isinstance(chunk_snapshots, list) and 0 < len(chunk_snapshots) <= 16,
+                    "invalid_chunk_plan")
+            require(all(isinstance(value, str) and
+                        re.fullmatch(r"[A-Za-z0-9_-]{1,96}", value)
+                        for value in chunk_snapshots), "invalid_chunk_plan")
+            require(len(set(chunk_snapshots)) == len(chunk_snapshots), "duplicate_chunk_in_plan")
+        except Exception:
+            logger.warning("KV_EC_DEBUG invalid chunk plan; inference continues")
+            return
     try:
         rank = _tp_rank(scheduler)
     except Exception:
         rank = -1
-    attempt_key = (os.getpid(), PROCESS_EPOCH, snapshot_id, target, rank)
-    if attempt_key in _ATTEMPTED:
-        return
-    _ATTEMPTED.add(attempt_key)
-    config = None
-    profiler = None
+    base_config = None
     try:
-        config = replace(CaptureConfig.from_env(), snapshot_id=snapshot_id, target_rid=target)
-        if os.environ.get("SGLANG_KV_EC_CPU_PROFILE") == "1":
-            import cProfile
-            profiler = cProfile.Profile()
-            profiler.enable()
-        try:
-            capture(scheduler, batch, req, config)
-        finally:
-            if profiler is not None:
-                profiler.disable()
-                directory = config.output / config.snapshot_id
-                directory.mkdir(parents=True, exist_ok=True)
-                # Explicitly diagnostic: profile serialization is after capture
-                # timing and excludes no correctness operations from execution.
-                with (directory / f"rank_{rank}.cpu.prof").open("xb") as stream:
-                    import marshal
-                    profiler.create_stats()
-                    marshal.dump(profiler.stats, stream)
+        base_config = CaptureConfig.from_env()
+        snapshots = chunk_snapshots or [snapshot_id]
+        for index, chunk_snapshot in enumerate(snapshots):
+            attempt_key = (os.getpid(), PROCESS_EPOCH, chunk_snapshot, target, rank)
+            if attempt_key in _ATTEMPTED:
+                continue
+            _ATTEMPTED.add(attempt_key)
+            # A chunk plan is deliberately explicit: the configured token
+            # count is the chunk width and chunks are contiguous from zero.
+            chunk_config = replace(
+                base_config,
+                snapshot_id=chunk_snapshot,
+                target_rid=target,
+                token_start=(index * base_config.token_count if chunk_snapshots else base_config.token_start),
+            )
+            profiler = None
+            if os.environ.get("SGLANG_KV_EC_CPU_PROFILE") == "1":
+                import cProfile
+                profiler = cProfile.Profile()
+                profiler.enable()
+            try:
+                capture(scheduler, batch, req, chunk_config)
+            finally:
+                if profiler is not None:
+                    profiler.disable()
+                    directory = chunk_config.output / chunk_config.snapshot_id
+                    directory.mkdir(parents=True, exist_ok=True)
+                    with (directory / f"rank_{rank}.cpu.prof").open("xb") as stream:
+                        import marshal
+                        profiler.create_stats()
+                        marshal.dump(profiler.stats, stream)
+        return
     except Exception as exc:
         # Failure is local, never changes sampling or distributed control flow.
         reason = str(exc) if isinstance(exc, CaptureRejected) else type(exc).__name__
+        failed_snapshot = snapshot_id
+        if chunk_snapshots:
+            failed_snapshot = (
+                chunk_snapshots[index]
+                if "index" in locals() and index < len(chunk_snapshots)
+                else chunk_snapshots[0]
+            )
         logger.warning("KV_EC_DEBUG rejected rank=%d reason=%s; inference continues", rank, reason)
         try:
             from .scheduler_recovery_guard import abort_scheduler_lease
 
-            abort_scheduler_lease(snapshot_id, req, scheduler)
+            abort_scheduler_lease(failed_snapshot, req, scheduler)
         except Exception as abort_exc:
             logger.warning(
                 "KV_EC scheduler lease abort failed rank=%d (%s)",
@@ -549,8 +584,9 @@ def maybe_capture(scheduler, batch, req):
                 type(abort_exc).__name__,
             )
         try:
-            if config is None:
-                config = replace(CaptureConfig.from_env(), snapshot_id=snapshot_id, target_rid=target)
+            if base_config is None:
+                base_config = CaptureConfig.from_env()
+            config = replace(base_config, snapshot_id=failed_snapshot, target_rid=target)
             directory = config.output / config.snapshot_id
             directory.mkdir(parents=True, exist_ok=True)
             with (directory / f"rank_{rank}.error.json").open("x") as f:

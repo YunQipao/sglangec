@@ -41,6 +41,7 @@ def _identity(metadata):
             "source_commit", "core_diff_sha256", "tp_size", "layers",
             "token_start", "token_count", "token_ids_sha256", "dtype",
             "packed_byte_count", "pool_class", "lifetime", "completion_dependency")
+    keys += ("request_version", "checkpoint_version", "manager_epoch")
     return tuple((key, json.dumps(metadata.get(key), sort_keys=True)) for key in keys)
 
 

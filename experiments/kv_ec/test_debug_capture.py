@@ -223,6 +223,25 @@ class RealCallPathTests(unittest.TestCase):
         self.assertIs(capture_mock.call_args.args[0], s)
         self.assertEqual(capture_mock.call_args.args[3].snapshot_id, "regression")
 
+    def test_chunk_plan_captures_contiguous_independent_snapshots(self):
+        s, b, r, _, _ = frozen_processor()
+        os.environ["SGLANG_KV_EC_TOKEN_COUNT"] = "256"
+        os.environ["SGLANG_KV_EC_CHUNK_PLAN"] = json.dumps(
+            {"artificial": ["prefill-chunk-1", "prefill-chunk-2", "prefill-chunk-3"]}
+        )
+        with patch.object(debug_capture, "capture", return_value={}) as capture_mock:
+            maybe_capture(s, b, r)
+        self.assertEqual(capture_mock.call_count, 3)
+        configs = [call.args[3] for call in capture_mock.call_args_list]
+        self.assertEqual(
+            [(config.snapshot_id, config.token_start, config.token_count) for config in configs],
+            [
+                ("prefill-chunk-1", 0, 256),
+                ("prefill-chunk-2", 256, 256),
+                ("prefill-chunk-3", 512, 256),
+            ],
+        )
+
     def test_default_disabled_and_non_target_never_capture(self):
         s, b, r, _, _ = frozen_processor()
         with patch.object(debug_capture, "capture") as capture_mock:
