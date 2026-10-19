@@ -104,6 +104,22 @@ SWA, HiSparse, Unified, NPU, DCP, prefix-cache ownership, or every allocation
 kernel path. Therefore `writeback_supported` remains false and this is not
 permission to run a destructive experiment.
 
+## Cross-rank coordination and complete prefill
+
+`cross_rank_lease.py` contains a CPU-only TP=4 protocol with explicit states
+`PREPARE`, `LOCAL_LEASED`, `ALL_RANKS_READY`, `CUDA_COMPLETED`,
+`ALL_RANKS_VALIDATED`, and `GLOBAL_RELEASED`. A rank failure or timeout enters
+a terminal failure state; all local abort acknowledgements are required before
+the coordinator releases its logical ownership. It performs no NCCL or IPC and
+is not wired into the live Scheduler, so the real GPU transaction remains
+local-only.
+
+`chunk_protection.py` requires three independently `COMMITTED` 256-token
+snapshots for a 768-token request. It rejects metadata-only chunks, gaps,
+overlap, mixed request versions, checkpoint versions, manager epochs, or
+incomplete TP rank sets. Only `COMPLETE` represents a full prefill protection
+point.
+
 ## CPU checks
 
 ```bash
