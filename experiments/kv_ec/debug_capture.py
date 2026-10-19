@@ -165,6 +165,11 @@ def capture(scheduler, batch, req, config):
     transfer = os.environ.get("SGLANG_KV_EC_TRANSFER", "pinned")
     require(transfer in ("blocking", "pinned"), "invalid_transfer_mode")
     cuda_events = os.environ.get("SGLANG_KV_EC_CUDA_EVENTS") == "1"
+    parity_socket = os.environ.get("SGLANG_KV_EC_PARITY_SOCKET")
+    defer_checksum_setting = os.environ.get("SGLANG_KV_EC_DEFER_CHECKSUMS", "1")
+    require(defer_checksum_setting in ("0", "1"), "invalid_checksum_deferral_setting")
+    deferred_checksums = (mode == "FAST_PARITY" and bool(parity_socket)
+                          and defer_checksum_setting == "1")
     phase = {"protection_mode": mode, "transfer_mode": transfer,
              "timing_schema": "kv-ec-exclusive-wall-v2", "detailed": detailed,
              "cpu_profile_enabled": os.environ.get("SGLANG_KV_EC_CPU_PROFILE") == "1",
@@ -298,7 +303,10 @@ def capture(scheduler, batch, req, config):
                         np.array_equal(vb, select_raw_bytes(v, slots).cpu().numpy()), "source_changed_during_copy")
         shape = [config.token_count, *expected_tail]
         with timing.region("segment_sha256_ms", layer_id):
-            k_hash, v_hash = digest(kb), digest(vb)
+            if deferred_checksums:
+                k_hash = v_hash = None
+            else:
+                k_hash, v_hash = digest(kb), digest(vb)
         with timing.region("layer_metadata_construction_ms", layer_id):
             record = {"layer_id": layer_id, "dtype": str(k.dtype), "original_shape": {"k": list(k.shape), "v": list(v.shape)},
                   "source_stride": {"k": list(k.stride()), "v": list(v.stride())},
@@ -309,8 +317,9 @@ def capture(scheduler, batch, req, config):
             offset += kb.size + vb.size
             chunks.extend([kb, vb])
         with timing.region("aggregate_kv_sha256_ms", layer_id):
-            kh.update(kb)
-            vh.update(vb)
+            if not deferred_checksums:
+                kh.update(kb)
+                vh.update(vb)
         with timing.region("layer_tensor_release_ms", layer_id):
             del k_selected, v_selected, kb, vb
     with timing.region("final_device_sync_ms"):
@@ -346,7 +355,8 @@ def capture(scheduler, batch, req, config):
                 req_pool_class=type(req_pool).__module__ + "." + type(req_pool).__name__,
                 layer_records=layer_records, original_shape=[r["original_shape"] for r in layer_records],
                 physical_slots=slots_cpu, packed_byte_count=int(payload.size), sha256=payload_sha256,
-                k_sha256=kh.hexdigest(), v_sha256=vh.hexdigest(), source_unchanged=True,
+                k_sha256=None if deferred_checksums else kh.hexdigest(),
+                v_sha256=None if deferred_checksums else vh.hexdigest(), source_unchanged=True,
                 lifetime="non_overlap_single_scheduler_before_append_cache_free",
                 completion_dependency="device_synchronize_before_read_blocking_d2h_before_return",
                 selected_copy_and_check_ms=(time.perf_counter() - started) * 1000,
@@ -356,7 +366,6 @@ def capture(scheduler, batch, req, config):
         timing.thread_cpu["python_object_construction_ms"] = (time.thread_time_ns() - object_cpu_started) / 1e6
     directory = config.output / config.snapshot_id
     meta["performance_ms"] = phase
-    parity_socket = os.environ.get("SGLANG_KV_EC_PARITY_SOCKET")
     if parity_socket:
         # The client owns a bytes copy in a bounded background queue. No rank
         # file is written and this scheduler thread never waits for peers.
@@ -377,7 +386,7 @@ def capture(scheduler, batch, req, config):
         # manager after its immutable CPU copy is owned. DEBUG_SAFE retains the
         # original worker-side checks and metadata.
         submit_meta = meta
-        if mode == "FAST_PARITY":
+        if deferred_checksums:
             submit_meta = dict(meta)
             submit_meta["checksum_deferred"] = True
             submit_meta.pop("k_sha256", None)
@@ -416,8 +425,8 @@ def capture(scheduler, batch, req, config):
     phase["steady_snapshot_ms"] = phase["scheduler_capture_ms"] - phase["model_fingerprint_ms"]
     phase["other_uninstrumented_ms"] = phase["unaccounted_ms"]
     phase["cuda_event_layers"] = event_measurements
-    phase["sha256_scanned_bytes"] = payload_bytes if mode == "FAST_PARITY" and parity_socket else payload_bytes * 3
-    phase["checksum_location"] = "worker_payload_manager_segments" if mode == "FAST_PARITY" and parity_socket else "worker"
+    phase["sha256_scanned_bytes"] = payload_bytes if deferred_checksums else payload_bytes * 3
+    phase["checksum_location"] = "worker_payload_manager_segments" if deferred_checksums else "worker"
     phase["numpy_concatenate_copy_bytes"] = payload_bytes
     phase["scheduler_blocking_scope"] = "capture through host cleanup; diagnostic tail reported separately"
     phase["scheduler_blocking_ms"] = phase["scheduler_capture_ms"]

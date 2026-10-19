@@ -62,6 +62,9 @@ accepts a rank or can COMMIT. This moves two scans out of the scheduler hot
 path; it does not remove checksum validation. `sha256_scanned_bytes` reports
 worker scans only, and `checksum_location` identifies the split. A corrupt
 payload still fails against the worker's payload SHA.
+For an explicit A/B replay, set `SGLANG_KV_EC_DEFER_CHECKSUMS=0` to retain the
+pre-optimization worker-side three-scan path, or `=1` for the optimized path;
+the default is `1`. This switch is experimental and does not disable checks.
 
 `--ec-warmups 2 --ec-repeat 10` enables a bounded explicit request plan:
 `RID-ecwarmup-1/2`, then `RID-measure-1..10`; snapshot IDs use the same suffixes
