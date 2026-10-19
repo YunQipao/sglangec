@@ -1,0 +1,29 @@
+{
+  "snapshot_id": "fast-256-20261019T061801",
+  "tp_rank": 1,
+  "parity_protection": "ENQUEUED",
+  "performance_ms": {
+    "protection_mode": "FAST_PARITY",
+    "lifetime_and_pool_validation_ms": 0.135188,
+    "model_fingerprint_ms": 0.121823,
+    "gpu_sync_ms": 1.1003000000000003,
+    "slot_query_metadata_ms": 0.188589,
+    "numpy_concatenate_ms": 4.575644,
+    "python_object_construction_ms": 0.152444,
+    "kv_gather_ms": 59.730808999999994,
+    "d2h_ms": 10.931998000000004,
+    "source_recheck_ms": 0.0,
+    "sha256_ms": 96.357406,
+    "ipc_enqueue_ms": 8.752766,
+    "ipc_copy_bytes": 9437184,
+    "ipc_copy_count": 1,
+    "python_object_serialization_ms": 8.752766,
+    "diagnostic_write_ms": 0.0,
+    "snapshot_end_to_end_ms": 274.371182,
+    "scheduler_blocking_ms": 274.371182,
+    "steady_snapshot_ms": 274.24935899999997,
+    "unaccounted_ms": 92.32421499999998,
+    "other_uninstrumented_ms": 92.32421499999998
+  },
+  "diagnostic_write_included": false
+}

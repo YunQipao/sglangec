@@ -19,10 +19,10 @@ from experiments.kv_ec.test_debug_capture import rank_fixture
 from experiments.kv_ec.checkpoint_protocol import recv_message, send_message
 
 
-def metadata_and_blocks():
+def metadata_and_blocks(tp=4, layers=(0,), count=4):
     blocks, metadata = [], []
-    for rank in range(4):
-        payload, meta = rank_fixture(rank, 4, layers=(0,), count=4)
+    for rank in range(tp):
+        payload, meta = rank_fixture(rank, tp, layers=layers, count=count, heads=8 // tp)
         meta.update(snapshot_id="checkpoint", model_identifier="fixture-model",
                     model_sha256="fixture", source_commit="fixture",
                     core_diff_sha256="fixture", request_id="request",
@@ -37,6 +37,103 @@ def metadata_and_blocks():
 
 
 class ManagerTests(unittest.TestCase):
+    def test_tp2_commit_and_each_erasure_releases_sources(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        originals = [block.copy() for block in blocks]
+        manager = ParityManager(test_oracle=True)
+        self.assertEqual(manager.submit(metadata[0], blocks[0])["ranks"], [0])
+        status = manager.submit(metadata[1], blocks[1])
+        self.assertEqual(status["state"], COMMITTED)
+        self.assertEqual(status["oracle_checks"], [
+            {"lost_rank": rank, "byte_exact": True} for rank in range(2)])
+        checkpoint = manager._checkpoints["checkpoint"]
+        self.assertEqual(checkpoint.ranks, {})
+        self.assertIsNone(checkpoint.oracle)
+        self.assertEqual(checkpoint.parity.nbytes, blocks[0].nbytes)
+        self.assertEqual(set(status["rank_hashes"]), {"0", "1"})
+        for actual, original in zip(blocks, originals):
+            np.testing.assert_array_equal(actual, original)
+        # Retained sources are allowed ONLY for the explicit test API.
+        oracle = ParityManager(retain_oracle=True)
+        for meta, block in zip(metadata, blocks):
+            oracle.submit(meta, block)
+        for lost in range(2):
+            np.testing.assert_array_equal(oracle.recover_for_test("checkpoint", lost), originals[lost])
+        with self.assertRaises(ValueError):
+            oracle.recover_for_test("checkpoint", 2)
+        self.assertEqual(ParityManager().status("checkpoint")["state"], "UNKNOWN")
+        manager.release("checkpoint")
+        self.assertEqual(manager.status("checkpoint")["state"], "UNKNOWN")
+
+    def test_tp2_missing_rank_expires(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        manager = ParityManager(timeout=0.01)
+        self.assertEqual(manager.submit(metadata[0], blocks[0])["state"], PENDING)
+        with patch("experiments.kv_ec.parity_manager.time.monotonic",
+                   return_value=manager._checkpoints["checkpoint"].deadline + 1):
+            self.assertEqual(manager.status("checkpoint")["state"], EXPIRED)
+        self.assertFalse(manager._checkpoints["checkpoint"].ranks)
+
+    def test_tp2_duplicates_corruption_and_identity_mismatches(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        manager = ParityManager()
+        manager.submit(metadata[0], blocks[0])
+        self.assertEqual(manager.submit(metadata[0], blocks[0])["reason"], "DUPLICATE_RANK")
+        changes = {"request_id": "other", "model_sha256": "other", "format": "v2",
+                   "token_start": 1, "layers": [1], "dtype": "torch.float16"}
+        for key, value in changes.items():
+            with self.subTest(key=key):
+                manager = ParityManager()
+                manager.submit(metadata[0], blocks[0])
+                bad = deepcopy(metadata[1]); bad[key] = value
+                self.assertEqual(manager.submit(bad, blocks[1])["state"], FAILED)
+                self.assertFalse(manager._checkpoints["checkpoint"].ranks)
+        manager = ParityManager()
+        manager.submit(metadata[0], blocks[0])
+        bad = blocks[1].copy(); bad[0] ^= 1
+        self.assertEqual(manager.submit(metadata[1], bad)["state"], FAILED)
+
+    def test_tp2_tp4_cannot_mix_in_either_order(self):
+        for first_tp, second_tp in ((2, 4), (4, 2)):
+            with self.subTest(first_tp=first_tp):
+                blocks, metadata = metadata_and_blocks(first_tp)
+                other_blocks, other_metadata = metadata_and_blocks(second_tp)
+                manager = ParityManager()
+                manager.submit(metadata[0], blocks[0])
+                self.assertEqual(manager.submit(other_metadata[1], other_blocks[1])["reason"],
+                                 "METADATA_MISMATCH")
+                self.assertEqual(manager.status("checkpoint")["state"], FAILED)
+
+    def test_tp2_invalid_rank_or_version_never_commits(self):
+        blocks, metadata = metadata_and_blocks(2)
+        for key, value in (("tp_rank", 2), ("tp_rank", -1), ("tp_size", 3), ("format", "v2")):
+            with self.subTest(key=key, value=value):
+                bad = deepcopy(metadata[0]); bad[key] = value
+                manager = ParityManager()
+                self.assertEqual(manager.submit(bad, blocks[0])["state"], FAILED)
+
+    def test_tp2_tp4_all_layer_sizes_and_all_erasures(self):
+        # CPU-generated fixtures exercise the online shape validator, not GPU provenance.
+        for tp in (2, 4):
+            for count in (128, 256, 512):
+                with self.subTest(tp=tp, count=count):
+                    blocks, metadata = metadata_and_blocks(tp, tuple(range(36)), count)
+                    expected = 36 * count * (8 // tp) * 128 * 2 * 2
+                    manager = ParityManager(test_oracle=True)
+                    for meta, block in zip(metadata, blocks):
+                        self.assertEqual(block.nbytes, expected)
+                        meta["provenance"] = "sglang_request"
+                        status = manager.submit(meta, block)
+                    self.assertEqual(status["state"], COMMITTED)
+                    self.assertEqual(status["parity_bytes"], expected)
+                    self.assertEqual(len(status["oracle_checks"]), tp)
+                    self.assertIsNone(manager._checkpoints["checkpoint"].oracle)
+
+    def test_tp2_wrong_runtime_shape_is_rejected(self):
+        payload, meta = rank_fixture(0, 2, count=128, heads=2)
+        meta["provenance"] = "sglang_request"
+        self.assertEqual(ParityManager().submit(meta, payload)["state"], FAILED)
+
     def test_four_rank_commit_releases_inputs_and_keeps_only_parity(self):
         blocks, metadata = metadata_and_blocks()
         manager = ParityManager(timeout=1, max_pending=1)
@@ -137,8 +234,30 @@ class ManagerTests(unittest.TestCase):
 
 
 class IpcTests(unittest.TestCase):
+    def test_submit_once_normalizes_numpy_and_reuses_owned_bytes(self):
+        block = np.arange(16, dtype=np.uint8)
+        owned = block.tobytes()
+        for payload in (block, owned):
+            with self.subTest(payload_type=type(payload).__name__):
+                with patch("experiments.kv_ec.parity_manager.socket.socket"), \
+                     patch("experiments.kv_ec.parity_manager.send_message") as send, \
+                     patch("experiments.kv_ec.parity_manager.recv_message",
+                           return_value=({"state": PENDING}, b"")):
+                    response = submit_once("/unused", {}, payload)
+                sent = send.call_args.args[2]
+                self.assertIsInstance(sent, bytes)
+                self.assertEqual(sent, owned)
+                if payload is owned:
+                    self.assertIs(sent, owned)
+                self.assertEqual(response["state"], PENDING)
+
     def test_unix_socket_service_commits_without_files(self):
-        blocks, metadata = metadata_and_blocks()
+        for tp in (2, 4):
+            with self.subTest(tp=tp):
+                self._socket_service_commits_without_files(tp)
+
+    def _socket_service_commits_without_files(self, tp):
+        blocks, metadata = metadata_and_blocks(tp)
         with tempfile.TemporaryDirectory() as directory:
             socket_path = Path(directory) / "parity.sock"
             import socket

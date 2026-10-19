@@ -49,8 +49,8 @@ def load_real_snapshot(directory):
         raise ValueError("GPU restore requires real sglang_request provenance")
     if manifest.get("snapshot_completion_status") != "complete":
         raise ValueError("snapshot is not complete")
-    if manifest["tp_size"] != 4:
-        raise ValueError("this experiment requires TP=4")
+    if manifest["tp_size"] not in (2, 4):
+        raise ValueError("this experiment requires TP=2/4")
     return manifest, blocks
 
 
@@ -100,6 +100,8 @@ def restore_rank_to_gpu(payload, metadata, device):
 
 
 def one_restore(manifest, blocks, lost_rank, device):
+    if not 0 <= lost_rank < manifest["tp_size"] or len(blocks) != manifest["tp_size"]:
+        raise ValueError("invalid lost rank or incomplete TP blocks")
     parity_started = time.perf_counter_ns()
     parity = encode(blocks)
     xor_ms = (time.perf_counter_ns() - parity_started) / 1e6
@@ -127,24 +129,25 @@ def one_restore(manifest, blocks, lost_rank, device):
 
 def benchmark(directory, device="cuda", warmup=1, repeat=5):
     manifest, blocks = load_real_snapshot(directory)
+    tp = manifest["tp_size"]
     device = torch.device(device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("CUDA is not accessible; run this tool on the GPU server")
     if warmup < 0 or repeat < 1:
         raise ValueError("warmup must be >= 0 and repeat must be >= 1")
     for _ in range(warmup):
-        for lost in range(4):
+        for lost in range(tp):
             one_restore(manifest, blocks, lost, device)
-    samples = {rank: [] for rank in range(4)}
+    samples = {rank: [] for rank in range(tp)}
     for _ in range(repeat):
-        for lost in range(4):
+        for lost in range(tp):
             samples[lost].append(one_restore(manifest, blocks, lost, device))
     def summary(key, rank):
         values = [item[key] for item in samples[rank]]
         return {"median_ms": statistics.median(values),
                 "p95_ms": float(np.percentile(values, 95)), "samples_ms": values}
     ranks = []
-    for lost in range(4):
+    for lost in range(tp):
         ranks.append({"lost_rank": lost, "byte_exact": True,
                       "xor": summary("xor_ms", lost),
                       "cpu_recovery": summary("cpu_recovery_ms", lost),
@@ -152,7 +155,7 @@ def benchmark(directory, device="cuda", warmup=1, repeat=5):
                       "gpu_verification": summary("gpu_verification_ms", lost),
                       "restored_bytes": samples[lost][0]["restored_bytes"]})
     return {"tool": "gpu_scratch_restore", "snapshot_dir": str(Path(directory).resolve()),
-            "snapshot_id": manifest["snapshot_id"], "tp": 4, "layers": manifest["layers"],
+            "snapshot_id": manifest["snapshot_id"], "tp": tp, "layers": manifest["layers"],
             "token_count": manifest["token_count"], "dtype": manifest["dtype"],
             "device": str(device), "warmup": warmup, "repeat": repeat,
             "provenance": manifest["provenance"], "online_kv_pool_modified": False,

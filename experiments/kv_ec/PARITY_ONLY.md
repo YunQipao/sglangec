@@ -4,6 +4,14 @@ Baseline inspected: `49e8268495`, clean `main` at the start of development.
 This prototype does not implement Node RS, adaptive RS, worker restart, online
 KV writeback, or fault-tolerant inference. All functionality is opt-in.
 
+For TP=2 (GPUs 1,2), see [TP2_ONLINE.md](TP2_ONLINE.md) for complete three-terminal
+commands, matching baseline, capacity checks and optional offline scratch restore.
+The original TP=4 experiment commands below remain valid.
+
+For exclusive timing v2, transfer A/B, actual EC warmups, optional CPU/CUDA
+profiling and validated multi-request commands, see [PROFILING.md](PROFILING.md).
+Its timing definitions supersede the historical timing descriptions below.
+
 ## Source analysis and design
 
 1. `SchedulerBatchResultProcessor.process_batch_result_prefill()` calls the
@@ -34,7 +42,8 @@ KV writeback, or fault-tolerant inference. All functionality is opt-in.
    token hash/range, layer IDs, TP size, dtype, byte length and packed layout.
    Row generation and physical slots are rank-local, not compared across ranks.
 
-State transitions: PENDING -> COMMITTED only after four unique validated ranks;
+State transitions: PENDING -> COMMITTED only after the complete unique validated
+rank set for metadata.tp_size (TP=2 or TP=4);
 duplicate rank, corruption or incompatible metadata -> FAILED; missing rank ->
 EXPIRED. Different snapshot IDs remain isolated, never combined. ENQUEUED is
 not protection: query the manager for COMMITTED. A timeout/connection loss on
@@ -57,7 +66,7 @@ the sender means unknown delivery; never infer commit from a successful enqueue.
   `release()` between research batches; no unbounded retention is permitted.
 - COMMITTED retains parity, shared layout/identity and rank hashes, not complete
   rank buffers. `--test-oracle` temporarily uses pending inputs to recover all
-  four erasures and saves booleans only, then releases inputs. Constructor-only
+  TP erasures and saves booleans only, then releases inputs. Constructor-only
   `retain_oracle=True` is for unit tests, never enabled by the CLI/launcher.
 - A manager process exit loses DRAM protection. No durability guarantee exists.
 
@@ -161,9 +170,11 @@ and excluded from `scheduler_blocking_ms`.
 
 For the current path, GPU D2H produces one owned numpy chunk per K/V segment;
 `AsyncParityClient.submit` makes one immutable queue copy of the packed payload,
-and `checkpoint_protocol.send_message` makes the socket-side immutable bytes
-conversion (plus kernel/socket buffering). The manager then validates its
-received buffer and releases all four rank buffers immediately after XOR
+and `submit_once` / `checkpoint_protocol.send_message` reuse those immutable
+bytes without another Python payload copy (kernel/socket buffering is separate).
+Direct numpy submissions to `submit_once` are converted to bytes once.
+The manager then validates its
+received buffer and releases all TP rank buffers immediately after XOR
 COMMITTED; it retains only parity and metadata.
 
 The current synchronous D2H path may use pinned host buffers when available,
@@ -172,8 +183,8 @@ enabled: no slot lease proves that the request's physical slots cannot be
 freed or reused before the copy completes. Removing that fence would be an
 incorrect performance result.
 
-Useful CPU-only checks from the repository root (the managed environment in
-this host has no torch/GPU) are:
+Useful CPU-only checks from the repository root (activate the `sglang-ec`
+Conda environment, whose Python has torch; the default shell Python may not) are:
 
 ```bash
 python -m py_compile experiments/kv_ec/{debug_capture,parity_manager,launch_debug}.py
