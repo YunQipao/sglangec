@@ -41,6 +41,26 @@ the writeback, and validates the same generation before resuming scheduling.
 Until that interface exists, the only valid GPU experiment is read-only
 mapping/layout inspection in an isolated server.
 
+## Lease prototype
+
+`recovery_lease.py` is a CPU model of that transaction. It is not imported by
+SGLang and does not change allocator behavior. Its required integration points
+are:
+
+1. `begin_recovery`: scheduler thread after the final prefill/decode forward and
+   before `release_kv_cache`, after all TP ranks report the same request and
+   slot versions.
+2. `before_free`/`before_alloc`: allocator `free`, `free_segment(s)` and
+   allocation paths must reject or defer protected slots.
+3. `validate_recovery`: after all CUDA copy/write events complete, re-read row
+   generation, physical slots, slot generations, checkpoint state and manager
+   epoch.
+4. `commit_recovery`: release the lease only after validation and writeback.
+5. `abort_recovery`: release the lease and leave original KV untouched.
+
+The current allocator does not expose these hooks or physical slot generations,
+so this prototype remains simulation-only. No production path is enabled.
+
 ## CPU checks
 
 ```bash
