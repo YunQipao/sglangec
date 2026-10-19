@@ -1,0 +1,8 @@
+{
+  "snapshot_id": "hash0-20261019T082321-ecwarmup-1",
+  "tp_rank": 2,
+  "diagnostic_write_ms": 0.978376,
+  "info_log_ms": 0.121175,
+  "scheduler_through_diagnostics_ms": 143.901,
+  "tail_record_own_write_included": false
+}

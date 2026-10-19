@@ -1,0 +1,8 @@
+{
+  "snapshot_id": "hash1-20261019T084058-measure-3",
+  "tp_rank": 1,
+  "diagnostic_write_ms": 1.427637,
+  "info_log_ms": 0.123964,
+  "scheduler_through_diagnostics_ms": 43.746789,
+  "tail_record_own_write_included": false
+}
