@@ -12,13 +12,15 @@ from experiments.kv_ec.recovery_lease import (
 
 
 def observations(tp=4, generation=7, slot_generation=11):
-    slots = (8, 11, 15)
     return [
         RankLeaseObservation(
             tp_rank=rank, tp_size=tp, request_id="rid", request_version="v1",
-            req_pool_idx=3, req_generation=generation, physical_slots=slots,
-            slot_generations=tuple(slot_generation for _ in slots),
-            checkpoint_version="cp-v1",
+            req_pool_idx=rank + 3, req_generation=generation, physical_slots=(
+                8 + rank * 100, 11 + rank * 100, 15 + rank * 100
+            ),
+            slot_generations=(slot_generation, slot_generation, slot_generation),
+            checkpoint_version="cp-v1", manager_epoch="manager-1",
+            token_start=0, token_count=3,
         )
         for rank in range(tp)
     ]
@@ -29,22 +31,22 @@ class RecoveryLeaseTests(unittest.TestCase):
         manager = RecoveryLeaseManager(timeout_s=10)
         manager.begin_recovery("lease", observations())
         with self.assertRaisesRegex(LeaseRejected, "protected_slot"):
-            manager.before_free([11])
+            manager.before_free([11], tp_rank=0)
         with self.assertRaisesRegex(LeaseRejected, "protected_slot"):
-            manager.before_alloc([15])
+            manager.before_alloc([15], tp_rank=0)
         for rank in range(4):
-            manager.mark_copy_complete("lease", rank)
+            manager.mark_copy_complete("lease", rank, cuda_event_complete=True)
         manager.validate_recovery("lease", observations(), checkpoint_state="COMMITTED",
                                  manager_epoch="manager-1")
         self.assertEqual(manager.commit_recovery("lease")["state"], LeaseState.COMMITTED.value)
-        manager.before_free([11])
+        manager.before_free([11], tp_rank=0)
 
     def test_request_release_race_and_generation_change_fail_closed(self):
         manager = RecoveryLeaseManager(timeout_s=10)
         manager.begin_recovery("lease", observations())
         stale = [replace(item, req_generation=8) for item in observations()]
         for rank in range(4):
-            manager.mark_copy_complete("lease", rank)
+            manager.mark_copy_complete("lease", rank, cuda_event_complete=True)
         with self.assertRaisesRegex(LeaseRejected, "request_generation"):
             manager.validate_recovery("lease", stale, checkpoint_state="COMMITTED",
                                       manager_epoch="manager-1")
@@ -57,7 +59,7 @@ class RecoveryLeaseTests(unittest.TestCase):
         bad = observations()
         bad[2] = replace(bad[2], slot_generations=(99, 11, 15))
         for rank in range(4):
-            manager.mark_copy_complete("lease", rank)
+            manager.mark_copy_complete("lease", rank, cuda_event_complete=True)
         with self.assertRaisesRegex(LeaseRejected, "rank_observation|slot_generation"):
             manager.validate_recovery("lease", bad, checkpoint_state="COMMITTED",
                                       manager_epoch="manager-1")
@@ -70,12 +72,46 @@ class RecoveryLeaseTests(unittest.TestCase):
         with self.assertRaisesRegex(LeaseRejected, "unknown|expired|active|copy_after"):
             manager.mark_copy_complete("lease", 0)
         self.assertEqual(manager.status("lease")["state"], LeaseState.EXPIRED.value)
-        manager.before_free([8])
+        manager.before_free([8], tp_rank=0)
         manager = RecoveryLeaseManager(timeout_s=10)
         manager.begin_recovery("lease", observations())
         self.assertEqual(manager.abort_recovery("lease")["state"], LeaseState.ABORTED.value)
         with self.assertRaisesRegex(LeaseRejected, "abort_after"):
             manager.abort_recovery("lease")
+
+    def test_validated_lease_also_expires_before_commit(self):
+        now = [0.0]
+        manager = RecoveryLeaseManager(timeout_s=2, clock=lambda: now[0])
+        manager.begin_recovery("lease", observations())
+        for rank in range(4):
+            manager.mark_copy_complete("lease", rank, cuda_event_complete=True)
+        manager.validate_recovery(
+            "lease", observations(), checkpoint_state="COMMITTED",
+            manager_epoch="manager-1",
+        )
+        now[0] = 3.0
+        with self.assertRaisesRegex(LeaseRejected, "commit_requires"):
+            manager.commit_recovery("lease")
+        self.assertEqual(manager.status("lease")["state"], LeaseState.EXPIRED.value)
+
+    def test_manager_epoch_and_checkpoint_version_are_bound(self):
+        manager = RecoveryLeaseManager(timeout_s=10)
+        manager.begin_recovery(
+            "lease", observations(), manager_epoch="manager-1",
+            checkpoint_version="cp-v1",
+        )
+        for rank in range(4):
+            manager.mark_copy_complete("lease", rank, cuda_event_complete=True)
+        with self.assertRaisesRegex(LeaseRejected, "manager_epoch"):
+            manager.validate_recovery(
+                "lease", observations(), checkpoint_state="COMMITTED",
+                manager_epoch="manager-2",
+            )
+        with self.assertRaisesRegex(LeaseRejected, "checkpoint_version"):
+            manager.validate_recovery(
+                "lease", observations(), checkpoint_state="COMMITTED",
+                manager_epoch="manager-1", checkpoint_version="cp-v2",
+            )
 
     def test_duplicate_operations_checkpoint_manager_and_copy_guards(self):
         manager = RecoveryLeaseManager(timeout_s=10)
@@ -86,7 +122,7 @@ class RecoveryLeaseTests(unittest.TestCase):
             manager.validate_recovery("lease", observations(), checkpoint_state="PENDING",
                                       manager_epoch="manager-1")
         for rank in range(4):
-            manager.mark_copy_complete("lease", rank)
+            manager.mark_copy_complete("lease", rank, cuda_event_complete=True)
         manager.validate_recovery("lease", observations(), checkpoint_state="COMMITTED",
                                  manager_epoch="manager-1")
         manager.commit_recovery("lease")
@@ -100,7 +136,7 @@ class RecoveryLeaseTests(unittest.TestCase):
         manager = RecoveryLeaseManager(timeout_s=10)
         manager.begin_recovery("lease", observations())
         for rank in range(3):
-            manager.mark_copy_complete("lease", rank)
+            manager.mark_copy_complete("lease", rank, cuda_event_complete=True)
         with self.assertRaisesRegex(LeaseRejected, "cuda_copy"):
             manager.validate_recovery("lease", observations(), checkpoint_state="COMMITTED",
                                       manager_epoch="manager-1")

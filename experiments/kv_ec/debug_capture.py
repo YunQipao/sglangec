@@ -178,6 +178,12 @@ def capture(scheduler, batch, req, config):
     phase_cpu_started = time.thread_time_ns() if detailed else 0
     phase_started = time.perf_counter_ns()
     validate_lifetime(scheduler, batch, req, config)
+    if os.environ.get("SGLANG_KV_EC_RECOVERY_GUARD") == "1":
+        from .scheduler_recovery_guard import RecoveryGuard
+        phase["recovery_guard"] = RecoveryGuard().observe(
+            scheduler, req, token_start=config.token_start,
+            token_count=config.token_count,
+        )
     # Import current checkout's exact classes ONLY after the lifetime checks.
     from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 

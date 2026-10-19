@@ -61,6 +61,29 @@ are:
 The current allocator does not expose these hooks or physical slot generations,
 so this prototype remains simulation-only. No production path is enabled.
 
+## Read-only Scheduler integration
+
+`scheduler_recovery_guard.py` is now called from `debug_capture.capture()` only
+when `SGLANG_KV_EC_RECOVERY_GUARD=1`. It reads the real scheduler's:
+
+- `scheduler.req_to_token_pool.req_to_token`
+- `scheduler.req_to_token_pool.req_generation`
+- `req.req_pool_idx`
+- `scheduler.model_worker.ps.tp_rank/tp_size`
+
+It checks the supported mode (TP=4, one request, no overlap, no prefix cache,
+no chunked prefill), records a SHA256 of the physical-slot list, and never
+stores the raw mapping in the diagnostic output. Because the current allocator
+has no physical slot generation, the result is always
+`state=READ_ONLY_BLOCKED` and `writeback_supported=false`. The hook does not
+call `begin_recovery`, `set_kv_buffer`, or any allocator mutation.
+
+The real release and allocation paths remain **uncovered** until a small core
+hook can pass a shared guard into `ReqToTokenPool.free`, allocator `free`/
+`free_segment(s)`, and every `alloc`/`alloc_extend`/`alloc_decode` variant.
+Prefix-cache insertion/eviction and paged/SWA/HISparse/unified allocators are
+not covered by this experiment.
+
 ## CPU checks
 
 ```bash

@@ -43,6 +43,9 @@ class RankLeaseObservation:
     physical_slots: tuple[int, ...]
     slot_generations: tuple[int, ...]
     checkpoint_version: str
+    manager_epoch: str
+    token_start: int = 0
+    token_count: int = 0
 
 
 @dataclass
@@ -51,10 +54,11 @@ class _Lease:
     request_id: str
     request_version: str
     tp_size: int
-    slots: frozenset[int]
-    slot_generations: dict[int, int]
-    req_generations: dict[int, int]
+    slots_by_rank: dict[int, frozenset[int]]
+    slot_generations_by_rank: dict[int, dict[int, int]]
+    req_generations: dict[int, tuple[int, int]]
     checkpoint_version: str
+    manager_epoch: str
     deadline: float
     state: LeaseState = LeaseState.ACTIVE
     copy_complete: set[int] | None = None
@@ -81,7 +85,7 @@ class RecoveryLeaseManager:
         lease = self._leases.get(lease_id)
         if lease is None:
             raise LeaseRejected("unknown_lease")
-        if lease.state == LeaseState.ACTIVE and self._clock() >= lease.deadline:
+        if lease.state in (LeaseState.ACTIVE, LeaseState.VALIDATED) and self._clock() >= lease.deadline:
             self._release_slots(lease)
             lease.state = LeaseState.EXPIRED
         return lease
@@ -94,16 +98,14 @@ class RecoveryLeaseManager:
         tp = obs[0].tp_size
         if tp not in (2, 4) or len(obs) != tp or {item.tp_rank for item in obs} != set(range(tp)):
             raise LeaseRejected("incomplete_tp_rank_set")
-        common = (
-            obs[0].request_id, obs[0].request_version, obs[0].req_pool_idx,
-            obs[0].req_generation, obs[0].physical_slots, obs[0].slot_generations,
-            obs[0].checkpoint_version,
-        )
+        common = (obs[0].request_id, obs[0].request_version,
+                  obs[0].checkpoint_version,
+                  obs[0].manager_epoch, obs[0].token_start, obs[0].token_count)
         for item in obs:
             if item.tp_size != tp or (
-                item.request_id, item.request_version, item.req_pool_idx,
-                item.req_generation, item.physical_slots, item.slot_generations,
-                item.checkpoint_version,
+                item.request_id, item.request_version, item.checkpoint_version,
+                item.manager_epoch,
+                item.token_start, item.token_count,
             ) != common:
                 raise LeaseRejected("rank_observation_mismatch")
             if len(item.physical_slots) != len(item.slot_generations):
@@ -111,41 +113,65 @@ class RecoveryLeaseManager:
             if any(slot <= 0 or generation <= 0 for slot, generation in
                    zip(item.physical_slots, item.slot_generations)):
                 raise LeaseRejected("invalid_slot_generation")
-        if len(set(obs[0].physical_slots)) != len(obs[0].physical_slots):
-            raise LeaseRejected("duplicate_physical_slot")
+            if len(set(item.physical_slots)) != len(item.physical_slots):
+                raise LeaseRejected("duplicate_physical_slot")
+        if any(item.token_count <= 0 for item in obs):
+            raise LeaseRejected("invalid_token_range")
         return obs, tp
 
-    def begin_recovery(self, lease_id: str, observations: Iterable[RankLeaseObservation]) -> dict:
+    def begin_recovery(
+        self,
+        lease_id: str,
+        observations: Iterable[RankLeaseObservation],
+        *,
+        manager_epoch: str | None = None,
+        checkpoint_version: str | None = None,
+    ) -> dict:
         self._check_open()
         if lease_id in self._leases:
             raise LeaseRejected("duplicate_begin")
         obs, tp = self._check_observations(observations)
-        slots = frozenset(obs[0].physical_slots)
-        if any(slot in self._slot_owner for slot in slots):
+        epoch = manager_epoch or obs[0].manager_epoch
+        version = checkpoint_version or obs[0].checkpoint_version
+        if epoch != obs[0].manager_epoch or version != obs[0].checkpoint_version:
+            raise LeaseRejected("checkpoint_identity_mismatch")
+        slots_by_rank = {item.tp_rank: frozenset(item.physical_slots) for item in obs}
+        owners = {(item.tp_rank, slot) for item in obs for slot in item.physical_slots}
+        if any(key in self._slot_owner for key in owners):
             raise LeaseRejected("slot_already_leased")
         lease = _Lease(
             lease_id=lease_id,
             request_id=obs[0].request_id,
             request_version=obs[0].request_version,
             tp_size=tp,
-            slots=slots,
-            slot_generations=dict(zip(obs[0].physical_slots, obs[0].slot_generations)),
-            req_generations={obs[0].req_pool_idx: obs[0].req_generation},
+            slots_by_rank=slots_by_rank,
+            slot_generations_by_rank={
+                item.tp_rank: dict(zip(item.physical_slots, item.slot_generations))
+                for item in obs
+            },
+            req_generations={
+                item.tp_rank: (item.req_pool_idx, item.req_generation) for item in obs
+            },
             checkpoint_version=obs[0].checkpoint_version,
+            manager_epoch=obs[0].manager_epoch,
             deadline=self._clock() + self.timeout_s,
             copy_complete=set(),
         )
         self._leases[lease_id] = lease
-        for slot in slots:
-            self._slot_owner[slot] = lease_id
+        for key in owners:
+            self._slot_owner[key] = lease_id
         return self.status(lease_id)
 
-    def mark_copy_complete(self, lease_id: str, tp_rank: int) -> None:
+    def mark_copy_complete(
+        self, lease_id: str, tp_rank: int, *, cuda_event_complete: bool = False
+    ) -> None:
         lease = self._get(lease_id)
         if lease.state != LeaseState.ACTIVE:
             raise LeaseRejected("copy_after_terminal_state")
         if tp_rank < 0 or tp_rank >= lease.tp_size:
             raise LeaseRejected("invalid_tp_rank")
+        if not cuda_event_complete:
+            raise LeaseRejected("cuda_event_incomplete")
         lease.copy_complete.add(tp_rank)
 
     def validate_recovery(
@@ -155,24 +181,35 @@ class RecoveryLeaseManager:
         *,
         checkpoint_state: str,
         manager_epoch: str,
+        checkpoint_version: str | None = None,
     ) -> dict:
         lease = self._get(lease_id)
         if lease.state != LeaseState.ACTIVE:
             raise LeaseRejected("validate_requires_active")
         if checkpoint_state != "COMMITTED":
             raise LeaseRejected("checkpoint_not_committed")
-        if not manager_epoch:
-            raise LeaseRejected("missing_manager_epoch")
+        if manager_epoch != lease.manager_epoch:
+            raise LeaseRejected("manager_epoch_changed")
+        if checkpoint_version is not None and checkpoint_version != lease.checkpoint_version:
+            raise LeaseRejected("checkpoint_version_changed")
         obs, tp = self._check_observations(observations)
         if tp != lease.tp_size or {item.tp_rank for item in obs} != set(range(tp)):
             raise LeaseRejected("tp_changed")
         for item in obs:
             if item.request_id != lease.request_id or item.request_version != lease.request_version:
                 raise LeaseRejected("request_identity_changed")
-            if item.req_generation != next(iter(lease.req_generations.values())):
+            if item.manager_epoch != lease.manager_epoch:
+                raise LeaseRejected("manager_epoch_changed")
+            if item.checkpoint_version != lease.checkpoint_version:
+                raise LeaseRejected("checkpoint_version_changed")
+            if lease.req_generations.get(item.tp_rank) != (
+                item.req_pool_idx, item.req_generation
+            ):
                 raise LeaseRejected("request_generation_changed")
             for slot, generation in zip(item.physical_slots, item.slot_generations):
-                if slot not in lease.slots or lease.slot_generations[slot] != generation:
+                if slot not in lease.slots_by_rank[item.tp_rank] or (
+                    lease.slot_generations_by_rank[item.tp_rank][slot] != generation
+                ):
                     raise LeaseRejected("slot_generation_changed")
         if lease.copy_complete != set(range(tp)):
             raise LeaseRejected("cuda_copy_incomplete")
@@ -195,29 +232,31 @@ class RecoveryLeaseManager:
         lease.state = LeaseState.ABORTED
         return {**self.status(lease_id), "reason": reason}
 
-    def before_free(self, slots: Iterable[int]) -> None:
+    def before_free(self, slots: Iterable[int], *, tp_rank: int = 0) -> None:
         self._check_open()
-        conflict = {int(slot) for slot in slots} & set(self._slot_owner)
+        conflict = {(tp_rank, int(slot)) for slot in slots} & set(self._slot_owner)
         if conflict:
             raise LeaseRejected("protected_slot_free")
 
-    def before_alloc(self, slots: Iterable[int]) -> None:
+    def before_alloc(self, slots: Iterable[int], *, tp_rank: int = 0) -> None:
         self._check_open()
-        conflict = {int(slot) for slot in slots} & set(self._slot_owner)
+        conflict = {(tp_rank, int(slot)) for slot in slots} & set(self._slot_owner)
         if conflict:
             raise LeaseRejected("protected_slot_reuse")
 
     def close(self) -> None:
         self._closed = True
         for lease in self._leases.values():
-            if lease.state == LeaseState.ACTIVE:
+            if lease.state in (LeaseState.ACTIVE, LeaseState.VALIDATED):
                 self._release_slots(lease)
                 lease.state = LeaseState.ABORTED
 
     def _release_slots(self, lease: _Lease) -> None:
-        for slot in lease.slots:
-            if self._slot_owner.get(slot) == lease.lease_id:
-                del self._slot_owner[slot]
+        for rank, slots in lease.slots_by_rank.items():
+            for slot in slots:
+                key = (rank, slot)
+                if self._slot_owner.get(key) == lease.lease_id:
+                    del self._slot_owner[key]
 
     def status(self, lease_id: str) -> dict:
         lease = self._leases.get(lease_id)
@@ -229,7 +268,8 @@ class RecoveryLeaseManager:
             "request_id": lease.request_id,
             "request_version": lease.request_version,
             "tp_size": lease.tp_size,
-            "slot_count": len(lease.slots),
+            "slot_count": sum(len(slots) for slots in lease.slots_by_rank.values()),
             "copy_complete_ranks": sorted(lease.copy_complete or ()),
             "checkpoint_version": lease.checkpoint_version,
+            "manager_epoch": lease.manager_epoch,
         }
