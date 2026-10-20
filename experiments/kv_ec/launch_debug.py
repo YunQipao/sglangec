@@ -1,12 +1,56 @@
 """Foreground isolated baseline/capture server. Never terminates existing workers."""
 
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
 import socket
 import sys
 import time
+
+
+def check_port(port, host="127.0.0.1"):
+    """Probe without SO_REUSEPORT; listen also rejects reusable live bindings.
+
+    A failed plain bind alone is not evidence of a live listener. Retry with
+    the server's address-reuse semantics, retaining both errors on failure.
+    This is a preflight, not a reservation; the server must still bind itself.
+    """
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError(f"invalid TCP port: {port!r}")
+    original = None
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind((host, port))
+            probe.listen(1)
+        return "available"
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            raise OSError(exc.errno, f"port_probe_socket_error {host}:{port}: {exc}") from exc
+        original = exc
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((host, port))
+            probe.listen(1)
+        return "available_with_reuseaddr (no listener; consistent with TIME_WAIT)"
+    except OSError as exc:
+        # Do not assert TIME_WAIT from EADDRINUSE: a non-listening socket can
+        # own the address too, and historical TCP state is not observable here.
+        kind = "socket_error"
+        if exc.errno == errno.EADDRINUSE:
+            kind = "address_in_use_non_listener_or_nonreusable_TIME_WAIT"
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                    probe.settimeout(.2)
+                    if probe.connect_ex((host, port)) == 0:
+                        kind = "active_listener"
+            except OSError:
+                pass
+        raise OSError(exc.errno, f"port_unavailable {host}:{port} kind={kind}; "
+                      f"plain_bind={original!r}; reuseaddr_bind_or_listen={exc!r}; "
+                      "no existing service was stopped") from exc
 
 
 def main():
@@ -62,11 +106,11 @@ def main():
            for snapshots in chunk_plan.values() for snapshot_id in snapshots):
         p.error("snapshot directory exists; use a new snapshot-id (never overwrite evidence)")
     # Read-only readiness check: not an authorization to take over this port.
-    with socket.socket() as sock:
-        try:
-            sock.bind(("127.0.0.1", args.port))
-        except OSError:
-            p.error("port unavailable; choose another port, do not kill other services")
+    try:
+        port_status = check_port(args.port)
+    except (OSError, ValueError) as exc:
+        p.error(str(exc))
+    print(f"Port {args.port}: {port_status}", flush=True)
     os.environ.update(CUDA_VISIBLE_DEVICES=args.gpus, CUDA_DEVICE_ORDER="PCI_BUS_ID",
                       SGLANG_KV_EC_DEBUG="0" if args.mode == "baseline" else "1",
                       SGLANG_KV_EC_PROTECTION_MODE=(args.protection_mode if args.mode == "parity" else "DEBUG_SAFE"),

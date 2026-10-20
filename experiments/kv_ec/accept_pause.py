@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -19,6 +18,19 @@ import uuid
 
 from .cross_rank_control import request as control_request
 from .request_debug import compare
+from .launch_debug import check_port
+
+
+def resolve_ports(port=None, baseline_port=None, pause_port=None):
+    if port is not None and baseline_port is not None and port != baseline_port:
+        raise ValueError("--port is a legacy alias for --baseline-port; conflicting values")
+    baseline = baseline_port if baseline_port is not None else (port if port is not None else 30359)
+    paused = pause_port if pause_port is not None else baseline + 1
+    if any(type(value) is not int or not 1 <= value <= 65535 for value in (baseline, paused)):
+        raise ValueError("baseline/pause ports must be in 1..65535")
+    if baseline == paused:
+        raise ValueError("--baseline-port and --pause-port must be different")
+    return baseline, paused
 
 
 def check_evidence(root, identity):
@@ -210,7 +222,9 @@ def main():
     parser.add_argument("--pause-response", type=Path)
     parser.add_argument("--report", type=Path, help="exclusive new offline audit report; never overwrites evidence")
     parser.add_argument("--model", default="/media/sda1/iic_data/luotao/models/Qwen3-8B")
-    parser.add_argument("--port", type=int, default=30359)
+    parser.add_argument("--port", type=int, help="legacy alias for --baseline-port; pause defaults to baseline+1")
+    parser.add_argument("--baseline-port", type=int, help="baseline TCP port (default: 30359)")
+    parser.add_argument("--pause-port", type=int, help="pause TCP port (default: baseline+1)")
     parser.add_argument("--startup-timeout", type=float, default=600)
     parser.add_argument("--pause-timeout", type=float, default=60)
     parser.add_argument("--shadow", action="store_true",
@@ -247,6 +261,7 @@ def main():
     tx = "pause-" + uuid.uuid4().hex
     print(f"RUN={root}\nTX={tx}", flush=True)
     processes, logs = [], []
+    process_logs = {}
 
     def spawn(module, argv, log, env):
         handle = (root / log).open("x")
@@ -255,11 +270,18 @@ def main():
             [sys.executable, "-u", "-m", module, *argv], env=env,
             stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
         processes.append(process)
+        process_logs[process.pid] = root / log
         return process
 
     def alive(process, name):
         if process.poll() is not None:
-            raise RuntimeError(f"{name} exited ({process.returncode}); inspect {root}")
+            path = process_logs[process.pid]
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - 3000))
+                detail = handle.read().decode(errors="replace").strip()
+            raise RuntimeError(f"{name} exited ({process.returncode}); log={path}; "
+                               f"startup_error={detail or 'empty log'}")
 
     def wait_for(predicate, timeout, name, watched):
         deadline = time.monotonic() + timeout
@@ -272,16 +294,14 @@ def main():
         raise TimeoutError(name)
 
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    url = f"http://127.0.0.1:{args.port}"
-
-    def healthy():
+    def healthy(url):
         try:
             with opener.open(url + "/health", timeout=2) as response:
                 return response.status == 200
         except (OSError, urllib.error.URLError):
             return False
 
-    def client(env, request_id, output, log):
+    def client(env, request_id, output, log, url):
         return spawn("experiments.kv_ec.request_debug", [
             "request", "--url", url, "--model", args.model,
             "--request-id", request_id, "--prompt-tokens", "768",
@@ -291,6 +311,10 @@ def main():
     if args.shadow:
         verdict.update(M2_PASS=False, SHADOW_PASS=False)
     try:
+        baseline_port, pause_port = resolve_ports(args.port, args.baseline_port, args.pause_port)
+        verdict.update(baseline_port=baseline_port, pause_port=pause_port)
+        baseline_url = f"http://127.0.0.1:{baseline_port}"
+        pause_url = f"http://127.0.0.1:{pause_port}"
         if args.shadow and os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") != "0":
             raise ValueError("online_restore_not_implemented_real_shadow_gpu_acceptance_required")
         gpus = args.gpus.split(",")
@@ -309,25 +333,27 @@ def main():
         import torch
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA unavailable; GPU validation NOT performed")
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", args.port))
+        verdict["port_checks"] = {
+            "baseline": check_port(baseline_port), "pause": check_port(pause_port)}
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("SGLANG_KV_EC_")}
 
         def server(label, server_env):
+            port = baseline_port if label == "baseline" else pause_port
+            url = baseline_url if label == "baseline" else pause_url
             process = spawn("experiments.kv_ec.launch_debug", [
                 "--mode", "baseline", "--tp", "4", "--gpus", args.gpus,
-                "--port", str(args.port), "--model", args.model,
+                "--port", str(port), "--model", args.model,
                 "--output", str(root / "evidence"), "--snapshot-id", tx + "-" + label,
                 "--request-id", "kv-ec-pause-request", "--token-count", "256",
                 "--layers", "all"], label + "-server.log", server_env)
-            wait_for(healthy, args.startup_timeout, label + " health timeout",
+            wait_for(lambda: healthy(url), args.startup_timeout, label + " health timeout",
                      [(process, label + " server")])
             return process
 
         baseline = server("baseline", env)
         baseline_client = client(env, "kv-ec-baseline-request", "baseline-response.json",
-                                 "baseline-client.log")
+                                 "baseline-client.log", baseline_url)
         if baseline_client.wait(timeout=600) != 0:
             raise RuntimeError("baseline request failed; inspect baseline-client.log")
         alive(baseline, "baseline server")
@@ -363,7 +389,7 @@ def main():
                 SGLANG_KV_EC_SHADOW_PARITY_SOCKET=str(root / "parity.sock"),
                 SGLANG_KV_EC_SHADOW_MANAGER_EPOCH=manager_hello(root / "parity.sock"))
         paused_server = server("pause", pause_env)
-        paused_client = client(env, "kv-ec-pause-request", "pause-response.json", "pause-client.log")
+        paused_client = client(env, "kv-ec-pause-request", "pause-response.json", "pause-client.log", pause_url)
 
         def control(op):
             response = control_request(root / "pause.sock", dict(identity, op=op), timeout=1)
@@ -390,7 +416,7 @@ def main():
                  [(paused_server, "pause server"), (coordinator, "coordinator")])
         check_evidence(root / "ranks", identity)
         compare([root / "baseline-response.json", root / "pause-response.json"])
-        wait_for(healthy, 10, "post-decode health failed", [(paused_server, "pause server")])
+        wait_for(lambda: healthy(pause_url), 10, "post-decode health failed", [(paused_server, "pause server")])
         server_log = (root / "pause-server.log").read_text()
         if "Scheduler hit an exception" in server_log or "Traceback (most recent call last)" in server_log:
             raise RuntimeError("server log contains an exception")
