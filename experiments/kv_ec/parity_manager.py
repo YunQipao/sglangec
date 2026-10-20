@@ -305,7 +305,9 @@ class ParityManagerServer:
                     if self._stop.is_set():
                         break
                     raise
-                self._handle(conn)
+                threading.Thread(
+                    target=self._handle, args=(conn,), daemon=True
+                ).start()
         self.path.unlink(missing_ok=True)
 
     def _handle(self, conn):

@@ -16,7 +16,9 @@ from experiments.kv_ec.parity_manager import (
     ParityManagerServer, submit_once,
 )
 from experiments.kv_ec.test_debug_capture import rank_fixture
-from experiments.kv_ec.checkpoint_protocol import recv_message, send_message
+from experiments.kv_ec.checkpoint_protocol import (
+    encode_header, recv_message, send_message,
+)
 
 
 def metadata_and_blocks(tp=4, layers=(0,), count=4):
@@ -362,7 +364,6 @@ class IpcTests(unittest.TestCase):
         self.assertEqual(queued_metadata["layers"], [0])
 
     def test_protocol_roundtrip_with_partial_reads(self):
-        from experiments.kv_ec.checkpoint_protocol import encode_header
         raw = encode_header({"payload_bytes": 4}) + b"abcd"
         class Reader:
             def gettimeout(self):
@@ -374,6 +375,126 @@ class IpcTests(unittest.TestCase):
         metadata, payload = recv_message(Reader())
         self.assertEqual(payload, b"abcd")
         self.assertEqual(metadata["payload_bytes"], 4)
+
+    def test_empty_payload_sends_header_only(self):
+        class RecordingSocket:
+            def __init__(self):
+                self.sent = []
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+        sock = RecordingSocket()
+        send_message(sock, {"kind": "hello"}, b"")
+        self.assertEqual(len(sock.sent), 1)
+        metadata, payload = recv_message(_BytesReader(sock.sent[0]))
+        self.assertEqual(metadata["kind"], "hello")
+        self.assertEqual(metadata["payload_bytes"], 0)
+        self.assertEqual(payload, b"")
+
+    def test_nonempty_payload_still_sends_header_and_payload(self):
+        class RecordingSocket:
+            def __init__(self):
+                self.sent = []
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+        sock = RecordingSocket()
+        send_message(sock, {"kind": "payload"}, b"abcd")
+        self.assertEqual(len(sock.sent), 2)
+        self.assertEqual(sock.sent[1], b"abcd")
+
+    def test_real_socket_empty_request_fast_response_and_close(self):
+        try:
+            client, server = socket.socketpair()
+        except PermissionError:
+            self.skipTest("sandbox disallows socketpair")
+        failures = []
+
+        def responder():
+            try:
+                request, payload = recv_message(server)
+                self.assertEqual(request["payload_bytes"], 0)
+                self.assertEqual(payload, b"")
+                send_message(server, {"state": "READY"}, b"")
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                server.close()
+
+        thread = threading.Thread(target=responder)
+        thread.start()
+        try:
+            try:
+                send_message(client, {"kind": "hello"}, b"")
+            except PermissionError:
+                self.skipTest("sandbox disallows socketpair writes")
+            response, payload = recv_message(client)
+            self.assertEqual(response["state"], "READY")
+            self.assertEqual(response["payload_bytes"], 0)
+            self.assertEqual(payload, b"")
+        finally:
+            client.close()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+
+    def test_real_socket_partial_reads_and_early_disconnect(self):
+        try:
+            reader, writer = socket.socketpair()
+        except PermissionError:
+            self.skipTest("sandbox disallows socketpair")
+        raw = encode_header({"payload_bytes": 4}) + b"data"
+
+        class PartialReader:
+            def gettimeout(self):
+                return reader.gettimeout()
+
+            def settimeout(self, timeout):
+                reader.settimeout(timeout)
+
+            def recv(self, size):
+                return reader.recv(min(size, 2))
+
+        try:
+            try:
+                writer.sendall(raw)
+            except PermissionError:
+                self.skipTest("sandbox disallows socketpair writes")
+            metadata, payload = recv_message(PartialReader())
+            self.assertEqual(metadata["payload_bytes"], 4)
+            self.assertEqual(payload, b"data")
+        finally:
+            reader.close()
+            writer.close()
+
+        try:
+            reader, writer = socket.socketpair()
+        except PermissionError:
+            self.skipTest("sandbox disallows socketpair")
+        try:
+            try:
+                writer.sendall(encode_header({"payload_bytes": 4})[:6])
+            except PermissionError:
+                self.skipTest("sandbox disallows socketpair writes")
+            writer.close()
+            with self.assertRaises(ConnectionError):
+                recv_message(reader)
+        finally:
+            reader.close()
+
+
+class _BytesReader:
+    def __init__(self, raw):
+        self.raw = raw
+
+    def gettimeout(self):
+        return None
+
+    def recv(self, size):
+        result, self.raw = self.raw[:size], self.raw[size:]
+        return result
 
 
 if __name__ == "__main__":

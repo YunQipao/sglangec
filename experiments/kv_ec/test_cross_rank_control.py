@@ -1,11 +1,16 @@
 import unittest
 import tempfile
 import threading
+import time
+import socket
+import traceback
+import json
 from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
-from experiments.kv_ec.cross_rank_control import CrossRankControlServer
+from experiments.kv_ec.checkpoint_protocol import send_message
+from experiments.kv_ec.cross_rank_control import CrossRankControlServer, request
 from experiments.kv_ec.cross_rank_lease import CrossRankLeaseCoordinator
 from experiments.kv_ec.recovery_lease import LeaseRejected
 from experiments.kv_ec.test_cross_rank_lease import observations
@@ -157,6 +162,99 @@ class CrossRankControlTests(unittest.TestCase):
         with self.assertRaisesRegex(LeaseRejected, "manager_epoch_changed"):
             server._dispatch({"op": "status", "transaction_id": "missing"})
 
+    def test_real_socket_parallel_epoch_checks_do_not_hold_dispatch_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "control.sock"
+            try:
+                with socket.socket(socket.AF_UNIX) as probe:
+                    probe.bind(str(path))
+            except PermissionError:
+                self.skipTest("sandbox disallows Unix domain sockets")
+            path.unlink()
+            calls = []
+            calls_lock = threading.Lock()
+
+            def delayed_epoch():
+                with calls_lock:
+                    calls.append(time.monotonic())
+                time.sleep(0.5)
+                return "epoch-1"
+
+            server = CrossRankControlServer(
+                path,
+                CrossRankLeaseCoordinator(manager_epoch="epoch-1"),
+                manager_epoch_provider=delayed_epoch,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.assertTrue(server.ready.wait(2))
+            raw = observations()
+            results = [None] * 4
+
+            def send_prepare(rank):
+                results[rank] = request(
+                    path,
+                    {
+                        "op": "prepare_rank",
+                        "transaction_id": "parallel-delay",
+                        "checkpoint_version": "cp-v1",
+                        "observation": raw[rank].__dict__,
+                    },
+                    timeout=2.0,
+                )
+
+            workers = [
+                threading.Thread(target=send_prepare, args=(rank,))
+                for rank in range(4)
+            ]
+            started = time.monotonic()
+            try:
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(4)
+                elapsed = time.monotonic() - started
+                self.assertFalse(any(worker.is_alive() for worker in workers))
+                self.assertTrue(all(result["state"] == "OK" for result in results))
+                self.assertEqual(results[-1]["status"]["prepared_ranks"], [0, 1, 2, 3])
+                # Four serialized 500ms checks would exceed the 2s client
+                # timeout; they must overlap outside the transaction lock.
+                self.assertLess(elapsed, 2.0)
+                self.assertGreaterEqual(len(calls), 4)
+            finally:
+                server.stop()
+                thread.join(2)
+
+    def test_real_socket_client_disconnect_has_no_uncaught_handler_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "control.sock"
+            try:
+                with socket.socket(socket.AF_UNIX) as probe:
+                    probe.bind(str(path))
+            except PermissionError:
+                self.skipTest("sandbox disallows Unix domain sockets")
+            path.unlink()
+            server = CrossRankControlServer(
+                path, CrossRankLeaseCoordinator(manager_epoch="epoch-1")
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.assertTrue(server.ready.wait(2))
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                client.connect(str(path))
+                send_message(client, {"op": "hello"}, b"")
+                client.close()
+                time.sleep(0.1)
+                self.assertTrue(thread.is_alive())
+            finally:
+                try:
+                    client.close()
+                except OSError:
+                    pass
+                server.stop()
+                thread.join(2)
+
     def test_real_unix_socket_four_rank_worker_handshake(self):
         import socket
 
@@ -203,9 +301,12 @@ class CrossRankControlTests(unittest.TestCase):
 
             results = [None] * 4
             errors = []
+            failures = []
+            failures_lock = threading.Lock()
 
             def worker(rank):
                 lease = LocalLease(rank)
+                worker_started = time.monotonic()
                 try:
                     results[rank] = coordinate_local_lease(
                         lease,
@@ -217,6 +318,20 @@ class CrossRankControlTests(unittest.TestCase):
                         checkpoint_version="cp-v1",
                     )
                 except Exception as exc:
+                    with failures_lock:
+                        failures.append({
+                            "monotonic_ns": time.monotonic_ns(),
+                            "rank": rank,
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                            "transaction_id": lease.metadata.get("transaction_id"),
+                            "control_failure_detail": lease.metadata.get(
+                                "control_failure_detail"
+                            ),
+                            "control_trace": lease.metadata.get("control_trace", []),
+                            "elapsed_ms": (time.monotonic() - worker_started) * 1000,
+                            "traceback": traceback.format_exc(),
+                        })
                     errors.append(exc)
 
             workers = [threading.Thread(target=worker, args=(rank,)) for rank in range(4)]
@@ -226,7 +341,12 @@ class CrossRankControlTests(unittest.TestCase):
                 for item in workers:
                     item.join(7)
                 self.assertFalse(any(item.is_alive() for item in workers))
-                self.assertEqual(errors, [])
+                if failures:
+                    failures.sort(key=lambda item: item["monotonic_ns"])
+                    self.fail(
+                        "first real-socket worker failure:\n"
+                        + json.dumps(failures[0], indent=2, sort_keys=True)
+                    )
                 self.assertTrue(all(item["state"] == "LOCAL_RELEASED" for item in results))
                 self.assertTrue(all(item["global_release_confirmed"] for item in results))
                 self.assertTrue(all(item["coordinator_state"] == "GLOBAL_RELEASED" for item in results))

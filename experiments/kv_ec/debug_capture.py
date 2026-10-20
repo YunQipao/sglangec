@@ -581,7 +581,11 @@ def maybe_capture(scheduler, batch, req):
         return
     except Exception as exc:
         # Failure is local, never changes sampling or distributed control flow.
-        reason = str(exc) if isinstance(exc, CaptureRejected) else type(exc).__name__
+        reason = (
+            str(exc)
+            if isinstance(exc, CaptureRejected) or type(exc).__name__ == "LeaseRejected"
+            else type(exc).__name__
+        )
         failed_snapshot = snapshot_id
         if chunk_snapshots:
             failed_snapshot = (
@@ -606,9 +610,21 @@ def maybe_capture(scheduler, batch, req):
             config = replace(base_config, snapshot_id=failed_snapshot, target_rid=target)
             directory = config.output / config.snapshot_id
             directory.mkdir(parents=True, exist_ok=True)
+            error_record = {
+                "snapshot_completion_status": "failed",
+                "reason": reason,
+                "tp_rank": rank,
+            }
+            if hasattr(exc, "control_failure_detail") or type(exc).__name__ == "LeaseRejected":
+                error_record.update(
+                    exception_type=type(exc).__name__,
+                    exception_message=str(exc),
+                )
+            if hasattr(exc, "control_failure_detail"):
+                error_record["control_failure_detail"] = exc.control_failure_detail
+                error_record["control_trace"] = getattr(exc, "control_trace", [])
             with (directory / f"rank_{rank}.error.json").open("x") as f:
-                json.dump({"snapshot_completion_status": "failed", "reason": reason,
-                           "tp_rank": rank}, f)
+                json.dump(error_record, f, indent=2)
         except Exception as write_exc:
             # Never overwrite prior evidence, but make sidecar failures visible.
             logger.warning("KV_EC_DEBUG error sidecar failed rank=%d (%s)",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 
 from .cross_rank_control import request
@@ -36,7 +37,7 @@ def _poll(call, tx, expected, deadline):
             and ordered.index(status["state"]) >= ordered.index(expected)
         ):
             return status
-        time.sleep(0.01)
+        time.sleep(0.05)
     raise TimeoutError(f"cross_rank_wait_timeout:{expected}")
 
 
@@ -60,12 +61,51 @@ def coordinate_local_lease(
         raise ValueError("enabled cross-rank coordination requires socket and timeout")
     started = time.monotonic()
     deadline = started + timeout_s
-    call_timeout = min(2.0, timeout_s)
+    ipc_timeout_s = float(os.environ.get("SGLANG_KV_EC_CONTROL_IPC_TIMEOUT_S", "2.0"))
+    if ipc_timeout_s <= 0:
+        raise ValueError("control IPC timeout must be positive")
     meta = lease.metadata
     rank = int(meta["tp_rank"])
+    tx = None
+    current_operation = None
+    trace = meta.setdefault("control_trace", [])
+
+    def remaining_ms():
+        return max(0.0, (deadline - time.monotonic()) * 1000)
+
+    def record(operation, phase_started, *, error=None):
+        item = {
+            "exception_type": type(error).__name__ if error else None,
+            "exception_message": str(error) if error else None,
+            "control_operation": operation,
+            "transaction_id": tx,
+            "tp_rank": rank,
+            "elapsed_ms": (time.monotonic() - phase_started) * 1000,
+            "remaining_deadline_ms": remaining_ms(),
+        }
+        trace.append(item)
+        return item
+
+    def request_with_trace(message):
+        nonlocal current_operation
+        current_operation = message.get("op")
+        phase_started = time.monotonic()
+        timeout = min(ipc_timeout_s, max(0.001, deadline - time.monotonic()))
+        try:
+            response = request(control_socket, message, timeout=timeout)
+            item = record(current_operation, phase_started)
+            if "_control_ipc_detail" in response:
+                item["control_ipc_detail"] = response["_control_ipc_detail"]
+            return response
+        except Exception as exc:
+            item = record(current_operation, phase_started, error=exc)
+            if hasattr(exc, "control_ipc_detail"):
+                item["control_ipc_detail"] = exc.control_ipc_detail
+            raise
+
     if checkpoint_version != meta["checkpoint_version"]:
         raise LeaseRejected("cross_rank_checkpoint_version_mismatch")
-    hello = request(control_socket, {"op": "hello"}, timeout=call_timeout)
+    hello = request_with_trace({"op": "hello"})
     if hello.get("state") != "OK":
         raise LeaseRejected("cross_rank_control_unavailable")
     control_epoch = hello.get("control_epoch")
@@ -86,13 +126,21 @@ def coordinate_local_lease(
     meta["transaction_id"] = tx
 
     def call(message):
-        response = request(control_socket, message, timeout=call_timeout)
+        message = dict(message, manager_epoch=manager_epoch)
+        response = request_with_trace(message)
+        status = _ok(response)
         if (
             response.get("control_epoch") != control_epoch
             or response.get("manager_epoch") != manager_epoch
         ):
-            raise LeaseRejected("cross_rank_coordinator_restarted")
-        return _ok(response)
+            raise LeaseRejected(
+                "cross_rank_epoch_mismatch:"
+                f"expected_control={control_epoch},"
+                f"actual_control={response.get('control_epoch')},"
+                f"expected_manager={manager_epoch},"
+                f"actual_manager={response.get('manager_epoch')}"
+            )
+        return status
 
     observation = RankLeaseObservation(
         tp_rank=rank,
@@ -117,7 +165,7 @@ def coordinate_local_lease(
         while set(prepared["prepared_ranks"]) != {0, 1, 2, 3}:
             if time.monotonic() >= deadline:
                 raise TimeoutError("cross_rank_prepare_timeout")
-            time.sleep(0.01)
+            time.sleep(0.05)
             prepared = call({"op": "status", "transaction_id": tx})
             if prepared["state"] in ("FAILED", "EXPIRED"):
                 raise LeaseRejected(f"cross_rank_{prepared['state'].lower()}")
@@ -161,16 +209,34 @@ def coordinate_local_lease(
         )
         return released
     except Exception as exc:
+        failure_message = str(exc) if isinstance(exc, LeaseRejected) else str(exc)
+        failure = {
+            "exception_type": type(exc).__name__,
+            "exception_message": failure_message,
+            "control_operation": current_operation,
+            "transaction_id": tx,
+            "tp_rank": rank,
+            "elapsed_ms": (time.monotonic() - started) * 1000,
+            "remaining_deadline_ms": remaining_ms(),
+        }
+        trace.append(failure)
         meta.update(
             cross_rank_coordinated=False,
             global_release_confirmed=False,
             control_failure=type(exc).__name__,
+            control_failure_message=failure_message,
+            control_failure_detail=failure,
         )
         try:
-            request(control_socket, {
+            exc.control_failure_detail = failure
+            exc.control_trace = list(trace)
+        except Exception:
+            pass
+        try:
+            request_with_trace({
                 "op": "fail", "transaction_id": tx,
-                "reason": type(exc).__name__,
-            }, timeout=min(0.2, call_timeout))
+                "reason": failure_message,
+            })
         except Exception:
             pass
         # Abort is strictly local cleanup of this non-destructive experiment.
