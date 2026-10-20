@@ -170,6 +170,21 @@ The cross-rank run covers three separate 256-token chunks, which is a
 768-token Scratch allocation; that larger single-allocation case still needs a
 separate measurement.
 
+Once a new GPU run has produced three real complete directories, the sequence
+Scratch verifier is:
+
+```bash
+python -m experiments.kv_ec.gpu_scratch_restore \
+  "$OUT/$SNAP-chunk-1" "$OUT/$SNAP-chunk-2" "$OUT/$SNAP-chunk-3" \
+  --device cuda --warmup 2 --repeat 10 \
+  --output "$OUT/$SNAP-scratch-sequence.json"
+```
+
+The command refuses missing/metadata-only chunks, mixed request identity,
+non-contiguous token ranges, wrong chunk lengths, or a non-CUDA device. It
+loads and releases one chunk's payload at a time and reports
+`online_kv_pool_modified=false`.
+
 These results authorize more scratch measurements, not online writeback.
 
 ## Promotion Criteria for Online Writeback

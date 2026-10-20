@@ -9,6 +9,7 @@ import numpy as np
 
 from experiments.kv_ec.gpu_scratch_restore import (
     load_real_snapshot, split_layer_payload, benchmark, one_restore,
+    validate_snapshot_sequence,
 )
 from experiments.kv_ec.rank_snapshot import verify, write_rank_files
 from experiments.kv_ec.test_parity_manager import metadata_and_blocks
@@ -19,6 +20,32 @@ REAL = ROOT / "kv_ec_runs" / "tp4-all-256-20261016T142603"
 
 
 class ScratchRestoreTests(unittest.TestCase):
+    def test_three_chunk_sequence_requires_contiguous_ranges(self):
+        base = {
+            "request_id": "request",
+            "model_sha256": "model",
+            "source_commit": "commit",
+            "tp_size": 4,
+            "layers": list(range(36)),
+            "dtype": "torch.bfloat16",
+            "provenance": "sglang_request",
+        }
+        manifests = []
+        for index in range(3):
+            manifests.append({
+                **base,
+                "snapshot_id": f"chunk-{index}",
+                "token_start": index * 256,
+                "token_count": 256,
+            })
+        result = validate_snapshot_sequence(manifests)
+        self.assertEqual(result["token_count"], 768)
+        self.assertEqual(result["token_start"], 0)
+
+        manifests[1]["token_start"] = 512
+        with self.assertRaisesRegex(ValueError, "not contiguous"):
+            validate_snapshot_sequence(manifests)
+
     def test_tp2_snapshot_load_and_each_scratch_restore_dispatch(self):
         # Synthetic CPU bytes declared as request format ONLY to exercise the
         # loader; mocked H2D is not evidence of a real GPU restore.

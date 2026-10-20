@@ -57,6 +57,10 @@ class SlotLeaseRegistry:
         return self._enabled and not self._closed
 
     @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
     def generation(self) -> torch.Tensor:
         return self._generation
 
@@ -82,6 +86,8 @@ class SlotLeaseRegistry:
     def on_alloc(self, slots: Iterable[int]) -> None:
         if not self.enabled and not self._closed:
             return
+        if self._closed:
+            raise SlotLeaseRejected("registry_closed")
         values = tuple(int(slot) for slot in slots)
         self._expire()
         if any(slot in self._owners for slot in values):
@@ -94,10 +100,13 @@ class SlotLeaseRegistry:
     def on_free(self, slots: Iterable[int]) -> None:
         if not self.enabled and not self._closed:
             return
+        values = tuple(int(slot) for slot in slots)
         self._expire()
-        conflict = {int(slot) for slot in slots} & set(self._owners)
+        conflict = set(values) & set(self._owners)
         if conflict:
             raise SlotLeaseRejected("protected_slot_free")
+        if self._closed:
+            raise SlotLeaseRejected("registry_closed")
 
     def begin(
         self,
@@ -255,6 +264,8 @@ class SlotLeaseRegistry:
         self._release(lease)
 
     def clear(self) -> None:
+        if self._closed:
+            raise SlotLeaseRejected("registry_closed")
         if self._leases:
             raise SlotLeaseRejected("active_leases")
         self._owners.clear()

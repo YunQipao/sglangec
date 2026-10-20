@@ -2,6 +2,7 @@
 
 import unittest
 from types import SimpleNamespace as NS
+from unittest.mock import Mock
 
 import torch
 
@@ -25,9 +26,36 @@ class SlotLeaseAllocatorTests(unittest.TestCase):
 
     def test_default_disabled_preserves_allocator(self):
         allocator = self.allocator()
+        on_alloc = Mock(wraps=allocator.slot_lease_registry.on_alloc)
+        on_free = Mock(wraps=allocator.slot_lease_registry.on_free)
+        allocator.slot_lease_registry.on_alloc = on_alloc
+        allocator.slot_lease_registry.on_free = on_free
         slots = allocator.alloc(2)
         allocator.free(slots)
+        on_alloc.assert_not_called()
+        on_free.assert_not_called()
         self.assertEqual(allocator.available_size(), 16)
+
+    def test_enabled_path_runs_slot_checks(self):
+        allocator = self.allocator()
+        allocator.enable_slot_leases()
+        on_alloc = Mock(wraps=allocator.slot_lease_registry.on_alloc)
+        on_free = Mock(wraps=allocator.slot_lease_registry.on_free)
+        allocator.slot_lease_registry.on_alloc = on_alloc
+        allocator.slot_lease_registry.on_free = on_free
+        slots = allocator.alloc(2)
+        allocator.free(slots)
+        on_alloc.assert_called_once()
+        on_free.assert_called_once()
+
+    def test_closed_registry_rejects_alloc_and_free(self):
+        allocator = self.allocator()
+        slots = allocator.alloc(1)
+        allocator.slot_lease_registry.close()
+        with self.assertRaisesRegex(SlotLeaseRejected, "registry_closed"):
+            allocator.alloc(1)
+        with self.assertRaisesRegex(SlotLeaseRejected, "registry_closed"):
+            allocator.free(slots)
 
     def test_generation_increments_on_real_alloc_and_lease_blocks_free_reuse(self):
         allocator = self.allocator()

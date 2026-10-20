@@ -67,7 +67,9 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             return None
 
         select_index = self.free_pages[:need_size]
-        self.slot_lease_registry.on_alloc(select_index.tolist())
+        registry = self.slot_lease_registry
+        if registry.enabled or registry.closed:
+            registry.on_alloc(select_index.tolist())
         self.free_pages = self.free_pages[need_size:]
         return select_index
 
@@ -76,7 +78,9 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             return
 
         if self.is_not_in_free_group:
-            self.slot_lease_registry.on_free(free_index.tolist())
+            registry = self.slot_lease_registry
+            if registry.enabled or registry.closed:
+                registry.on_free(free_index.tolist())
             if self.need_sort:
                 self.release_pages = torch.cat((self.release_pages, free_index))
             else:
