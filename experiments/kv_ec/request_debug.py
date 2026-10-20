@@ -136,8 +136,10 @@ def compare(paths):
         validate_result({"output_ids": record.get("output_ids"),
                          "meta_info": {"finish_reason": record.get("finish_reason")}})
     keys = ("model_identifier", "input_ids_sha256", "input_token_count", "sampling", "output_ids", "finish_reason")
-    if any(first[k] != second[k] for k in keys):
-        raise AssertionError("baseline/capture inference regression mismatch")
+    mismatches = [key for key in keys if key not in first or key not in second
+                  or first[key] != second[key]]
+    if mismatches:
+        raise AssertionError("baseline/capture inference regression mismatch: " + ", ".join(mismatches))
     print("PASS: identical artificial input and exact output token sequence/finish reason")
 
 

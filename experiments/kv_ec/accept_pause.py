@@ -1,6 +1,9 @@
 """One isolated TP4 baseline/pause acceptance run. Never takes over busy GPUs."""
 
 import argparse
+from contextlib import redirect_stdout
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -51,6 +54,80 @@ def check_evidence(root, identity):
         raise ValueError("rank failure or incomplete decode evidence exists")
 
 
+def verify_run(root, baseline_response, pause_response):
+    """Read-only M1 audit of a completed run; never authorizes a live worker."""
+    verdict = {"state": "FAIL", "M1": False, "run": str(root.resolve()), "checks": {}}
+    checks = verdict["checks"]
+    try:
+        identity = json.loads((root / "identity.json").read_text())
+        verdict["transaction_id"] = identity["transaction_id"]
+        verdict["coordinator_epoch"] = identity["epoch"]
+        check_evidence(root / "ranks", identity)
+        checks["rank_resume_decode_generations_and_release"] = "PASS"
+        records = [json.loads((root / "ranks" / f"pause-rank-{rank}.json").read_text())
+                   for rank in range(4)]
+        verdict["pause_ms_by_rank"] = [record["pause_ms"] for record in records]
+
+        paused = authorized = False
+        with (root / "coordinator.log").open() as stream:
+            for line in stream:
+                if "KV_EC_PAUSE_CONTROL " not in line:
+                    continue
+                event = json.loads(line.split("KV_EC_PAUSE_CONTROL ", 1)[1])
+                response = event["response"]
+                if response.get("state") != "OK":
+                    raise ValueError("coordinator_error_response")
+                status = response["status"]
+                if any(status.get(key) != identity[key] for key in ("epoch", "transaction_id")):
+                    raise ValueError("coordinator_identity_mismatch")
+                if status["state"] == "FAILED" or event["op"] == "fail":
+                    raise ValueError("coordinator_failed")
+                if status["state"] == "PAUSED" and status["paused_ranks"] == list(range(4)):
+                    paused = True
+                if event["op"] == "authorize":
+                    if not paused or status["state"] not in (
+                            "RESUME_REQUESTED", "RELEASE_AUTHORIZED", "ALL_RELEASED", "RESUME_AUTHORIZED"):
+                        raise ValueError("authorization_without_four_rank_pause")
+                    authorized = True
+        if not paused or not authorized:
+            raise ValueError("missing_four_rank_pause_or_external_authorization")
+        checks["four_rank_pause_and_external_authorization"] = "PASS"
+
+        log = root / "pause-server.log"
+        if not log.exists():
+            log = root / "server.log"
+        markers = ("Scheduler hit an exception", "Traceback (most recent call last)",
+                   "SlotLeaseRejected", "protected_slot_free", "protected_slot_reuse",
+                   "row_protected", "registry_closed")
+        with log.open() as stream:
+            for line in stream:
+                for marker in markers:
+                    if marker in line:
+                        raise ValueError(f"server_or_allocator_failure:{marker}")
+        checks["no_logged_scheduler_or_allocator_failure"] = "PASS"
+
+        if baseline_response.resolve() == pause_response.resolve() or baseline_response.samefile(pause_response):
+            raise ValueError("baseline_and_pause_response_must_be_distinct_files")
+        baseline, response = [json.loads(path.read_text())
+                              for path in (baseline_response, pause_response)]
+        request_hash = hashlib.sha256(response["request_id"].encode()).hexdigest()
+        if any(record["request_hash"] != request_hash or record["token_count"] != 768
+               or len(record["slot_generations_before"]) != 768 for record in records):
+            raise ValueError("response_not_bound_to_paused_768_token_request")
+        if baseline["input_token_count"] != 768 or response["input_token_count"] != 768:
+            raise ValueError("M1_requires_768_token_input")
+        checks["response_bound_to_paused_request"] = "PASS"
+        checks["output_tokens_identical"] = baseline.get("output_ids") == response.get("output_ids")
+        # Retain the existing strict comparison, including sampling semantics.
+        with redirect_stdout(io.StringIO()):
+            compare([baseline_response, pause_response])
+        checks["strict_baseline_match"] = "PASS"
+        verdict.update(state="PASS", M1=True, reason="completed M1 evidence verified; no new GPU experiment performed")
+    except (OSError, ValueError, KeyError, TypeError, AssertionError) as exc:
+        verdict["reason"] = f"{type(exc).__name__}: {exc}"
+    return verdict
+
+
 def stop_owned(process):
     # Every process passed here was created below with start_new_session=True.
     # Signal only that private process group, never a discovered server/PID.
@@ -71,12 +148,29 @@ def stop_owned(process):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--gpus", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--gpus", help="run a new experiment on four distinct physical GPU indices")
+    mode.add_argument("--verify-run", type=Path, help="read-only audit of an existing experiment")
+    parser.add_argument("--baseline-response", type=Path)
+    parser.add_argument("--pause-response", type=Path)
+    parser.add_argument("--report", type=Path, help="exclusive new offline audit report; never overwrites evidence")
     parser.add_argument("--model", default="/media/sda1/iic_data/luotao/models/Qwen3-8B")
     parser.add_argument("--port", type=int, default=30359)
     parser.add_argument("--startup-timeout", type=float, default=600)
     parser.add_argument("--pause-timeout", type=float, default=60)
     args = parser.parse_args()
+    if args.verify_run is not None:
+        verdict = verify_run(
+            args.verify_run,
+            args.baseline_response or args.verify_run / "baseline-response.json",
+            args.pause_response or args.verify_run / "pause-response.json")
+        if args.report:
+            with args.report.open("x") as stream:
+                json.dump(verdict, stream, indent=2)
+        print(json.dumps(verdict, indent=2))
+        return 0 if verdict["M1"] else 1
+    if args.baseline_response or args.pause_response or args.report:
+        parser.error("--baseline-response, --pause-response and --report require --verify-run")
     root = Path(tempfile.mkdtemp(prefix="kv-ec-pause-accept-"))
     tx = "pause-" + uuid.uuid4().hex
     print(f"RUN={root}\nTX={tx}", flush=True)
