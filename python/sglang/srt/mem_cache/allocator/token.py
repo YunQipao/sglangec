@@ -91,6 +91,8 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
     def enable_slot_leases(
         self, *, timeout_s: float = 5.0, active_slots=None
     ) -> None:
+        if self.slot_lease_registry.closed:
+            raise SlotLeaseRejected("registry_closed")
         if timeout_s != self.slot_lease_registry._timeout_s:
             if self.slot_lease_registry.active_lease_count:
                 raise SlotLeaseRejected("active_leases")

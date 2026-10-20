@@ -281,7 +281,8 @@ class CrossRankControlServer:
                 pass
 
 
-def request(path: str | Path, message: dict, *, timeout: float = 2.0) -> dict:
+def request(path: str | Path, message: dict, *, timeout: float = 2.0,
+            deadline: float | None = None) -> dict:
     """Send one bounded control request; no retry hides a lost coordinator."""
     started = time.monotonic()
     detail = {
@@ -296,17 +297,25 @@ def request(path: str | Path, message: dict, *, timeout: float = 2.0) -> dict:
         "elapsed_ms": None,
     }
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(timeout)
+        def bound_timeout():
+            remaining = timeout if deadline is None else min(timeout, deadline - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError("control_request_total_deadline")
+            client.settimeout(remaining)
+
         try:
+            bound_timeout()
             connect_started = time.monotonic()
             client.connect(str(path))
             detail["connect_ms"] = (time.monotonic() - connect_started) * 1000
             detail["stage"] = "send"
             send_started = time.monotonic()
+            bound_timeout()
             send_message(client, dict(message), b"")
             detail["send_ms"] = (time.monotonic() - send_started) * 1000
             detail["stage"] = "recv"
             response_started = time.monotonic()
+            bound_timeout()
             response, payload = recv_message(client)
             detail["response_wait_ms"] = (time.monotonic() - response_started) * 1000
         except Exception as exc:

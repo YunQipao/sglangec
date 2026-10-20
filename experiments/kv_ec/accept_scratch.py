@@ -14,7 +14,7 @@ from .prepare_scratch import validate_capture_evidence
 METRICS = ("xor_ms", "cpu_recovery_ms", "h2d_restore_ms", "gpu_verification_ms")
 
 
-def accept(report, request, initialization):
+def accept(report, request, initialization, *, snapshot_root=None):
     if (report.get("tool") != "gpu_scratch_restore_sequence"
             or report.get("status") != "byte_exact"
             or report.get("online_kv_pool_modified") is not False
@@ -27,7 +27,11 @@ def accept(report, request, initialization):
         raise ValueError("three chunk results required")
     manifests = []
     for index, chunk in enumerate(chunks):
-        manifest, blocks = load_real_snapshot(chunk["snapshot_dir"])
+        directory = (Path(snapshot_root) / chunk["snapshot_id"]
+                     if snapshot_root is not None else Path(chunk["snapshot_dir"]))
+        if snapshot_root is not None and Path(chunk["snapshot_id"]).name != chunk["snapshot_id"]:
+            raise ValueError("snapshot ID must be a directory basename")
+        manifest, blocks = load_real_snapshot(directory)
         del blocks
         manifests.append(manifest)
         if chunk.get("index") != index:
@@ -68,10 +72,13 @@ def main():
     parser.add_argument("report", type=Path)
     parser.add_argument("--request-evidence", type=Path, required=True)
     parser.add_argument("--initialization", type=Path, required=True)
+    parser.add_argument("--snapshot-root", type=Path,
+                        help="explicit relocated evidence root; original report is never changed")
     args = parser.parse_args()
     print(json.dumps(accept(json.loads(args.report.read_text()),
                             json.loads(args.request_evidence.read_text()),
-                            json.loads(args.initialization.read_text())), indent=2))
+                            json.loads(args.initialization.read_text()),
+                            snapshot_root=args.snapshot_root), indent=2))
 
 
 if __name__ == "__main__":
