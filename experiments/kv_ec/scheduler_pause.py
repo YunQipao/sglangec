@@ -1,4 +1,4 @@
-"""Default-off event-loop gate. No live KV writes or model collectives.
+"""Default-off event-loop gate with separately admitted online KV recovery.
 
 The scheduler retains last_batch/running_batch unchanged while this gate is
 active. Local failure is fail-stop with row/slot protections retained.
@@ -57,7 +57,10 @@ class SchedulerPauseGate:
     def from_env(cls, scheduler):
         # Reject unsupported execution loops at startup, before any request.
         args = scheduler.server_args
-        if os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") != "0":
+        online = os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") == "1"
+        if os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") not in ("0", "1") or (online and (
+                not os.environ.get("SGLANG_KV_EC_ISOLATED_TX")
+                or not os.environ.get("SGLANG_KV_EC_ONLINE_ADMISSION"))):
             raise PauseRejected("online_restore_disabled_until_real_shadow_gpu_acceptance")
         if (not args.disable_overlap_schedule or getattr(args, "pp_size", 1) != 1
                 or getattr(args, "disaggregation_mode", "null") != "null"):
@@ -72,9 +75,11 @@ class SchedulerPauseGate:
         )
         # Fingerprint work is startup-only, not inside the pause deadline.
         gate.model_identity = source_identity(args.model_path)
-        if os.environ.get("SGLANG_KV_EC_SHADOW_RESTORE") == "1":
+        if os.environ.get("SGLANG_KV_EC_SHADOW_RESTORE") == "1" or online:
             from .scheduler_shadow import SchedulerShadowRecovery
             gate.shadow = SchedulerShadowRecovery.from_env()
+            if online:
+                gate.shadow.check_online_admission(gate)
         return gate
 
     @property
@@ -127,7 +132,7 @@ class SchedulerPauseGate:
             self.evidence, state=self.state, failure=failure,
             transaction_id=self.identity["transaction_id"],
             coordinator_epoch=self.identity["epoch"], tp_rank=self.rank,
-            trace=self.trace, online_kv_pool_modified=False,
+            trace=self.trace, online_kv_pool_modified=bool(self.shadow and getattr(self.shadow, "modified", False)),
         )
         # One immutable final record; logs never contain actual KV bytes.
         path = path or (self.path if failure is None else self.path.with_suffix(".error.json"))
@@ -157,8 +162,13 @@ class SchedulerPauseGate:
                 decode_observed=True,
                 decode_output_count=len(self.req.output_ids),
                 decode_forward_mode="decode",
-                online_kv_pool_modified=False,
+                online_kv_pool_modified=bool(self.shadow and getattr(self.shadow, "modified", False)),
             )
+            if self.shadow is not None and getattr(self.shadow, "online", False):
+                self.evidence["online"]["decode_observed_monotonic"] = time.monotonic()
+                if self.shadow.fault_monotonic is not None:
+                    self.evidence["online"]["timing_ms"]["fault_to_decode_ms"] = (
+                        time.monotonic() - self.shadow.fault_monotonic) * 1000
             self._write_evidence()
             if self.pending_path.exists():
                 self.pending_path.unlink()
@@ -363,11 +373,18 @@ class SchedulerPauseGate:
                     return True
                 self.evidence["cuda_event_complete"] = True
                 self._revalidate()
+                if self.shadow is not None and getattr(self.shadow, "online", False):
+                    if not self.shadow.prepare(self):
+                        return True
+                    self.evidence["paused_observation_monotonic"] = time.monotonic()
                 self._call("paused", observation={
                     "event_complete": True, "request_hash": self.evidence["request_hash"],
                     "request_version": self.mapping.request_version, "token_count": 768,
                     "model_identifier": self.model_identity["model_identifier"],
                     "model_sha256": self.model_identity["model_sha256"],
+                    **({"checkpoint": self.shadow.consensus_checkpoint(self),
+                        "checkpoint_committed": True} if self.shadow is not None
+                       and getattr(self.shadow, "online", False) else {}),
                 })
                 self.state = "PAUSED"
                 return True
@@ -376,6 +393,8 @@ class SchedulerPauseGate:
             if self.shadow is not None and not self.shadow.done:
                 if status.get("require_shadow") is not True:
                     raise PauseRejected("shadow_requires_coordinator_interlock")
+                if getattr(self.shadow, "online", False) and status.get("require_online") is not True:
+                    raise PauseRejected("online_requires_coordinator_interlock")
                 if self.state == "PAUSED" and state == "PAUSED":
                     self.state = "SHADOW_READY"
                 return True
@@ -428,14 +447,15 @@ class SchedulerPauseGate:
             local_blocked = self._tick_local()
             if self.shadow is not None and not self.shadow.done:
                 if self._vote(self.state == "SHADOW_READY"):
-                    self.evidence["shadow"] = self.shadow.run(self)
+                    key = "online" if getattr(self.shadow, "online", False) else "shadow"
+                    self.evidence[key] = self.shadow.run(self)
                     self._revalidate()
                     # Peers cannot attest to recovery until rank 0 has also
                     # completed every byte check and its final CUDA event.
                     if not self._vote(True):
                         raise PauseRejected("shadow_completion_vote_failed")
                     self.shadow.done = True
-                    self._call("shadow_verified", observation=self.evidence["shadow"]["consensus"])
+                    self._call("shadow_verified", observation=self.evidence[key]["consensus"])
                     self.state = "PAUSED"
                 return True
             if not self._vote(not local_blocked):
@@ -463,7 +483,7 @@ class SchedulerPauseGate:
             self.evidence.update(
                 resume_authorized=True,
                 decode_observed=False,
-                online_kv_pool_modified=False,
+                online_kv_pool_modified=bool(self.shadow and getattr(self.shadow, "modified", False)),
             )
             # Authorization is not a successful resume. Wait for the next
             # real decode result before emitting the final evidence file.
