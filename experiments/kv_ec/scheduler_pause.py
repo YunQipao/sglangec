@@ -139,6 +139,7 @@ class SchedulerPauseGate:
     def after_result(self, batch):
         if (
             self.state == "RESUMED"
+            and not self.evidence.get("decode_observed", False)
             and batch is not None
             and batch.forward_mode.is_decode()
             and any(req.rid == self.target for req in batch.reqs)
@@ -175,8 +176,8 @@ class SchedulerPauseGate:
             # Check the prefill batch, not req.prefix_indices. ChunkCache may
             # populate req.prefix_indices during result processing even when
             # the request had no cached prefix at admission.
-            if list(getattr(batch, "prefix_lens", [0])) != [0]:
-                raise PauseRejected("prefill_prefix_not_empty")
+            prefix_lens = getattr(batch, "prefix_lens", None)
+            self._require("prefill_prefix_not_empty", prefix_lens, [0])
             self._check_runtime()
             count = len(req.origin_input_ids)
             if count != 768 or len(req.output_ids) != 1:
@@ -203,7 +204,7 @@ class SchedulerPauseGate:
                 self.owner, stream=scheduler.forward_stream)
             self.state = "EVENT_PENDING"
             self.started = time.monotonic()
-            self.evidence = {
+            self.evidence.update({
                 "request_hash": hashlib.sha256(req.rid.encode()).hexdigest(),
                 "request_generation_before": self.mapping.req_generation,
                 "row": self.mapping.req_pool_idx, "token_count": count,
@@ -212,9 +213,46 @@ class SchedulerPauseGate:
                 "cuda_event_stream": "schedule_stream->scheduler.forward_stream",
                 "cuda_event_recorded": True, "cuda_event_complete": False,
                 "scheduler_skipped_iterations": 0,
-            }
+            })
         except Exception as exc:
             self._fatal(exc)
+
+    def _require(self, reason, actual, expected):
+        # Callers supply only scalar metadata, counts, or type names, never
+        # request IDs, session contents, token IDs, or KV bytes.
+        self.evidence.setdefault("runtime_checks", {})[reason] = {
+            "actual": actual, "expected": expected,
+        }
+        if actual != expected:
+            raise PauseRejected(
+                f"{reason}:actual={json.dumps(actual)},expected={json.dumps(expected)}")
+
+    def _check_request_lifetime(self):
+        s, req = self.scheduler, self.req
+        # Capture all lifetime diagnostics before rejecting the first one.
+        self.evidence["request_lifetime"] = {
+            **{name: bool(getattr(s, name)) for name in (
+                "enable_overlap", "enable_pdmux", "enable_hisparse", "_engine_paused")},
+            "session_present": bool(req.session_id),
+            "multimodal_present": req.multimodal_inputs is not None,
+            "prefix_indices_count": len(req.prefix_indices),
+            "inflight_middle_chunks": req.inflight_middle_chunks,
+            "cache_protected_len": req.cache_protected_len,
+        }
+        for name in ("enable_overlap", "enable_pdmux", "enable_hisparse", "_engine_paused"):
+            self._require(f"unsupported_request_lifetime:scheduler.{name}",
+                          bool(getattr(s, name)), False)
+        self._require("unsupported_request_lifetime:session_present",
+                      bool(req.session_id), False)
+        self._require("unsupported_request_lifetime:multimodal_present",
+                      req.multimodal_inputs is not None, False)
+        self._require("unsupported_request_lifetime:inflight_middle_chunks",
+                      req.inflight_middle_chunks, 0)
+        self._require("unsupported_request_lifetime:cache_protected_len",
+                      req.cache_protected_len, 0)
+        # ChunkCache updates this to the request's own KV mapping after
+        # prefill. Admission reuse is checked using batch.prefix_lens instead.
+        self.evidence["post_prefill_prefix_indices_count"] = len(req.prefix_indices)
 
     def _check_runtime(self):
         s = self.scheduler
@@ -226,43 +264,57 @@ class SchedulerPauseGate:
         # semantics the prototype does not understand.
         from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
         from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
-        if (type(pool) is not MHATokenToKVPool
-                or type(s.req_to_token_pool) is not ReqToTokenPool
-                or type(s.token_to_kv_pool_allocator) is not TokenToKVPoolAllocator):
-            raise PauseRejected("plain_pool_allocator_required")
-        if (ps.tp_size != 4 or ps.attn_tp_size != 4
-                or ps.attn_cp_size != 1 or ps.attn_dcp_size != 1):
-            raise PauseRejected("only_plain_tp4")
+        for name, obj, cls in (
+            ("kv_pool", pool, MHATokenToKVPool),
+            ("request_pool", s.req_to_token_pool, ReqToTokenPool),
+            ("allocator", s.token_to_kv_pool_allocator, TokenToKVPoolAllocator),
+        ):
+            self._require(f"plain_pool_allocator_required:{name}",
+                          type(obj).__module__ + "." + type(obj).__name__,
+                          cls.__module__ + "." + cls.__name__)
+            self._require(f"plain_pool_allocator_required:{name}:type_identity",
+                          type(obj) is cls, True)
+        for name, expected in (("tp_size", 4), ("attn_tp_size", 4),
+                               ("attn_cp_size", 1), ("attn_dcp_size", 1)):
+            self._require(f"only_plain_tp4:{name}", getattr(ps, name), expected)
         for name in ("pp_size", "dp_size", "dcp_size", "nnodes"):
-            if getattr(a, name, 1) != 1:
-                raise PauseRejected(f"unsupported_parallel:{name}")
+            self._require(f"unsupported_parallel:{name}", getattr(a, name, 1), 1)
         for name in ("enable_dp_attention", "enable_pdmux", "enable_hierarchical_cache",
                      "enable_hisparse", "enable_unified_memory", "enable_lora",
                      "enable_mixed_chunk", "enable_page_major_kv_layout"):
-            if getattr(a, name, False):
-                raise PauseRejected(f"unsupported_runtime:{name}")
-        if (not a.disable_overlap_schedule or not a.disable_radix_cache
-                or a.chunked_prefill_size != -1 or a.max_running_requests != 1
-                or getattr(a, "disaggregation_mode", "null") != "null"
-                or not s.spec_algorithm.is_none() or getattr(a, "cpu_offload_gb", 0)
-                or getattr(a, "quantization", None) is not None):
-            raise PauseRejected("unsupported_scheduler")
+            self._require(f"unsupported_runtime:{name}", bool(getattr(a, name, False)), False)
+        for name, actual, expected in (
+            ("disable_overlap_schedule", a.disable_overlap_schedule, True),
+            ("disable_radix_cache", a.disable_radix_cache, True),
+            ("chunked_prefill_size", a.chunked_prefill_size, -1),
+            ("max_running_requests", a.max_running_requests, 1),
+            ("disaggregation_mode", getattr(a, "disaggregation_mode", "null"), "null"),
+            ("speculation_disabled", s.spec_algorithm.is_none(), True),
+            ("cpu_offload_gb", getattr(a, "cpu_offload_gb", 0), 0),
+            ("quantization_present", getattr(a, "quantization", None) is not None, False),
+        ):
+            self._require(f"unsupported_scheduler:{name}", actual, expected)
         hf = runner.model_config.hf_config
-        if (hf.model_type != "qwen3" or hf.num_hidden_layers != 36
-                or hf.num_key_value_heads != 8 or hf.head_dim != 128
-                or pool.dtype != torch.bfloat16 or pool.store_dtype != pool.dtype
-                or pool.kv_cache_layout != "nhd" or pool.use_hnd
-                or pool.page_size != 1 or pool.start_layer != 0 or pool.layer_num != 36
-                or pool.is_quantized_kv_cache or pool.post_capture_active
-                or pool.layer_transfer_counter is not None
-                or runner.req_to_token_pool is not s.req_to_token_pool
-                or s.token_to_kv_pool_allocator.get_kvcache() is not pool):
-            raise PauseRejected("unsupported_qwen3_pool_layout")
-        if (s.enable_overlap or s.enable_pdmux or s.enable_hisparse
-                or s._engine_paused or self.req.session_id
-                or self.req.multimodal_inputs is not None or len(self.req.prefix_indices)
-                or self.req.inflight_middle_chunks):
-            raise PauseRejected("unsupported_request_lifetime")
+        for name, actual, expected in (
+            ("model_type", hf.model_type, "qwen3"),
+            ("num_hidden_layers", hf.num_hidden_layers, 36),
+            ("num_key_value_heads", hf.num_key_value_heads, 8),
+            ("head_dim", hf.head_dim, 128),
+            ("dtype", str(pool.dtype), str(torch.bfloat16)),
+            ("store_dtype", str(pool.store_dtype), str(pool.dtype)),
+            ("kv_cache_layout", pool.kv_cache_layout, "nhd"),
+            ("use_hnd", pool.use_hnd, False),
+            ("page_size", pool.page_size, 1),
+            ("start_layer", pool.start_layer, 0),
+            ("layer_num", pool.layer_num, 36),
+            ("is_quantized_kv_cache", pool.is_quantized_kv_cache, False),
+            ("post_capture_active", pool.post_capture_active, False),
+            ("layer_transfer_counter_present", pool.layer_transfer_counter is not None, False),
+            ("request_pool_identity", runner.req_to_token_pool is s.req_to_token_pool, True),
+            ("allocator_pool_identity", s.token_to_kv_pool_allocator.get_kvcache() is pool, True),
+        ):
+            self._require(f"unsupported_qwen3_pool_layout:{name}", actual, expected)
+        self._check_request_lifetime()
 
     def _revalidate(self):
         req, s = self.req, self.scheduler
@@ -369,6 +421,10 @@ class SchedulerPauseGate:
                 request_generation_after=self.mapping.req_generation,
                 slot_generations_after=self.mapping.slot_generations,
                 allocator_lease_released=True,
+                row_protection_released=True,
+                active_slot_leases_after_release=(
+                    self.scheduler.token_to_kv_pool_allocator
+                    .slot_lease_registry.active_lease_count),
                 tp_cpu_resume_vote=True,
             )
             # Row-release failure on one rank must not allow its peers to

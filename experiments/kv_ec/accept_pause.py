@@ -1,0 +1,228 @@
+"""One isolated TP4 baseline/pause acceptance run. Never takes over busy GPUs."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+from .cross_rank_control import request as control_request
+from .request_debug import compare
+
+
+def check_evidence(root, identity):
+    expected_ranks = [0, 1, 2, 3]
+    for rank in expected_ranks:
+        record = json.loads((root / f"pause-rank-{rank}.json").read_text())
+        for key, expected in (
+            ("tp_rank", rank), ("transaction_id", identity["transaction_id"]),
+            ("coordinator_epoch", identity["epoch"]), ("state", "RESUMED"),
+            ("decode_observed", True), ("decode_forward_mode", "decode"),
+            ("resume_authorized", True), ("tp_cpu_resume_vote", True),
+            ("allocator_lease_released", True), ("row_protection_released", True),
+            ("active_slot_leases_after_release", 0), ("cuda_event_complete", True),
+            ("cuda_event_recorded", True),
+            ("online_kv_pool_modified", False), ("failure", None),
+        ):
+            if (key not in record or type(record[key]) is not type(expected)
+                    or record[key] != expected):
+                raise ValueError(f"rank{rank}:{key}: expected {expected!r}")
+        if record["decode_output_count"] < 2 or record["scheduler_skipped_iterations"] < 1:
+            raise ValueError(f"rank{rank}: no actual pause/decode observed")
+        for key in ("request_generation", "slot_generations"):
+            if record[key + "_before"] != record[key + "_after"]:
+                raise ValueError(f"rank{rank}:{key} changed")
+        status = record["coordinator_final"]
+        if (status["epoch"] != identity["epoch"]
+                or status["transaction_id"] != identity["transaction_id"]
+                or status["state"] != "RESUME_AUTHORIZED"
+                or any(status[key] != expected_ranks for key in (
+                    "paused_ranks", "validated_ranks", "released_ranks", "armed_ranks"))):
+            raise ValueError(f"rank{rank}: incomplete coordinator handshake")
+    if list(root.glob("*.error.json")) or list(root.glob("*.pending.json")):
+        raise ValueError("rank failure or incomplete decode evidence exists")
+
+
+def stop_owned(process):
+    # Every process passed here was created below with start_new_session=True.
+    # Signal only that private process group, never a discovered server/PID.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            break
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            continue
+        if sig == signal.SIGTERM:
+            # The launcher can exit before its worker children.
+            continue
+    process.wait()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--gpus", required=True)
+    parser.add_argument("--model", default="/media/sda1/iic_data/luotao/models/Qwen3-8B")
+    parser.add_argument("--port", type=int, default=30359)
+    parser.add_argument("--startup-timeout", type=float, default=600)
+    parser.add_argument("--pause-timeout", type=float, default=60)
+    args = parser.parse_args()
+    root = Path(tempfile.mkdtemp(prefix="kv-ec-pause-accept-"))
+    tx = "pause-" + uuid.uuid4().hex
+    print(f"RUN={root}\nTX={tx}", flush=True)
+    processes, logs = [], []
+
+    def spawn(module, argv, log, env):
+        handle = (root / log).open("x")
+        logs.append(handle)
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-m", module, *argv], env=env,
+            stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+        processes.append(process)
+        return process
+
+    def alive(process, name):
+        if process.poll() is not None:
+            raise RuntimeError(f"{name} exited ({process.returncode}); inspect {root}")
+
+    def wait_for(predicate, timeout, name, watched):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for process, label in watched:
+                alive(process, label)
+            if predicate():
+                return
+            time.sleep(0.05)
+        raise TimeoutError(name)
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    url = f"http://127.0.0.1:{args.port}"
+
+    def healthy():
+        try:
+            with opener.open(url + "/health", timeout=2) as response:
+                return response.status == 200
+        except (OSError, urllib.error.URLError):
+            return False
+
+    def client(env, request_id, output, log):
+        return spawn("experiments.kv_ec.request_debug", [
+            "request", "--url", url, "--model", args.model,
+            "--request-id", request_id, "--prompt-tokens", "768",
+            "--stream-metrics", "--output", str(root / output)], log, env)
+
+    verdict = {"state": "FAIL", "transaction_id": tx, "run": str(root), "M1": False}
+    try:
+        gpus = args.gpus.split(",")
+        if len(gpus) != 4 or len(set(gpus)) != 4 or not all(g.isdigit() for g in gpus):
+            raise ValueError("--gpus must select four distinct physical GPU indices")
+        listing = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+            text=True, stderr=subprocess.STDOUT)
+        gpu_ids = dict(line.strip().split(", ") for line in listing.splitlines())
+        selected = {gpu_ids[g] for g in gpus}
+        tasks = subprocess.check_output(
+            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader"],
+            text=True, stderr=subprocess.STDOUT)
+        if any(line.split(",")[0].strip() in selected for line in tasks.splitlines()):
+            raise RuntimeError("selected GPUs have active compute tasks; no processes were stopped")
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA unavailable; GPU validation NOT performed")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", args.port))
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith("SGLANG_KV_EC_")}
+
+        def server(label, server_env):
+            process = spawn("experiments.kv_ec.launch_debug", [
+                "--mode", "baseline", "--tp", "4", "--gpus", args.gpus,
+                "--port", str(args.port), "--model", args.model,
+                "--output", str(root / "evidence"), "--snapshot-id", tx + "-" + label,
+                "--request-id", "kv-ec-pause-request", "--token-count", "256",
+                "--layers", "all"], label + "-server.log", server_env)
+            wait_for(healthy, args.startup_timeout, label + " health timeout",
+                     [(process, label + " server")])
+            return process
+
+        baseline = server("baseline", env)
+        baseline_client = client(env, "kv-ec-baseline-request", "baseline-response.json",
+                                 "baseline-client.log")
+        if baseline_client.wait(timeout=600) != 0:
+            raise RuntimeError("baseline request failed; inspect baseline-client.log")
+        alive(baseline, "baseline server")
+        stop_owned(baseline)
+        processes.remove(baseline)
+
+        coordinator = spawn("experiments.kv_ec.pause_control", [
+            "serve", "--socket", str(root / "pause.sock"), "--transaction-id", tx,
+            "--timeout-s", str(args.pause_timeout),
+            "--identity-output", str(root / "identity.json")], "coordinator.log", env)
+        wait_for(lambda: (root / "pause.sock").exists(), 10, "coordinator startup timeout",
+                 [(coordinator, "coordinator")])
+        identity = json.loads((root / "identity.json").read_text())
+        pause_env = dict(env, SGLANG_KV_EC_PAUSE_RESUME="1",
+                         SGLANG_KV_EC_PAUSE_REQUEST_ID="kv-ec-pause-request",
+                         SGLANG_KV_EC_PAUSE_IDENTITY=json.dumps(identity),
+                         SGLANG_KV_EC_PAUSE_SOCKET=str(root / "pause.sock"),
+                         SGLANG_KV_EC_PAUSE_OUTPUT=str(root / "ranks"),
+                         SGLANG_KV_EC_PAUSE_TIMEOUT_S=str(args.pause_timeout),
+                         SGLANG_KV_EC_PAUSE_IPC_TIMEOUT_S="0.5")
+        paused_server = server("pause", pause_env)
+        paused_client = client(env, "kv-ec-pause-request", "pause-response.json", "pause-client.log")
+
+        def control(op):
+            response = control_request(root / "pause.sock", dict(identity, op=op), timeout=1)
+            if response.get("state") != "OK" or response["status"]["state"] == "FAILED":
+                raise RuntimeError(f"coordinator {op}: {response}")
+            return response["status"]
+
+        def all_paused():
+            status = control("status")
+            return status["state"] == "PAUSED" and status["paused_ranks"] == [0, 1, 2, 3]
+
+        wait_for(all_paused, args.pause_timeout, "four-rank PAUSED timeout",
+                 [(coordinator, "coordinator"), (paused_server, "pause server"),
+                  (paused_client, "pause client")])
+        # Save the observation before the external authorization.
+        with (root / "paused.json").open("x") as handle:
+            json.dump(control("status"), handle, indent=2)
+        control("authorize")
+        if paused_client.wait(timeout=600) != 0:
+            raise RuntimeError("pause request failed; inspect pause-client.log")
+        wait_for(lambda: all((root / "ranks" / f"pause-rank-{r}.json").exists()
+                            for r in range(4)), 10, "decode evidence timeout",
+                 [(paused_server, "pause server"), (coordinator, "coordinator")])
+        check_evidence(root / "ranks", identity)
+        compare([root / "baseline-response.json", root / "pause-response.json"])
+        wait_for(healthy, 10, "post-decode health failed", [(paused_server, "pause server")])
+        server_log = (root / "pause-server.log").read_text()
+        if "Scheduler hit an exception" in server_log or "Traceback (most recent call last)" in server_log:
+            raise RuntimeError("server log contains an exception")
+        verdict.update(state="PASS", M1=True, reason="TP4 paused, authorized, decoded; exact 16-token baseline match")
+    except (Exception, KeyboardInterrupt) as exc:
+        reason = exc.output.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        verdict["reason"] = f"{type(exc).__name__}: {reason}"
+    finally:
+        for process in reversed(processes):
+            stop_owned(process)
+        for handle in logs:
+            handle.close()
+        with (root / "acceptance.json").open("x") as handle:
+            json.dump(verdict, handle, indent=2)
+    print(f"{verdict['state']}: {verdict['reason']}\nEvidence: {root}", flush=True)
+    return 0 if verdict["state"] == "PASS" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
