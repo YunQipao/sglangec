@@ -24,10 +24,10 @@ modify a live KV pool.
 
 ## What is deliberately blocked
 
-There is no physical-slot generation, lease, allocator pin, or scheduler
-pause/resume transaction in this checkout. A CUDA event only proves that
-previous GPU work completed; it does not prevent another scheduler path from
-freeing or reusing a slot. Consequently this phase does not implement:
+The ordinary page-size-one allocator has experimental slot generations and
+leases. The Scheduler capture hook can run a non-destructive local or
+cross-rank lease validation transaction. This is not a recovery pause/resume
+mechanism for arbitrary scheduling modes. Consequently this phase does not implement:
 
 - destructive KV erasure;
 - `set_kv_buffer` writeback;
@@ -38,8 +38,8 @@ The correct next interface is a scheduler-owned recovery transaction that
 pins the request row and every physical slot across all TP ranks, records a
 slot generation/allocator epoch, waits for all relevant CUDA streams, performs
 the writeback, and validates the same generation before resuming scheduling.
-Until that interface exists, the only valid GPU experiment is read-only
-mapping/layout inspection in an isolated server.
+Until writeback ownership and rollback are proven, GPU experiments are limited
+to isolated capture and non-destructive lease validation.
 
 ## Lease prototype
 
@@ -108,11 +108,12 @@ permission to run a destructive experiment.
 
 `cross_rank_lease.py` contains a CPU-only TP=4 protocol with explicit states
 `PREPARE`, `LOCAL_LEASED`, `ALL_RANKS_READY`, `CUDA_COMPLETED`,
-`ALL_RANKS_VALIDATED`, and `GLOBAL_RELEASED`. A rank failure or timeout enters
+`ALL_RANKS_VALIDATED`, `RELEASE_AUTHORIZED`, and `GLOBAL_RELEASED`. A rank failure or timeout enters
 a terminal failure state; all local abort acknowledgements are required before
-the coordinator releases its logical ownership. It performs no NCCL or IPC and
-is not wired into the live Scheduler, so the real GPU transaction remains
-local-only.
+the coordinator releases its logical ownership. The model performs no NCCL or
+GPU access; `cross_rank_worker.py` now connects real local Scheduler leases to
+the independent Unix control server. This integration still requires a new
+TP4 GPU run; CPU tests are not GPU evidence.
 
 `chunk_protection.py` requires three independently `COMMITTED` 256-token
 snapshots for a 768-token request. It rejects metadata-only chunks, gaps,
@@ -134,7 +135,7 @@ python -m experiments.kv_ec.complete_prefill \
   --request-id kv-ec-artificial-request \
   --request-version request-v1 \
   --checkpoint-version "$SNAP" \
-  --manager-epoch local-scheduler-epoch \
+  --manager-epoch "$MANAGER_EPOCH" \
   --output "$OUT/$SNAP-complete.json"
 ```
 
@@ -146,16 +147,18 @@ causes a nonzero exit and no `COMPLETE` report.
 plane for the next integration stage. Its protocol is:
 
 ```text
-prepare -> local_leased (all ranks)
+prepare_rank (all ranks) -> local_leased (all ranks)
         -> cuda_completed (all ranks)
         -> validated (all ranks)
-        -> release_global
+        -> authorize_release
+        -> actual local allocator release + local_released ACK (all ranks)
+        -> GLOBAL_RELEASED
 ```
 
 The control server owns the CPU coordinator and never calls NCCL or touches
 GPU memory. Workers must create and query their own CUDA Events before sending
-the corresponding messages. A timeout, duplicate transition, coordinator
-restart, or rank failure is terminal and cannot produce `GLOBAL_RELEASED`;
+the corresponding messages. Exact duplicate phase messages are idempotent.
+A timeout, coordinator restart, or rank failure cannot produce `GLOBAL_RELEASED`;
 failed transactions require all four `abort_ack` messages before coordinated
 slot ownership is cleared.
 
@@ -164,13 +167,21 @@ Start it separately from the Parity Manager:
 ```bash
 python -m experiments.kv_ec.cross_rank_control \
   --socket "$RUN/control.sock" \
-  --manager-epoch "$MANAGER_EPOCH" \
+  --parity-socket "$RUN/manager.sock" \
   --timeout 30
 ```
 
-This is currently a protocol/IPC validation endpoint, not a live Scheduler
-hook. The live GPU experiment must remain read-only until each rank can bind
-its real local Lease and CUDA Event to these messages.
+Enable the live bridge only with `SGLANG_KV_EC_CROSS_RANK_LEASE=1` in addition
+to the existing Guard and Scheduler Lease flags. See [CROSS_RANK_GPU.md](CROSS_RANK_GPU.md)
+for a complete isolated run. All switches default off.
+
+Timeout only invalidates an allocator lease; it never automatically removes
+slot ownership, even when the Event has completed. Explicit abort cleanup
+requires a Worker-owned CUDA fence and matching original Manager epoch.
+A failed transaction may have some local leases released, but must never be
+reported as globally successful. If CUDA completion cannot be proved, the
+remaining lease is retained fail-closed; normal allocator reclamation can then
+fail and operator intervention is required. This is not fault-tolerant serving.
 
 ## CPU checks
 

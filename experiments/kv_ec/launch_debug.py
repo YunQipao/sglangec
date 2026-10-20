@@ -95,6 +95,11 @@ def main():
     if args.mode == "parity":
         os.environ["SGLANG_KV_EC_PARITY_SOCKET"] = str(args.parity_socket)
         os.environ["SGLANG_KV_EC_PARITY_TIMEOUT"] = "2"
+        from experiments.kv_ec.parity_manager import manager_hello
+
+        os.environ["SGLANG_KV_EC_MANAGER_EPOCH"] = manager_hello(
+            args.parity_socket
+        )
     if args.mode != "baseline":
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         from experiments.kv_ec.debug_capture import source_identity

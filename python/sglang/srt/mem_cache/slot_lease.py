@@ -152,8 +152,6 @@ class SlotLeaseRegistry:
         lease = self._leases.get(lease_id)
         if lease is None:
             raise SlotLeaseRejected("unknown_lease")
-        if lease.expired:
-            raise SlotLeaseRejected("lease_expired")
         if not torch.cuda.is_available():
             raise SlotLeaseRejected("cuda_unavailable")
         event = torch.cuda.Event(enable_timing=False, blocking=False)
@@ -174,8 +172,6 @@ class SlotLeaseRegistry:
             raise SlotLeaseRejected("invalid_cuda_event")
         updated = self._replace(lease, cuda_event=event)
         self._leases[lease_id] = updated
-        if updated.expired and self._event_complete(updated):
-            self._release(updated)
 
     @staticmethod
     def _replace(lease: SlotLease, **changes) -> SlotLease:
@@ -244,6 +240,20 @@ class SlotLeaseRegistry:
         # Fail closed: never make in-flight GPU slots reusable on shutdown.
         self._closed = True
 
+    def abort(self, lease_id: str, *, manager_epoch: str) -> None:
+        """Explicit cleanup, including expired leases, after a CUDA fence."""
+        if self._closed:
+            raise SlotLeaseRejected("registry_closed")
+        self._expire()
+        lease = self._leases.get(lease_id)
+        if lease is None:
+            raise SlotLeaseRejected("unknown_lease")
+        if manager_epoch != lease.manager_epoch:
+            raise SlotLeaseRejected("manager_epoch_changed")
+        if not self._event_complete(lease):
+            raise SlotLeaseRejected("cuda_event_incomplete")
+        self._release(lease)
+
     def clear(self) -> None:
         if self._leases:
             raise SlotLeaseRejected("active_leases")
@@ -265,20 +275,8 @@ class SlotLeaseRegistry:
         now = self._clock()
         for lease in list(self._leases.values()):
             if now >= lease.deadline and not lease.expired:
-                if lease.cuda_event is None or not self._event_complete(lease):
-                    self._leases[lease.lease_id] = SlotLease(
-                        lease_id=lease.lease_id,
-                        manager_epoch=lease.manager_epoch,
-                        request_id=lease.request_id,
-                        request_version=lease.request_version,
-                        slots=lease.slots,
-                        generations=lease.generations,
-                        deadline=lease.deadline,
-                        cuda_event=lease.cuda_event,
-                        expired=True,
-                    )
-                    continue
-                self._release(lease)
+                # A completed local event is not global release authorization.
+                self._leases[lease.lease_id] = self._replace(lease, expired=True)
 
     def _release(self, lease: SlotLease) -> None:
         self._leases.pop(lease.lease_id, None)

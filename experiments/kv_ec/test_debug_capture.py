@@ -115,6 +115,7 @@ class LifetimeTests(unittest.TestCase):
                         "--snapshot-id", "tp2", "--parity-socket", "/tmp/test-parity.sock"]
                 with patch.object(sys, "argv", argv), patch.dict(os.environ, {}, clear=True), \
                      patch("experiments.kv_ec.launch_debug.socket.socket"), \
+                     patch("experiments.kv_ec.parity_manager.manager_hello", return_value="test-epoch"), \
                      patch.object(debug_capture, "source_identity", return_value={}), \
                      patch("experiments.kv_ec.launch_debug.os.execv") as execute:
                     launch_debug.main()

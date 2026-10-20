@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from experiments.kv_ec.cross_rank_lease import (
     CrossRankLeaseCoordinator,
@@ -66,7 +67,16 @@ class CrossRankLeaseTests(unittest.TestCase):
             CrossRankLeaseState.ALL_RANKS_VALIDATED,
         )
         self.assertEqual(
-            manager.release_global(tx).state,
+            manager.authorize_release(tx).state,
+            CrossRankLeaseState.RELEASE_AUTHORIZED,
+        )
+        for rank in range(3):
+            self.assertEqual(
+                manager.mark_local_released(tx, rank).state,
+                CrossRankLeaseState.RELEASE_AUTHORIZED,
+            )
+        self.assertEqual(
+            manager.mark_local_released(tx, 3).state,
             CrossRankLeaseState.GLOBAL_RELEASED,
         )
 
@@ -81,7 +91,7 @@ class CrossRankLeaseTests(unittest.TestCase):
             CrossRankLeaseState.FAILED,
         )
         with self.assertRaisesRegex(LeaseRejected, "invalid_transition"):
-            manager.release_global(tx)
+            manager.authorize_release(tx)
         manager.acknowledge_abort(tx, 0)
         with self.assertRaisesRegex(LeaseRejected, "slot_already_coordinated"):
             manager.prepare("tx-reuse-before-cleanup", observations(), checkpoint_version="cp-v1")
@@ -113,25 +123,116 @@ class CrossRankLeaseTests(unittest.TestCase):
             CrossRankLeaseState.EXPIRED,
         )
         with self.assertRaisesRegex(LeaseRejected, "invalid_transition"):
-            manager.release_global("tx-timeout")
+            manager.authorize_release("tx-timeout")
 
-    def test_duplicate_transition_message_fails_closed(self):
+    def test_global_release_waits_for_four_real_release_acknowledgements(self):
+        manager = self.coordinator()
+        tx = "tx-release-acks"
+        manager.prepare(tx, observations(), checkpoint_version="cp-v1")
+        for rank in range(4):
+            manager.mark_local_leased(tx, rank)
+        for rank in range(4):
+            manager.mark_cuda_completed(tx, rank)
+        for rank in range(4):
+            manager.mark_validated(tx, rank)
+        manager.authorize_release(tx)
+        for rank in range(3):
+            status = manager.mark_local_released(tx, rank)
+            self.assertNotEqual(status.state, CrossRankLeaseState.GLOBAL_RELEASED)
+            with self.assertRaisesRegex(LeaseRejected, "slot_already_coordinated"):
+                manager.prepare(
+                    f"tx-reuse-{rank}", observations(), checkpoint_version="cp-v1"
+                )
+        self.assertEqual(
+            manager.mark_local_released(tx, 0).released_ranks,
+            (0, 1, 2),
+        )
+        self.assertEqual(
+            manager.mark_local_released(tx, 3).state,
+            CrossRankLeaseState.GLOBAL_RELEASED,
+        )
+
+    def test_incremental_prepare_uses_one_rank_local_observation(self):
+        manager = self.coordinator()
+        items = observations()
+        tx = "tx-incremental"
+        for rank in range(3):
+            status = manager.prepare_rank(
+                tx, items[rank], checkpoint_version="cp-v1"
+            )
+            self.assertEqual(status.prepared_ranks, tuple(range(rank + 1)))
+        with self.assertRaisesRegex(LeaseRejected, "incomplete_prepare"):
+            manager.mark_local_leased(tx, 0)
+        status = manager.prepare_rank(
+            tx, items[3], checkpoint_version="cp-v1"
+        )
+        self.assertEqual(status.prepared_ranks, (0, 1, 2, 3))
+        self.assertEqual(
+            manager.mark_local_leased(tx, 0).state,
+            CrossRankLeaseState.LOCAL_LEASED,
+        )
+
+    def test_incremental_prepare_rejects_mismatch_and_duplicate(self):
+        manager = self.coordinator()
+        items = observations()
+        manager.prepare_rank("tx-bad", items[0], checkpoint_version="cp-v1")
+        with self.assertRaisesRegex(LeaseRejected, "rank_metadata_mismatch"):
+            manager.prepare_rank(
+                "tx-bad", observations(version="wrong")[1],
+                checkpoint_version="cp-v1",
+            )
+        duplicate_item = replace(
+            observations()[0], physical_slots=(9991, 9992)
+        )
+        manager.prepare_rank("tx-dup", duplicate_item, checkpoint_version="cp-v1")
+        self.assertEqual(
+            manager.prepare_rank("tx-dup", duplicate_item, checkpoint_version="cp-v1").prepared_ranks,
+            (0,),
+        )
+
+    def test_partial_release_failure_never_reports_global_success(self):
+        manager = self.coordinator()
+        tx = "partial-release"
+        manager.prepare(tx, observations(), checkpoint_version="cp-v1")
+        for method in (manager.mark_local_leased, manager.mark_cuda_completed,
+                       manager.mark_validated):
+            for rank in range(4):
+                method(tx, rank)
+        manager.authorize_release(tx)
+        manager.mark_local_released(tx, 0)
+        manager.fail(tx, "rank-1-release-failed")
+        self.assertEqual(manager.status(tx).released_ranks, (0,))
+        self.assertEqual(manager.status(tx).state, CrossRankLeaseState.FAILED)
+        with self.assertRaises(LeaseRejected):
+            manager.mark_local_released(tx, 1)
+
+    def test_late_rank_cannot_revive_expired_prepare(self):
+        now = [0.0]
+        manager = self.coordinator(timeout_s=1, clock=lambda: now[0])
+        manager.prepare_rank("late", observations()[0], checkpoint_version="cp-v1")
+        now[0] = 2
+        with self.assertRaises(LeaseRejected):
+            manager.prepare_rank("late", observations()[1], checkpoint_version="cp-v1")
+        self.assertEqual(manager.status("late").state, CrossRankLeaseState.EXPIRED)
+
+    def test_duplicate_transition_messages_are_idempotent(self):
         manager = self.coordinator()
         tx = "tx-duplicate"
         manager.prepare(tx, observations(), checkpoint_version="cp-v1")
-        manager.mark_local_leased(tx, 0)
-        with self.assertRaisesRegex(LeaseRejected, "duplicate_local_lease"):
-            manager.mark_local_leased(tx, 0)
+        self.assertEqual(
+            manager.mark_local_leased(tx, 0), manager.mark_local_leased(tx, 0)
+        )
         for rank in (1, 2, 3):
             manager.mark_local_leased(tx, rank)
-        manager.mark_cuda_completed(tx, 0)
-        with self.assertRaisesRegex(LeaseRejected, "duplicate_cuda_completed"):
-            manager.mark_cuda_completed(tx, 0)
+        self.assertEqual(
+            manager.mark_cuda_completed(tx, 0),
+            manager.mark_cuda_completed(tx, 0),
+        )
         for rank in (1, 2, 3):
             manager.mark_cuda_completed(tx, rank)
-        manager.mark_validated(tx, 0)
-        with self.assertRaisesRegex(LeaseRejected, "duplicate_validation"):
-            manager.mark_validated(tx, 0)
+        self.assertEqual(
+            manager.mark_validated(tx, 0), manager.mark_validated(tx, 0)
+        )
 
 
 if __name__ == "__main__":

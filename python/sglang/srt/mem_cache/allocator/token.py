@@ -134,6 +134,10 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         """Release only after the recorded CUDA event reports completion."""
         self.slot_lease_registry.release(lease_id, manager_epoch=manager_epoch)
 
+    def abort_slot_lease(self, lease_id: str, *, manager_epoch: str) -> None:
+        """Explicit abort after a real completion fence, even on timeout."""
+        self.slot_lease_registry.abort(lease_id, manager_epoch=manager_epoch)
+
     def get_cpu_copy(self, indices, mamba_indices=None):
         return self._kvcache.get_cpu_copy(indices, mamba_indices=mamba_indices)
 

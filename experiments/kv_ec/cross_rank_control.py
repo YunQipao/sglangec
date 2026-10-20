@@ -14,10 +14,15 @@ import json
 from pathlib import Path
 import socket
 import threading
+import os
+import uuid
+import logging
 
 from .checkpoint_protocol import recv_message, send_message
 from .cross_rank_lease import CrossRankLeaseCoordinator, CrossRankStatus
 from .recovery_lease import LeaseRejected, RankLeaseObservation
+
+logger = logging.getLogger(__name__)
 
 
 def _status(status: CrossRankStatus) -> dict:
@@ -53,26 +58,43 @@ def _observation(data: dict) -> RankLeaseObservation:
 class CrossRankControlServer:
     """Threaded, bounded-metadata control server independent of inference."""
 
-    def __init__(self, path: str | Path, coordinator: CrossRankLeaseCoordinator):
+    def __init__(
+        self,
+        path: str | Path,
+        coordinator: CrossRankLeaseCoordinator,
+        *,
+        manager_epoch_provider=None,
+    ):
         self.path = Path(path)
         self.coordinator = coordinator
+        self.manager_epoch_provider = manager_epoch_provider
+        self.control_epoch = str(uuid.uuid4())
         self._stop = threading.Event()
+        self.ready = threading.Event()
+        self._dispatch_lock = threading.RLock()
         self._server: socket.socket | None = None
 
     def serve_forever(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.unlink(missing_ok=True)
+        if self.path.exists():
+            raise FileExistsError(f"refusing to replace existing control socket path: {self.path}")
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
             self._server = server
             server.bind(str(self.path))
+            os.chmod(self.path, 0o600)
             server.listen(16)
             server.settimeout(0.2)
+            self.ready.set()
             try:
                 while not self._stop.is_set():
                     try:
                         conn, _ = server.accept()
                     except socket.timeout:
                         continue
+                    except OSError:
+                        if self._stop.is_set():
+                            break
+                        raise
                     threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
             finally:
                 self.path.unlink(missing_ok=True)
@@ -84,17 +106,38 @@ class CrossRankControlServer:
                 request, payload = recv_message(conn)
                 if payload:
                     raise LeaseRejected("payload_for_control_message")
-                response = self._dispatch(request)
+                with self._dispatch_lock:
+                    response = self._dispatch(request)
             except Exception as exc:
                 response = {"state": "ERROR", "reason": str(exc) or type(exc).__name__}
             send_message(conn, response, b"")
 
     def _dispatch(self, request: dict) -> dict:
         op = request.get("op")
+        if op == "hello":
+            current_epoch = self.coordinator.manager_epoch
+            if self.manager_epoch_provider is not None:
+                current_epoch = self.manager_epoch_provider()
+            if current_epoch != self.coordinator.manager_epoch:
+                raise LeaseRejected("manager_epoch_changed")
+            return {
+                "state": "OK",
+                "control_epoch": self.control_epoch,
+                "manager_epoch": current_epoch,
+            }
         tx = request.get("transaction_id")
         if not isinstance(tx, str) or not tx:
             raise LeaseRejected("transaction_id_required")
-        if op == "prepare":
+        if self.manager_epoch_provider is not None:
+            current_epoch = self.manager_epoch_provider()
+            if current_epoch != self.coordinator.manager_epoch:
+                raise LeaseRejected("manager_epoch_changed")
+        if op == "prepare_rank":
+            result = self.coordinator.prepare_rank(
+                tx, _observation(request.get("observation", {})),
+                checkpoint_version=str(request.get("checkpoint_version", "")),
+            )
+        elif op == "prepare":
             raw = request.get("observations")
             if not isinstance(raw, list):
                 raise LeaseRejected("observations_required")
@@ -108,8 +151,10 @@ class CrossRankControlServer:
             result = self.coordinator.mark_cuda_completed(tx, int(request["tp_rank"]))
         elif op == "validated":
             result = self.coordinator.mark_validated(tx, int(request["tp_rank"]))
-        elif op == "release_global":
-            result = self.coordinator.release_global(tx)
+        elif op == "authorize_release":
+            result = self.coordinator.authorize_release(tx)
+        elif op == "local_released":
+            result = self.coordinator.mark_local_released(tx, int(request["tp_rank"]))
         elif op == "fail":
             result = self.coordinator.fail(tx, str(request.get("reason", "rank_failure")))
         elif op == "abort_ack":
@@ -118,7 +163,24 @@ class CrossRankControlServer:
             result = self.coordinator.status(tx)
         else:
             raise LeaseRejected("unknown_control_operation")
-        return {"state": "OK", "status": _status(result)}
+        if op != "status":
+            logger.info(
+                "KV_EC_CONTROL %s",
+                json.dumps({
+                    "transaction_id": tx, "op": op,
+                    "tp_rank": request.get("tp_rank"),
+                    "state": result.state.value,
+                    "released_ranks": result.released_ranks,
+                    "control_epoch": self.control_epoch,
+                    "manager_epoch": self.coordinator.manager_epoch,
+                }, sort_keys=True),
+            )
+        return {
+            "state": "OK",
+            "control_epoch": self.control_epoch,
+            "manager_epoch": self.coordinator.manager_epoch,
+            "status": _status(result),
+        }
 
     def stop(self):
         self._stop.set()
@@ -144,14 +206,20 @@ def request(path: str | Path, message: dict, *, timeout: float = 2.0) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", type=Path, required=True)
-    parser.add_argument("--manager-epoch", required=True)
+    parser.add_argument("--parity-socket", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    from .parity_manager import manager_hello
+
+    manager_epoch = manager_hello(args.parity_socket)
+    epoch_provider = lambda: manager_hello(args.parity_socket)
     CrossRankControlServer(
         args.socket,
         CrossRankLeaseCoordinator(
-            timeout_s=args.timeout, manager_epoch=args.manager_epoch
+            timeout_s=args.timeout, manager_epoch=manager_epoch
         ),
+        manager_epoch_provider=epoch_provider,
     ).serve_forever()
 
 

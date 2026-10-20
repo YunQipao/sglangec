@@ -350,9 +350,26 @@ def capture(scheduler, batch, req, config):
         torch.cuda.synchronize(device)
     if scheduler_lease is not None:
         with timing.region("scheduler_lease_validation_ms"):
-            phase["scheduler_lease"] = scheduler_lease.complete(
-                scheduler, req, slots=tuple(slots_cpu)
-            )
+            if os.environ.get("SGLANG_KV_EC_CROSS_RANK_LEASE") == "1":
+                from .cross_rank_worker import coordinate_local_lease
+
+                phase["scheduler_lease"] = coordinate_local_lease(
+                    scheduler_lease,
+                    scheduler,
+                    req,
+                    tuple(slots_cpu),
+                    control_socket=os.environ.get("SGLANG_KV_EC_CONTROL_SOCKET"),
+                    timeout_s=float(os.environ.get(
+                        "SGLANG_KV_EC_CROSS_RANK_TIMEOUT_S", "10"
+                    )),
+                    checkpoint_version=os.environ.get(
+                        "SGLANG_KV_EC_CHECKPOINT_VERSION", config.snapshot_id
+                    ),
+                )
+            else:
+                phase["scheduler_lease"] = scheduler_lease.complete(
+                    scheduler, req, slots=tuple(slots_cpu)
+                )
     with timing.region("final_request_generation_check_ms"):
         require(req.req_pool_idx == row and int(req_pool.req_generation[row]) == generation and
                 row not in req_pool.free_slots, "request_generation_changed")

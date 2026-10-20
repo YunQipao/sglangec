@@ -264,9 +264,12 @@ class SchedulerLeaseTransaction:
                 "request_id": str(req.rid),
                 "request_version": request_version,
                 "manager_epoch": manager_epoch,
-                "checkpoint_version": snapshot_id,
+                "checkpoint_version": os.environ.get(
+                    "SGLANG_KV_EC_CHECKPOINT_VERSION", snapshot_id
+                ),
                 "transaction_id": transaction_id,
                 "req_generation": int(req_generation),
+                "req_pool_idx": int(req.req_pool_idx),
                 "token_start": int(token_start),
                 "token_count": int(token_count),
                 "slot_count": len(slots),
@@ -281,9 +284,11 @@ class SchedulerLeaseTransaction:
         _ACTIVE_SCHEDULER_LEASES[key] = txn
         return txn
 
-    def complete(self, scheduler: Any, req: Any, *, slots: tuple[int, ...]) -> dict:
+    def validate_completion(self, scheduler: Any, req: Any, *, slots: tuple[int, ...]) -> dict:
         if not self._active:
             raise RecoveryGuardRejected("scheduler_lease_not_active")
+        if self.metadata.get("event_complete"):
+            raise RecoveryGuardRejected("scheduler_lease_already_validated")
         event = self.allocator.record_slot_lease_cuda_event(
             self.lease_id,
             stream=torch.cuda.current_stream(),
@@ -300,6 +305,12 @@ class SchedulerLeaseTransaction:
             os.environ.get("SGLANG_KV_EC_MANAGER_EPOCH", "local-scheduler-epoch")
             == epoch,
             "manager_epoch_changed",
+        )
+        _require(str(req.rid) == self.metadata["request_id"], "request_identity_changed")
+        _require(
+            int(req.req_pool_idx) == self.metadata["req_pool_idx"]
+            and req.req_pool_idx not in scheduler.req_to_token_pool.free_slots,
+            "request_row_changed_or_freed",
         )
         current_generation = int(
             scheduler.req_to_token_pool.req_generation[req.req_pool_idx]
@@ -332,11 +343,27 @@ class SchedulerLeaseTransaction:
             request_version=self.metadata["request_version"],
             slots=list(current_slots),
         )
+        self.metadata.update(
+            {
+                "state": "LOCAL_VALIDATED",
+                "slot_generations_after": list(generations),
+            }
+        )
+        return dict(self.metadata)
+
+    def release_local(self) -> dict:
+        if not self._active:
+            raise RecoveryGuardRejected("scheduler_lease_not_active")
+        if self.metadata.get("state") != "LOCAL_VALIDATED":
+            raise RecoveryGuardRejected("scheduler_lease_not_validated")
+        epoch = self.metadata["manager_epoch"]
         self.allocator.release_slot_lease(self.lease_id, manager_epoch=epoch)
         self.metadata.update(
             {
                 "state": "LOCAL_RELEASED",
-                "slot_generations_after": list(generations),
+                "slot_generations_after": list(
+                    self.metadata["slot_generations_after"]
+                ),
                 "allocator_available_size_after": int(
                     self.allocator.available_size()
                 ),
@@ -346,9 +373,14 @@ class SchedulerLeaseTransaction:
         _ACTIVE_SCHEDULER_LEASES.pop(self.key, None)
         return dict(self.metadata)
 
-    def abort(self) -> None:
+    def complete(self, scheduler: Any, req: Any, *, slots: tuple[int, ...]) -> dict:
+        """Compatibility local-only transaction; never means cross-rank release."""
+        self.validate_completion(scheduler, req, slots=slots)
+        return self.release_local()
+
+    def abort(self) -> dict:
         if not self._active:
-            return
+            return dict(self.metadata)
         # A failed transaction is deliberately fail-closed.  If an event can
         # be recorded and synchronized, release safely; otherwise leave the
         # allocator owner in place instead of guessing that GPU work finished.
@@ -359,18 +391,27 @@ class SchedulerLeaseTransaction:
                 )
                 event.synchronize()
                 if event.query():
-                    self.allocator.release_slot_lease(
+                    self.allocator.abort_slot_lease(
                         self.lease_id,
                         manager_epoch=self.metadata["manager_epoch"],
                     )
                     self._active = False
+                    self.metadata.update(
+                        state="ABORTED_RELEASED",
+                        abort_event_recorded=True,
+                        abort_event_complete=True,
+                    )
         except Exception:
-            pass
+            self.metadata.update(
+                abort_event_recorded=True,
+                abort_event_complete=False,
+            )
         finally:
             if not self._active:
                 _ACTIVE_SCHEDULER_LEASES.pop(self.key, None)
             else:
                 self.metadata["state"] = "ABORTED_FAIL_CLOSED"
+        return dict(self.metadata)
 
 
 def abort_scheduler_lease(snapshot_id: str, req: Any, scheduler: Any) -> None:

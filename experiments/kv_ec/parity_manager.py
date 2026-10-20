@@ -18,6 +18,7 @@ import resource
 import socket
 import threading
 import time
+import uuid
 
 import numpy as np
 
@@ -69,13 +70,15 @@ class Checkpoint:
 class ParityManager:
     """Thread-safe TP=2/4 manager; no cross-rank blocking or collectives."""
 
-    def __init__(self, *, timeout=30.0, max_pending=1, retain_oracle=False, test_oracle=False):
+    def __init__(self, *, timeout=30.0, max_pending=1, retain_oracle=False,
+                 test_oracle=False, manager_epoch=None):
         if timeout <= 0 or max_pending < 1:
             raise ValueError("timeout and max_pending must be positive")
         self.timeout = float(timeout)
         self.max_pending = int(max_pending)
         self.retain_oracle = bool(retain_oracle)
         self.test_oracle = test_oracle
+        self.manager_epoch = manager_epoch or str(uuid.uuid4())
         self._checkpoints = OrderedDict()
         self._lock = threading.Lock()
 
@@ -192,6 +195,9 @@ class ParityManager:
             raise ValueError("BF16 required")
         if metadata.get("provenance") not in ("sglang_request", "synthetic_fixture"):
             raise ValueError("explicit request provenance required")
+        if (metadata.get("provenance") == "sglang_request"
+                and metadata.get("manager_epoch") != self.manager_epoch):
+            raise ValueError("manager_epoch_mismatch")
         if metadata.get("snapshot_completion_status") != "complete":
             raise ValueError("incomplete snapshot")
         if metadata.get("provenance") == "sglang_request":
@@ -307,7 +313,9 @@ class ParityManagerServer:
             conn.settimeout(2)
             try:
                 metadata, payload = recv_message(conn)
-                if metadata.get("kind") == "status":
+                if metadata.get("kind") == "hello":
+                    response = {"state": "READY", "manager_epoch": self.manager.manager_epoch}
+                elif metadata.get("kind") == "status":
                     response = self.manager.status(metadata.get("snapshot_id"))
                 else:
                     response = self.manager.submit(metadata, np.frombuffer(payload, dtype=np.uint8))
@@ -425,6 +433,13 @@ def submit_once(path, metadata, payload, timeout=0.25):
     response["transport_ms"] = {"connect_ms": connect_ms, "response_wait_ms": response_ms,
                                 **(transport if isinstance(transport, dict) else {})}
     return response
+
+
+def manager_hello(path, timeout=2.0):
+    response = submit_once(path, {"kind": "hello"}, b"", timeout=timeout)
+    if response.get("state") != "READY" or not response.get("manager_epoch"):
+        raise RuntimeError("parity manager did not provide a live epoch")
+    return response["manager_epoch"]
 
 
 def main():

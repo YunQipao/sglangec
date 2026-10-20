@@ -22,6 +22,7 @@ class CrossRankLeaseState(str, Enum):
     ALL_RANKS_READY = "ALL_RANKS_READY"
     CUDA_COMPLETED = "CUDA_COMPLETED"
     ALL_RANKS_VALIDATED = "ALL_RANKS_VALIDATED"
+    RELEASE_AUTHORIZED = "RELEASE_AUTHORIZED"
     GLOBAL_RELEASED = "GLOBAL_RELEASED"
     FAILED = "FAILED"
     EXPIRED = "EXPIRED"
@@ -36,6 +37,7 @@ class CrossRankStatus:
     leased_ranks: tuple[int, ...]
     cuda_completed_ranks: tuple[int, ...]
     validated_ranks: tuple[int, ...]
+    released_ranks: tuple[int, ...]
     request_id: str
     request_version: str
     checkpoint_version: str
@@ -54,6 +56,7 @@ class _Transaction:
     leased: set[int]
     cuda_completed: set[int]
     validated: set[int]
+    released: set[int]
     failure_reason: str | None = None
     abort_acks: set[int] | None = None
 
@@ -102,6 +105,7 @@ class CrossRankLeaseCoordinator:
             leased=set(),
             cuda_completed=set(),
             validated=set(),
+            released=set(),
             abort_acks=set(),
         )
         self._transactions[transaction_id] = txn
@@ -109,8 +113,89 @@ class CrossRankLeaseCoordinator:
             self._slot_owner[owner] = transaction_id
         return self.status(transaction_id)
 
+    def prepare_rank(
+        self,
+        transaction_id: str,
+        observation: RankLeaseObservation,
+        *,
+        checkpoint_version: str,
+    ) -> CrossRankStatus:
+        """Incrementally register one Worker without requiring a rank to relay peers."""
+        if not transaction_id or not checkpoint_version:
+            raise LeaseRejected("transaction_identity_required")
+        if observation.tp_size != 4 or observation.tp_rank not in range(4):
+            raise LeaseRejected("invalid_tp_rank")
+        if observation.manager_epoch != self.manager_epoch:
+            raise LeaseRejected("manager_epoch_mismatch")
+        if observation.checkpoint_version != checkpoint_version:
+            raise LeaseRejected("checkpoint_version_mismatch")
+        if (len(observation.physical_slots) != len(observation.slot_generations)
+                or not observation.physical_slots
+                or any(slot <= 0 for slot in observation.physical_slots)
+                or any(generation <= 0 for generation in observation.slot_generations)
+                or observation.token_start < 0 or observation.token_count <= 0):
+            raise LeaseRejected("invalid_rank_observation")
+        txn = self._transactions.get(transaction_id)
+        if txn is None:
+            txn = _Transaction(
+                transaction_id=transaction_id,
+                observations={},
+                state=CrossRankLeaseState.PREPARE,
+                deadline=self._clock() + self.timeout_s,
+                leased=set(),
+                cuda_completed=set(),
+                validated=set(),
+                released=set(),
+                abort_acks=set(),
+            )
+            self._transactions[transaction_id] = txn
+        else:
+            self._get(transaction_id)
+            if txn.state != CrossRankLeaseState.PREPARE:
+                raise LeaseRejected("prepare_closed")
+        if observation.tp_rank in txn.observations:
+            if txn.observations[observation.tp_rank] == observation:
+                return self.status(transaction_id)
+            txn.state = CrossRankLeaseState.FAILED
+            txn.failure_reason = "rank_metadata_mismatch"
+            raise LeaseRejected("rank_metadata_mismatch")
+        if txn.observations:
+            first = next(iter(txn.observations.values()))
+            common = (
+                first.request_id, first.request_version, first.checkpoint_version,
+                first.manager_epoch, first.token_start, first.token_count,
+            )
+            candidate = (
+                observation.request_id, observation.request_version,
+                observation.checkpoint_version, observation.manager_epoch,
+                observation.token_start, observation.token_count,
+            )
+            if candidate != common:
+                txn.state = CrossRankLeaseState.FAILED
+                txn.failure_reason = "rank_metadata_mismatch"
+                raise LeaseRejected("rank_metadata_mismatch")
+        owners = {(observation.tp_rank, slot) for slot in observation.physical_slots}
+        if owners & self._slot_owner.keys():
+            raise LeaseRejected("slot_already_coordinated")
+        txn.observations[observation.tp_rank] = observation
+        for owner in owners:
+            self._slot_owner[owner] = transaction_id
+        if set(txn.observations) == set(range(4)):
+            try:
+                self._validate_observations(
+                    list(txn.observations.values()), checkpoint_version
+                )
+            except LeaseRejected:
+                txn.state = CrossRankLeaseState.FAILED
+                txn.failure_reason = "rank_metadata_mismatch"
+                raise
+        return self.status(transaction_id)
+
     def mark_local_leased(self, transaction_id: str, tp_rank: int) -> CrossRankStatus:
         txn = self._get(transaction_id)
+        self._require_rank(txn, tp_rank)
+        if tp_rank in txn.leased:
+            return self.status(transaction_id)
         if txn.state not in (
             CrossRankLeaseState.PREPARE,
             CrossRankLeaseState.LOCAL_LEASED,
@@ -118,9 +203,8 @@ class CrossRankLeaseCoordinator:
             raise LeaseRejected(
                 f"invalid_transition:{txn.state.value}->LOCAL_LEASED"
             )
-        self._require_rank(txn, tp_rank)
-        if tp_rank in txn.leased:
-            raise LeaseRejected("duplicate_local_lease")
+        if set(txn.observations) != set(range(4)):
+            raise LeaseRejected("incomplete_prepare")
         txn.leased.add(tp_rank)
         if len(txn.leased) == txn.observations[tp_rank].tp_size:
             txn.state = CrossRankLeaseState.ALL_RANKS_READY
@@ -130,12 +214,12 @@ class CrossRankLeaseCoordinator:
 
     def mark_cuda_completed(self, transaction_id: str, tp_rank: int) -> CrossRankStatus:
         txn = self._get(transaction_id)
-        self._require_state(txn, CrossRankLeaseState.ALL_RANKS_READY)
         self._require_rank(txn, tp_rank)
+        if tp_rank in txn.cuda_completed:
+            return self.status(transaction_id)
+        self._require_state(txn, CrossRankLeaseState.ALL_RANKS_READY)
         if tp_rank not in txn.leased:
             raise LeaseRejected("rank_not_locally_leased")
-        if tp_rank in txn.cuda_completed:
-            raise LeaseRejected("duplicate_cuda_completed")
         txn.cuda_completed.add(tp_rank)
         if len(txn.cuda_completed) == txn.observations[tp_rank].tp_size:
             txn.state = CrossRankLeaseState.CUDA_COMPLETED
@@ -143,32 +227,49 @@ class CrossRankLeaseCoordinator:
 
     def mark_validated(self, transaction_id: str, tp_rank: int) -> CrossRankStatus:
         txn = self._get(transaction_id)
-        self._require_state(txn, CrossRankLeaseState.CUDA_COMPLETED)
         self._require_rank(txn, tp_rank)
+        if tp_rank in txn.validated:
+            return self.status(transaction_id)
+        self._require_state(txn, CrossRankLeaseState.CUDA_COMPLETED)
         if tp_rank not in txn.cuda_completed:
             raise LeaseRejected("rank_cuda_incomplete")
-        if tp_rank in txn.validated:
-            raise LeaseRejected("duplicate_validation")
         txn.validated.add(tp_rank)
         if len(txn.validated) == txn.observations[tp_rank].tp_size:
             txn.state = CrossRankLeaseState.ALL_RANKS_VALIDATED
         return self.status(transaction_id)
 
-    def release_global(self, transaction_id: str) -> CrossRankStatus:
+    def authorize_release(self, transaction_id: str) -> CrossRankStatus:
         txn = self._get(transaction_id)
+        if txn.state in (
+            CrossRankLeaseState.RELEASE_AUTHORIZED,
+            CrossRankLeaseState.GLOBAL_RELEASED,
+        ):
+            return self.status(transaction_id)
         self._require_state(txn, CrossRankLeaseState.ALL_RANKS_VALIDATED)
-        txn.state = CrossRankLeaseState.GLOBAL_RELEASED
-        self._release_owners(txn)
+        txn.state = CrossRankLeaseState.RELEASE_AUTHORIZED
+        return self.status(transaction_id)
+
+    def mark_local_released(self, transaction_id: str, tp_rank: int) -> CrossRankStatus:
+        """Record an ACK only after the Worker actually released its local lease."""
+        txn = self._get(transaction_id)
+        self._require_rank(txn, tp_rank)
+        if tp_rank in txn.released:
+            return self.status(transaction_id)
+        self._require_state(txn, CrossRankLeaseState.RELEASE_AUTHORIZED)
+        if tp_rank not in txn.validated:
+            raise LeaseRejected("rank_not_validated")
+        txn.released.add(tp_rank)
+        if len(txn.released) == txn.observations[tp_rank].tp_size:
+            txn.state = CrossRankLeaseState.GLOBAL_RELEASED
+            self._release_owners(txn)
         return self.status(transaction_id)
 
     def fail(self, transaction_id: str, reason: str) -> CrossRankStatus:
         txn = self._get(transaction_id)
-        if txn.state in (
-            CrossRankLeaseState.GLOBAL_RELEASED,
-            CrossRankLeaseState.FAILED,
-            CrossRankLeaseState.EXPIRED,
-        ):
+        if txn.state == CrossRankLeaseState.GLOBAL_RELEASED:
             raise LeaseRejected("transaction_terminal")
+        if txn.state in (CrossRankLeaseState.FAILED, CrossRankLeaseState.EXPIRED):
+            return self.status(transaction_id)
         txn.state = CrossRankLeaseState.FAILED
         txn.failure_reason = reason or "rank_failure"
         return self.status(transaction_id)
@@ -178,28 +279,31 @@ class CrossRankLeaseCoordinator:
         if txn.state not in (CrossRankLeaseState.FAILED, CrossRankLeaseState.EXPIRED):
             raise LeaseRejected("abort_ack_requires_failure")
         self._require_rank(txn, tp_rank)
+        if tp_rank in txn.abort_acks:
+            return self.status(transaction_id)
         txn.abort_acks.add(tp_rank)
-        if txn.abort_acks == set(txn.observations):
+        if txn.abort_acks == set(range(4)):
             self._release_owners(txn)
         return self.status(transaction_id)
 
     def status(self, transaction_id: str) -> CrossRankStatus:
         txn = self._get(transaction_id)
-        first = next(iter(txn.observations.values()))
+        first = next(iter(txn.observations.values()), None)
         return CrossRankStatus(
             transaction_id=transaction_id,
             state=txn.state,
-            tp_size=first.tp_size,
+            tp_size=4,
             prepared_ranks=tuple(sorted(txn.observations)),
             leased_ranks=tuple(sorted(txn.leased)),
             cuda_completed_ranks=tuple(sorted(txn.cuda_completed)),
             validated_ranks=tuple(sorted(txn.validated)),
-            request_id=first.request_id,
-            request_version=first.request_version,
-            checkpoint_version=first.checkpoint_version,
-            manager_epoch=first.manager_epoch,
-            token_start=first.token_start,
-            token_count=first.token_count,
+            released_ranks=tuple(sorted(txn.released)),
+            request_id=first.request_id if first else "",
+            request_version=first.request_version if first else "",
+            checkpoint_version=first.checkpoint_version if first else "",
+            manager_epoch=first.manager_epoch if first else self.manager_epoch,
+            token_start=first.token_start if first else 0,
+            token_count=first.token_count if first else 0,
             failure_reason=txn.failure_reason,
         )
 
@@ -213,6 +317,7 @@ class CrossRankLeaseCoordinator:
             CrossRankLeaseState.ALL_RANKS_READY,
             CrossRankLeaseState.CUDA_COMPLETED,
             CrossRankLeaseState.ALL_RANKS_VALIDATED,
+            CrossRankLeaseState.RELEASE_AUTHORIZED,
         ) and self._clock() >= txn.deadline:
             txn.state = CrossRankLeaseState.EXPIRED
             txn.failure_reason = "transaction_timeout"
@@ -227,7 +332,7 @@ class CrossRankLeaseCoordinator:
 
     @staticmethod
     def _require_rank(txn: _Transaction, tp_rank: int) -> None:
-        if tp_rank not in txn.observations:
+        if type(tp_rank) is not int or tp_rank not in range(4):
             raise LeaseRejected("invalid_tp_rank")
 
     def _validate_observations(

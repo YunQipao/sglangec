@@ -123,9 +123,42 @@ class SlotLeaseAllocatorTests(unittest.TestCase):
         with self.assertRaisesRegex(SlotLeaseRejected, "protected_slot_free"):
             allocator.free(slots)
         allocator.attach_slot_lease_cuda_event("lease", _Event(True))
+        with self.assertRaisesRegex(SlotLeaseRejected, "protected_slot_free"):
+            allocator.free(slots)
+        allocator.abort_slot_lease("lease", manager_epoch="m1")
         allocator.free(slots)
 
     def test_free_group_checks_protected_slots_before_mutating_pool(self):
+        self._check_free_group_protection()
+
+    def test_completed_event_timeout_still_requires_explicit_abort(self):
+        from sglang.srt.mem_cache.slot_lease import SlotLeaseRegistry
+
+        now = [0.0]
+        allocator = self.allocator()
+        allocator.slot_lease_registry = SlotLeaseRegistry(
+            16, timeout_s=1, clock=lambda: now[0]
+        )
+        allocator.enable_slot_leases(timeout_s=1)
+        slots = allocator.alloc(1)
+        allocator.begin_slot_lease(
+            "lease", manager_epoch="m1", request_id="r1",
+            request_version="v1", slots=slots,
+        )
+        allocator.attach_slot_lease_cuda_event("lease", _Event(True))
+        now[0] = 2
+        self.assertEqual(allocator.slot_lease_registry.active_lease_count, 1)
+        with self.assertRaisesRegex(SlotLeaseRejected, "protected_slot_free"):
+            allocator.free(slots)
+        with self.assertRaisesRegex(SlotLeaseRejected, "expired"):
+            allocator.release_slot_lease("lease", manager_epoch="m1")
+        with self.assertRaisesRegex(SlotLeaseRejected, "manager_epoch"):
+            allocator.abort_slot_lease("lease", manager_epoch="wrong")
+        allocator.abort_slot_lease("lease", manager_epoch="m1")
+        allocator.free(slots)
+        self.assertEqual(allocator.available_size(), 16)
+
+    def _check_free_group_protection(self):
         allocator = self.allocator()
         allocator.enable_slot_leases()
         slots = allocator.alloc(2)

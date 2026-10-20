@@ -37,6 +37,25 @@ def metadata_and_blocks(tp=4, layers=(0,), count=4):
 
 
 class ManagerTests(unittest.TestCase):
+    def test_live_request_epoch_is_bound_to_manager_process(self):
+        blocks, metadata = metadata_and_blocks(tp=4, count=128)
+        manager = ParityManager(test_oracle=True)
+        for meta in metadata:
+            meta["provenance"] = "sglang_request"
+            meta["manager_epoch"] = manager.manager_epoch
+        stale = deepcopy(metadata[0])
+        stale["snapshot_id"] = "stale-epoch"
+        stale["manager_epoch"] = "old-manager-epoch"
+        self.assertEqual(
+            manager.submit(stale, blocks[0])["state"], FAILED
+        )
+        for index, (meta, block) in enumerate(zip(metadata, blocks)):
+            meta["snapshot_id"] = "current-epoch"
+            result = manager.submit(meta, block)
+        self.assertEqual(result["state"], COMMITTED)
+        self.assertEqual(result["manager_epoch"], manager.manager_epoch)
+        self.assertEqual(len(result["oracle_checks"]), 4)
+
     def test_deferred_fast_checksum_is_derived_and_committed(self):
         blocks, metadata = metadata_and_blocks(tp=2)
         for meta in metadata:
@@ -153,6 +172,7 @@ class ManagerTests(unittest.TestCase):
                     for meta, block in zip(metadata, blocks):
                         self.assertEqual(block.nbytes, expected)
                         meta["provenance"] = "sglang_request"
+                        meta["manager_epoch"] = manager.manager_epoch
                         status = manager.submit(meta, block)
                     self.assertEqual(status["state"], COMMITTED)
                     self.assertEqual(status["parity_bytes"], expected)
