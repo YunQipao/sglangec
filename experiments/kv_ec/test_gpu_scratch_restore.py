@@ -23,8 +23,12 @@ class ScratchRestoreTests(unittest.TestCase):
     def test_three_chunk_sequence_requires_contiguous_ranges(self):
         base = {
             "request_id": "request",
+            "request_id_encoding": "sha256",
+            "model_identifier": "model",
             "model_sha256": "model",
             "source_commit": "commit",
+            "core_diff_sha256": "diff",
+            "packed_byte_count": 9437184,
             "tp_size": 4,
             "layers": list(range(36)),
             "dtype": "torch.bfloat16",
@@ -45,6 +49,13 @@ class ScratchRestoreTests(unittest.TestCase):
         manifests[1]["token_start"] = 512
         with self.assertRaisesRegex(ValueError, "not contiguous"):
             validate_snapshot_sequence(manifests)
+
+    def test_control_plane_evidence_is_not_a_gpu_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "rank_0.timing.json").write_text("{}")
+            with self.assertRaisesRegex(ValueError, "control-plane evidence"):
+                load_real_snapshot(path)
 
     def test_tp2_snapshot_load_and_each_scratch_restore_dispatch(self):
         # Synthetic CPU bytes declared as request format ONLY to exercise the

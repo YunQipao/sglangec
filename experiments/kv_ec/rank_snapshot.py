@@ -125,7 +125,9 @@ def assemble(directory):
     if tp not in (1, 2, 4):
         raise ValueError("TP must be 1, 2 or 4")
     expected = {f"rank_{r}.json" for r in range(tp)}
-    if {p.name for p in directory.glob("rank_*.json") if not p.name.endswith(".timing.json")} != expected:
+    diagnostic = {f"rank_{r}.{suffix}.json" for r in range(tp)
+                  for suffix in ("timing", "diagnostic")}
+    if {p.name for p in directory.glob("rank_*.json")} - diagnostic != expected:
         raise ValueError("missing, duplicate or unexpected rank sidecars")
     if {p.name for p in directory.glob("rank_*.bin")} != {f"rank_{r}.bin" for r in range(tp)}:
         raise ValueError("missing or unexpected rank binaries")
@@ -137,6 +139,8 @@ def assemble(directory):
         if [r["packed_shape"] for r in meta["layer_records"]] != [r["packed_shape"] for r in first["layer_records"]]:
             raise ValueError("unequal shard shapes; no padding supported")
         payload = np.fromfile(directory / f"rank_{rank}.bin", dtype=np.uint8)
+        if meta.get("checksum_deferred"):
+            raise ValueError("offline snapshots require recorded, non-deferred checksums")
         validate_payload(payload, meta)
         entries.append(meta)
         blocks.append(payload)

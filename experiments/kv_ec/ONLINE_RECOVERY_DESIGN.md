@@ -173,6 +173,11 @@ separate measurement.
 Once a new GPU run has produced three real complete directories, the sequence
 Scratch verifier is:
 
+For the complete capture/request/manifest-preparation/acceptance commands see
+[GPU_SCRATCH_CAPTURE.md](GPU_SCRATCH_CAPTURE.md). Capture writes rank files only:
+run explicit `prepare_scratch` before the command below. Historical FAST_PARITY
+diagnostic directories cannot be used as offline payload snapshots.
+
 ```bash
 python -m experiments.kv_ec.gpu_scratch_restore \
   "$OUT/$SNAP-chunk-1" "$OUT/$SNAP-chunk-2" "$OUT/$SNAP-chunk-3" \

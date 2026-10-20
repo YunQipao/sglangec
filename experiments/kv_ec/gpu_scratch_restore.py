@@ -35,14 +35,24 @@ def load_real_snapshot(directory):
     directory = Path(directory)
     manifest_path = directory / "manifest.json"
     if not manifest_path.is_file():
-        raise ValueError("manifest.json is required")
+        timing_files = sorted(directory.glob("rank_*.timing.json"))
+        binary_files = sorted(directory.glob("rank_*.bin"))
+        if timing_files and not binary_files:
+            raise ValueError(
+                "control-plane evidence directory has timing/diagnostic JSON "
+                "but no rank Snapshot payload; FAST_PARITY intentionally does "
+                "not persist rank_*.bin or manifest.json. Run an explicit "
+                "DEBUG_SAFE/capture job that writes complete rank files."
+            )
+        raise ValueError(
+            f"real Snapshot directory requires manifest.json and rank_*.bin/json: "
+            f"{directory}"
+        )
     manifest = json.loads(manifest_path.read_text())
     loaded_manifest, blocks = assemble(directory)
     # Assemble validates every rank sidecar and payload. Also compare the
     # persisted manifest so a stale/mixed directory cannot be benchmarked.
-    for key in ("format", "snapshot_id", "request_id", "tp_size", "layers",
-                "token_start", "token_count", "dtype", "packed_byte_count",
-                "source_commit", "model_sha256"):
+    for key in loaded_manifest:
         if manifest.get(key) != loaded_manifest.get(key):
             raise ValueError(f"manifest mismatch: {key}")
     if manifest.get("provenance") != "sglang_request":
@@ -59,12 +69,16 @@ def validate_snapshot_sequence(manifests, *, expected_chunks=3, chunk_tokens=256
     if len(manifests) != expected_chunks:
         raise ValueError(f"expected {expected_chunks} snapshots")
     first = manifests[0]
-    required = ("request_id", "model_sha256", "source_commit", "tp_size",
-                "layers", "dtype", "provenance")
+    required = ("request_id", "request_id_encoding", "model_identifier",
+                "model_sha256", "source_commit", "core_diff_sha256", "tp_size",
+                "layers", "dtype", "provenance", "packed_byte_count")
     for key in required:
         if key not in first:
             raise ValueError(f"missing sequence metadata: {key}")
-    next_start = int(first["token_start"])
+    if first["tp_size"] != 4 or first["layers"] != list(range(36)):
+        raise ValueError("sequence experiment requires TP4 and all 36 layers")
+    next_start = 0
+    seen = set()
     for index, manifest in enumerate(manifests):
         if int(manifest["token_start"]) != next_start:
             raise ValueError("snapshot token ranges are not contiguous")
@@ -76,8 +90,23 @@ def validate_snapshot_sequence(manifests, *, expected_chunks=3, chunk_tokens=256
             if manifest[key] != first[key]:
                 raise ValueError(f"snapshot sequence mismatch: {key}")
         next_start += chunk_tokens
-        if index and manifest["snapshot_id"] == manifests[index - 1]["snapshot_id"]:
+        if manifest["snapshot_id"] in seen:
             raise ValueError("snapshot IDs must be unique per chunk")
+        seen.add(manifest["snapshot_id"])
+        if "ranks" in manifest:
+            for rank, metadata in enumerate(manifest["ranks"]):
+                reference = first["ranks"][rank]
+                for key in ("request_version", "checkpoint_version", "manager_epoch",
+                            "process_epoch", "req_pool_idx", "req_generation"):
+                    if metadata.get(key) != reference.get(key):
+                        raise ValueError(f"snapshot rank identity mismatch: {key}")
+                shapes = [record["packed_shape"] for record in metadata["layer_records"]]
+                expected_shapes = [
+                    {"k": [chunk_tokens, 2, 128], "v": [chunk_tokens, 2, 128]}
+                    for _ in range(36)
+                ]
+                if shapes != expected_shapes:
+                    raise ValueError("sequence requires Qwen3-8B TP4 NHD K/V layout")
     return {
         "chunk_count": len(manifests),
         "token_start": int(first["token_start"]),
@@ -91,9 +120,11 @@ def validate_snapshot_sequence(manifests, *, expected_chunks=3, chunk_tokens=256
 def benchmark_sequence(directories, device="cuda", warmup=1, repeat=5):
     """Restore three real chunks one at a time into isolated GPU scratch."""
     directories = [Path(directory) for directory in directories]
-    if device != "cuda":
-        raise RuntimeError("sequence restore requires CUDA scratch")
+    if warmup < 0 or repeat < 1:
+        raise ValueError("warmup must be >= 0 and repeat must be >= 1")
     device = torch.device(device)
+    if device.type != "cuda":
+        raise RuntimeError("sequence restore requires CUDA scratch")
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not accessible; run this tool on the GPU server")
 
@@ -119,6 +150,7 @@ def benchmark_sequence(directories, device="cuda", warmup=1, repeat=5):
             "snapshot_id": manifest["snapshot_id"],
             "token_start": manifest["token_start"],
             "token_count": manifest["token_count"],
+            "rank_sha256": [rank["sha256"] for rank in manifest["ranks"]],
             "ranks": [
                 {
                     "lost_rank": lost,
@@ -145,6 +177,8 @@ def benchmark_sequence(directories, device="cuda", warmup=1, repeat=5):
         "warmup": warmup,
         "repeat": repeat,
         "online_kv_pool_modified": False,
+        "status": "byte_exact",
+        "erasure_cases": sum(len(chunk["ranks"]) for chunk in chunk_results),
     }
 
 
@@ -271,6 +305,8 @@ def main():
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.output and args.output.exists():
+        raise FileExistsError(f"output already exists: {args.output}")
     if len(args.snapshot_dir) == 1:
         result = benchmark(args.snapshot_dir[0], args.device, args.warmup, args.repeat)
     else:

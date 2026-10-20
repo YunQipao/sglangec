@@ -56,6 +56,13 @@ def request(args):
     record = {"kind": "real_server_artificial_prompt", "request_id": args.request_id,
               "model_identifier": args.model, "input_token_count": len(ids),
               "input_ids_sha256": hashlib.sha256(np.asarray(ids, dtype="<i8").tobytes()).hexdigest(),
+              "input_chunks": [
+                  {"token_start": start, "token_count": len(ids[start:start + 256]),
+                   "token_ids_sha256": hashlib.sha256(
+                       np.asarray(ids[start:start + 256], dtype="<i8").tobytes()
+                   ).hexdigest()}
+                  for start in range(0, len(ids), 256)
+              ],
               "output_ids": result["output_ids"], "sampling": data["sampling_params"],
               "finish_reason": result["meta_info"]["finish_reason"]}
     record["client_metrics_ms"] = {
