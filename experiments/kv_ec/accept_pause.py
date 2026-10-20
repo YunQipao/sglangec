@@ -54,6 +54,61 @@ def check_evidence(root, identity):
         raise ValueError("rank failure or incomplete decode evidence exists")
 
 
+def check_shadow_evidence(root, identity):
+    """Accept only completed GPU shadow evidence, never claim online recovery."""
+    check_evidence(root, identity)
+    records = [json.loads((root / f"pause-rank-{rank}.json").read_text()) for rank in range(4)]
+    consensus = records[0].get("shadow", {}).get("consensus")
+    if not isinstance(consensus, dict):
+        raise ValueError("missing_shadow_consensus")
+    import numpy as np
+    def int_hash(values):
+        return hashlib.sha256(np.asarray(values, dtype="<i8")).hexdigest()
+    for rank, record in enumerate(records):
+        shadow = record.get("shadow", {})
+        for key, expected in (
+            ("mode", "shadow"), ("tp_rank", rank), ("recovered_rank", 0),
+            ("token_start", 0), ("token_count", 256), ("layers", list(range(36))),
+            ("source_unchanged", True), ("byte_exact", True),
+            ("cuda_event_complete", True), ("used_committed_parity", True),
+            ("online_kv_pool_modified", False),
+            ("rank0_contribution", "zeros_excluded_from_recovery"),
+            ("consensus", consensus),
+        ):
+            if (type(shadow.get(key)) is not type(expected) or shadow[key] != expected):
+                raise ValueError(f"rank{rank}:shadow:{key}")
+        if not str(shadow.get("device", "")).startswith("cuda"):
+            raise ValueError(f"rank{rank}:shadow_not_gpu")
+        slots = record.get("physical_slots_before", [])
+        if (len(slots) != 768 or len(set(slots)) != 768 or any(slot <= 0 for slot in slots)
+                or slots != record.get("physical_slots_after")
+                or shadow.get("physical_slots_sha256") != int_hash(slots[:256])
+                or shadow.get("slot_generations_sha256") != int_hash(record["slot_generations_before"][:256])
+                or shadow.get("request_row") != record["row"]
+                or shadow.get("request_generation") != record["request_generation_before"]):
+            raise ValueError(f"rank{rank}:shadow_mapping_or_generation_mismatch")
+        if (record["coordinator_final"].get("shadow_ranks") != list(range(4))
+                or record["coordinator_final"].get("require_shadow") is not True
+                or shadow.get("oracle_checks") != [
+                    {"lost_rank": r, "byte_exact": True} for r in range(4)]):
+            raise ValueError(f"rank{rank}:shadow_missing_four_rank_interlock_or_oracle")
+        if (consensus.get("snapshot_id") != identity["transaction_id"] + "-chunk0"
+                or consensus.get("checkpoint_version") != consensus["snapshot_id"]
+                or consensus.get("request_hash") != record["request_hash"]
+                or consensus.get("request_version") != shadow.get("request_version")
+                or consensus.get("input_ids_sha256") != shadow.get("input_ids_sha256")
+                or not consensus.get("manager_epoch") or not consensus.get("parity_sha256")
+                or consensus.get("byte_exact") is not True
+                or consensus.get("online_kv_pool_modified") is not False):
+            raise ValueError("shadow_consensus_not_bound_to_transaction")
+    for key in ("shadow_h2d_ms", "shadow_verify_ms", "shadow_vs_live_ms",
+                "xor_and_cpu_verify_ms", "parity_fetch_ms", "shadow_h2d_cuda_event_ms"):
+        value = records[0]["shadow"].get("timing_ms", {}).get(key)
+        if type(value) not in (float, int) or not 0 <= value < float("inf"):
+            raise ValueError(f"rank0:missing_gpu_recovery_timing:{key}")
+    return {str(rank): record["shadow"]["timing_ms"] for rank, record in enumerate(records)}
+
+
 def verify_run(root, baseline_response, pause_response):
     """Read-only M1 audit of a completed run; never authorizes a live worker."""
     verdict = {"state": "FAIL", "M1": False, "run": str(root.resolve()), "checks": {}}
@@ -158,17 +213,34 @@ def main():
     parser.add_argument("--port", type=int, default=30359)
     parser.add_argument("--startup-timeout", type=float, default=600)
     parser.add_argument("--pause-timeout", type=float, default=60)
+    parser.add_argument("--shadow", action="store_true",
+                        help="run committed-parity GPU shadow recovery while paused; never live writes")
     args = parser.parse_args()
     if args.verify_run is not None:
         verdict = verify_run(
             args.verify_run,
             args.baseline_response or args.verify_run / "baseline-response.json",
             args.pause_response or args.verify_run / "pause-response.json")
+        if args.shadow:
+            verdict.update(M2_PASS=False, SHADOW_PASS=False)
+            if verdict["M1"]:
+                try:
+                    identity = json.loads((args.verify_run / "identity.json").read_text())
+                    verdict["recovery_timing_ms_by_rank"] = check_shadow_evidence(
+                        args.verify_run / "ranks", identity)
+                    response = json.loads((args.pause_response or args.verify_run / "pause-response.json").read_text())
+                    for rank in range(4):
+                        shadow = json.loads((args.verify_run / "ranks" / f"pause-rank-{rank}.json").read_text())["shadow"]
+                        if shadow.get("input_ids_sha256") != response["input_ids_sha256"]:
+                            raise ValueError("shadow_input_token_hash_mismatch")
+                    verdict.update(SHADOW_PASS=True, reason="shadow verified; online recovery NOT implemented")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    verdict.update(state="FAIL", reason=str(exc))
         if args.report:
             with args.report.open("x") as stream:
                 json.dump(verdict, stream, indent=2)
         print(json.dumps(verdict, indent=2))
-        return 0 if verdict["M1"] else 1
+        return 0 if verdict["state"] == "PASS" else 1
     if args.baseline_response or args.pause_response or args.report:
         parser.error("--baseline-response, --pause-response and --report require --verify-run")
     root = Path(tempfile.mkdtemp(prefix="kv-ec-pause-accept-"))
@@ -216,7 +288,11 @@ def main():
             "--stream-metrics", "--output", str(root / output)], log, env)
 
     verdict = {"state": "FAIL", "transaction_id": tx, "run": str(root), "M1": False}
+    if args.shadow:
+        verdict.update(M2_PASS=False, SHADOW_PASS=False)
     try:
+        if args.shadow and os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") != "0":
+            raise ValueError("online_restore_not_implemented_real_shadow_gpu_acceptance_required")
         gpus = args.gpus.split(",")
         if len(gpus) != 4 or len(set(gpus)) != 4 or not all(g.isdigit() for g in gpus):
             raise ValueError("--gpus must select four distinct physical GPU indices")
@@ -258,10 +334,13 @@ def main():
         stop_owned(baseline)
         processes.remove(baseline)
 
-        coordinator = spawn("experiments.kv_ec.pause_control", [
+        coordinator_args = [
             "serve", "--socket", str(root / "pause.sock"), "--transaction-id", tx,
             "--timeout-s", str(args.pause_timeout),
-            "--identity-output", str(root / "identity.json")], "coordinator.log", env)
+            "--identity-output", str(root / "identity.json")]
+        if args.shadow:
+            coordinator_args.append("--require-shadow")
+        coordinator = spawn("experiments.kv_ec.pause_control", coordinator_args, "coordinator.log", env)
         wait_for(lambda: (root / "pause.sock").exists(), 10, "coordinator startup timeout",
                  [(coordinator, "coordinator")])
         identity = json.loads((root / "identity.json").read_text())
@@ -272,6 +351,17 @@ def main():
                          SGLANG_KV_EC_PAUSE_OUTPUT=str(root / "ranks"),
                          SGLANG_KV_EC_PAUSE_TIMEOUT_S=str(args.pause_timeout),
                          SGLANG_KV_EC_PAUSE_IPC_TIMEOUT_S="0.5")
+        if args.shadow:
+            from .parity_manager import manager_hello
+            manager = spawn("experiments.kv_ec.parity_manager", [
+                "--socket", str(root / "parity.sock"), "--timeout", str(args.pause_timeout),
+                "--test-oracle"], "parity-manager.log", env)
+            wait_for(lambda: (root / "parity.sock").exists(), 10, "parity startup timeout",
+                     [(manager, "parity manager")])
+            pause_env.update(
+                SGLANG_KV_EC_SHADOW_RESTORE="1", SGLANG_KV_EC_ONLINE_RESTORE="0",
+                SGLANG_KV_EC_SHADOW_PARITY_SOCKET=str(root / "parity.sock"),
+                SGLANG_KV_EC_SHADOW_MANAGER_EPOCH=manager_hello(root / "parity.sock"))
         paused_server = server("pause", pause_env)
         paused_client = client(env, "kv-ec-pause-request", "pause-response.json", "pause-client.log")
 
@@ -283,7 +373,8 @@ def main():
 
         def all_paused():
             status = control("status")
-            return status["state"] == "PAUSED" and status["paused_ranks"] == [0, 1, 2, 3]
+            return (status["state"] == "PAUSED" and status["paused_ranks"] == [0, 1, 2, 3]
+                    and (not args.shadow or status.get("shadow_ranks") == [0, 1, 2, 3]))
 
         wait_for(all_paused, args.pause_timeout, "four-rank PAUSED timeout",
                  [(coordinator, "coordinator"), (paused_server, "pause server"),
@@ -304,9 +395,29 @@ def main():
         if "Scheduler hit an exception" in server_log or "Traceback (most recent call last)" in server_log:
             raise RuntimeError("server log contains an exception")
         verdict.update(state="PASS", M1=True, reason="TP4 paused, authorized, decoded; exact 16-token baseline match")
+        if args.shadow:
+            verdict["recovery_timing_ms_by_rank"] = check_shadow_evidence(root / "ranks", identity)
+            from .parity_manager import submit_once
+            committed = submit_once(root / "parity.sock", {
+                "kind": "status", "snapshot_id": tx + "-chunk0"}, b"", timeout=2)
+            rank0 = json.loads((root / "ranks" / "pause-rank-0.json").read_text())["shadow"]
+            response = json.loads((root / "pause-response.json").read_text())
+            if any(json.loads((root / "ranks" / f"pause-rank-{r}.json").read_text())["shadow"].get(
+                    "input_ids_sha256") != response["input_ids_sha256"] for r in range(4)):
+                raise ValueError("shadow_input_token_hash_mismatch")
+            if (committed.get("state") != "COMMITTED"
+                    or committed.get("parity_sha256") != rank0["consensus"]["parity_sha256"]
+                    or committed.get("manager_epoch") != rank0["consensus"]["manager_epoch"]
+                    or committed.get("oracle_checks") != rank0["oracle_checks"]):
+                raise ValueError("final_committed_checkpoint_mismatch")
+            with (root / "checkpoint.json").open("x") as handle:
+                json.dump(committed, handle, indent=2)
+            verdict.update(SHADOW_PASS=True, reason="GPU shadow byte-exact; exact baseline match; online recovery NOT implemented")
     except (Exception, KeyboardInterrupt) as exc:
         reason = exc.output.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
-        verdict["reason"] = f"{type(exc).__name__}: {reason}"
+        verdict.update(state="FAIL", reason=f"{type(exc).__name__}: {reason}")
+        if args.shadow:
+            verdict["SHADOW_PASS"] = False
     finally:
         for process in reversed(processes):
             stop_owned(process)
@@ -315,6 +426,8 @@ def main():
         with (root / "acceptance.json").open("x") as handle:
             json.dump(verdict, handle, indent=2)
     print(f"{verdict['state']}: {verdict['reason']}\nEvidence: {root}", flush=True)
+    if args.shadow:
+        print(f"SHADOW_PASS={str(verdict['SHADOW_PASS']).lower()}\nM2_PASS=false\nreason={verdict['reason']}")
     return 0 if verdict["state"] == "PASS" else 1
 
 

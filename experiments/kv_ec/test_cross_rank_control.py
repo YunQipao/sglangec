@@ -5,7 +5,8 @@ import time
 import socket
 import traceback
 import json
-from unittest.mock import patch
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -173,11 +174,14 @@ class CrossRankControlTests(unittest.TestCase):
             path.unlink()
             calls = []
             calls_lock = threading.Lock()
+            epoch_checks = threading.Barrier(4)
 
             def delayed_epoch():
                 with calls_lock:
                     calls.append(time.monotonic())
-                time.sleep(0.5)
+                # A dispatch lock around the epoch check would prevent all
+                # four handlers from reaching this barrier.
+                epoch_checks.wait(timeout=5)
                 return "epoch-1"
 
             server = CrossRankControlServer(
@@ -189,10 +193,9 @@ class CrossRankControlTests(unittest.TestCase):
             thread.start()
             self.assertTrue(server.ready.wait(2))
             raw = observations()
-            results = [None] * 4
 
             def send_prepare(rank):
-                results[rank] = request(
+                return request(
                     path,
                     {
                         "op": "prepare_rank",
@@ -200,30 +203,75 @@ class CrossRankControlTests(unittest.TestCase):
                         "checkpoint_version": "cp-v1",
                         "observation": raw[rank].__dict__,
                     },
-                    timeout=2.0,
+                    timeout=10.0,
                 )
 
-            workers = [
-                threading.Thread(target=send_prepare, args=(rank,))
-                for rank in range(4)
-            ]
-            started = time.monotonic()
             try:
-                for worker in workers:
-                    worker.start()
-                for worker in workers:
-                    worker.join(4)
-                elapsed = time.monotonic() - started
-                self.assertFalse(any(worker.is_alive() for worker in workers))
+                with ThreadPoolExecutor(max_workers=4) as workers:
+                    futures = [workers.submit(send_prepare, rank) for rank in range(4)]
+                    results = [future.result(timeout=15) for future in futures]
                 self.assertTrue(all(result["state"] == "OK" for result in results))
-                self.assertEqual(results[-1]["status"]["prepared_ranks"], [0, 1, 2, 3])
-                # Four serialized 500ms checks would exceed the 2s client
-                # timeout; they must overlap outside the transaction lock.
-                self.assertLess(elapsed, 2.0)
-                self.assertGreaterEqual(len(calls), 4)
+                for rank, result in enumerate(results):
+                    self.assertIn(rank, result["status"]["prepared_ranks"])
+                # Responses are snapshots, indexed by rank rather than
+                # dispatch/completion order. Query after every worker joined.
+                final = request(path, {"op": "status", "transaction_id": "parallel-delay"}, timeout=2)
+                self.assertEqual(final["state"], "OK")
+                self.assertEqual(final["status"]["prepared_ranks"], [0, 1, 2, 3])
+                self.assertEqual(len(calls), 4)
             finally:
                 server.stop()
                 thread.join(2)
+                self.assertFalse(thread.is_alive())
+
+    def test_parallel_epoch_checks_allow_rank_three_to_finish_before_rank_two(self):
+        # Exercise the real handler without requiring permission to bind a
+        # Unix socket, and force the ordering that exposed the flaky assertion.
+        epoch_checks = threading.Barrier(4)
+        earlier_replies = threading.Event()
+        local = threading.local()
+        results = {}
+        results_lock = threading.Lock()
+
+        def delayed_epoch():
+            epoch_checks.wait(timeout=5)
+            if local.rank == 2 and not earlier_replies.wait(5):
+                raise TimeoutError("other_rank_responses_missing")
+            return "epoch-1"
+
+        server = CrossRankControlServer(
+            "/tmp/unused.sock", CrossRankLeaseCoordinator(manager_epoch="epoch-1"),
+            manager_epoch_provider=delayed_epoch,
+        )
+        raw = observations()
+
+        def receive(conn):
+            local.rank = conn.rank
+            return {
+                "op": "prepare_rank", "transaction_id": "reordered-prepare",
+                "checkpoint_version": "cp-v1", "observation": raw[conn.rank].__dict__,
+            }, b""
+
+        def send(conn, response, payload):
+            with results_lock:
+                results[conn.rank] = response
+                if {0, 1, 3}.issubset(results):
+                    earlier_replies.set()
+
+        conns = [MagicMock(rank=rank) for rank in range(4)]
+        with patch("experiments.kv_ec.cross_rank_control.recv_message", side_effect=receive), patch(
+                "experiments.kv_ec.cross_rank_control.send_message", side_effect=send):
+            with ThreadPoolExecutor(max_workers=4) as workers:
+                futures = [workers.submit(server._handle, conn) for conn in conns]
+                for future in futures:
+                    future.result(timeout=15)
+        self.assertTrue(all(result["state"] == "OK" for result in results.values()), results)
+        self.assertEqual(sorted(results), [0, 1, 2, 3])
+        self.assertNotIn(2, results[3]["status"]["prepared_ranks"])
+        self.assertEqual(results[2]["status"]["prepared_ranks"], (0, 1, 2, 3))
+        final = server._dispatch(
+            {"op": "status", "transaction_id": "reordered-prepare"}, check_epoch=False)
+        self.assertEqual(final["status"]["prepared_ranks"], (0, 1, 2, 3))
 
     def test_real_socket_client_disconnect_has_no_uncaught_handler_error(self):
         with tempfile.TemporaryDirectory() as directory:

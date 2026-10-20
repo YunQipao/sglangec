@@ -1,4 +1,4 @@
-"""Default-off event-loop gate. No KV reads/writes or model collectives.
+"""Default-off event-loop gate. No live KV writes or model collectives.
 
 The scheduler retains last_batch/running_batch unchanged while this gate is
 active. Local failure is fail-stop with row/slot protections retained.
@@ -44,6 +44,7 @@ class SchedulerPauseGate:
         self.trace = []
         self.evidence = {}
         self.released = False
+        self.shadow = None
         self.rank = int(scheduler.model_worker.ps.tp_rank)
         self.owner = f"{identity['transaction_id']}:rank{self.rank}"
         self.output.mkdir(parents=True, exist_ok=True)
@@ -56,6 +57,8 @@ class SchedulerPauseGate:
     def from_env(cls, scheduler):
         # Reject unsupported execution loops at startup, before any request.
         args = scheduler.server_args
+        if os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") != "0":
+            raise PauseRejected("online_restore_disabled_until_real_shadow_gpu_acceptance")
         if (not args.disable_overlap_schedule or getattr(args, "pp_size", 1) != 1
                 or getattr(args, "disaggregation_mode", "null") != "null"):
             raise PauseRejected("pause_requires_normal_nonoverlap_scheduler")
@@ -69,6 +72,9 @@ class SchedulerPauseGate:
         )
         # Fingerprint work is startup-only, not inside the pause deadline.
         gate.model_identity = source_identity(args.model_path)
+        if os.environ.get("SGLANG_KV_EC_SHADOW_RESTORE") == "1":
+            from .scheduler_shadow import SchedulerShadowRecovery
+            gate.shadow = SchedulerShadowRecovery.from_env()
         return gate
 
     @property
@@ -209,6 +215,7 @@ class SchedulerPauseGate:
                 "request_generation_before": self.mapping.req_generation,
                 "row": self.mapping.req_pool_idx, "token_count": count,
                 "slot_generations_before": self.mapping.slot_generations,
+                "physical_slots_before": self.mapping.physical_slots,
                 "model_identity": self.model_identity,
                 "cuda_event_stream": "schedule_stream->scheduler.forward_stream",
                 "cuda_event_recorded": True, "cuda_event_complete": False,
@@ -329,6 +336,8 @@ class SchedulerPauseGate:
             s.token_to_kv_pool_allocator.validate_slot_lease(
                 self.owner, manager_epoch=self.identity["epoch"], request_id=req.rid,
                 request_version=mapping.request_version, slots=list(mapping.physical_slots))
+        if self.shadow is not None and self.shadow.done:
+            self.shadow.validate(self)
 
     def _tick_local(self):
         if not self.active:
@@ -364,6 +373,12 @@ class SchedulerPauseGate:
                 return True
             status = self._call("status")
             state = status["state"]
+            if self.shadow is not None and not self.shadow.done:
+                if status.get("require_shadow") is not True:
+                    raise PauseRejected("shadow_requires_coordinator_interlock")
+                if self.state == "PAUSED" and state == "PAUSED":
+                    self.state = "SHADOW_READY"
+                return True
             if self.state == "PAUSED" and state == "RESUME_REQUESTED":
                 self._revalidate()
                 self._call("validated")
@@ -411,6 +426,18 @@ class SchedulerPauseGate:
             return False
         try:
             local_blocked = self._tick_local()
+            if self.shadow is not None and not self.shadow.done:
+                if self._vote(self.state == "SHADOW_READY"):
+                    self.evidence["shadow"] = self.shadow.run(self)
+                    self._revalidate()
+                    # Peers cannot attest to recovery until rank 0 has also
+                    # completed every byte check and its final CUDA event.
+                    if not self._vote(True):
+                        raise PauseRejected("shadow_completion_vote_failed")
+                    self.shadow.done = True
+                    self._call("shadow_verified", observation=self.evidence["shadow"]["consensus"])
+                    self.state = "PAUSED"
+                return True
             if not self._vote(not local_blocked):
                 return True
             self._revalidate()
@@ -420,6 +447,7 @@ class SchedulerPauseGate:
                 pause_ms=(time.monotonic() - self.started) * 1000,
                 request_generation_after=self.mapping.req_generation,
                 slot_generations_after=self.mapping.slot_generations,
+                physical_slots_after=self.mapping.physical_slots,
                 allocator_lease_released=True,
                 row_protection_released=True,
                 active_slot_leases_after_release=(

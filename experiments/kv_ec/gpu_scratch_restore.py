@@ -202,7 +202,7 @@ def split_layer_payload(payload, record):
     return k, v
 
 
-def restore_rank_to_gpu(payload, metadata, device):
+def restore_rank_to_gpu(payload, metadata, device, *, cuda_metrics=None):
     """Restore one packed rank as temporary BF16/FP16 K/V tensors."""
     dtype = _dtype(metadata["dtype"])
     restored = []
@@ -222,9 +222,18 @@ def restore_rank_to_gpu(payload, metadata, device):
             tensor = torch.empty(shape, dtype=dtype, device=device)
             destination = tensor.view(torch.uint8).reshape(-1)
             source = torch.from_numpy(np.ascontiguousarray(raw))
+            events = None
+            if cuda_metrics is not None and device.type == "cuda":
+                events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
+                events[0].record()
             destination.copy_(source, non_blocking=False)
+            if events:
+                events[1].record()
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
+            if events:
+                cuda_metrics["h2d_copy_event_ms"] = (
+                    cuda_metrics.get("h2d_copy_event_ms", 0.) + events[0].elapsed_time(events[1]))
             h2d_ms += (time.perf_counter_ns() - started) / 1e6
             started = time.perf_counter_ns()
             actual = tensor.view(torch.uint8).detach().cpu().numpy().reshape(-1)

@@ -16,7 +16,8 @@ from .checkpoint_protocol import recv_message, send_message
 class PauseCoordinator:
     """One transaction per process. Terminal failures cannot be revived."""
 
-    def __init__(self, transaction_id, *, timeout_s=30, clock=time.monotonic):
+    def __init__(self, transaction_id, *, timeout_s=30, clock=time.monotonic,
+                 require_shadow=False):
         if not transaction_id or not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("invalid pause transaction/deadline")
         self.transaction_id = transaction_id
@@ -30,6 +31,8 @@ class PauseCoordinator:
         self.validated = set()
         self.released = set()
         self.armed = set()
+        self.require_shadow = require_shadow
+        self.shadow = {}
         self.lock = threading.RLock()
 
     def status(self):
@@ -39,6 +42,7 @@ class PauseCoordinator:
             "paused_ranks": sorted(self.observations),
             "validated_ranks": sorted(self.validated),
             "released_ranks": sorted(self.released), "armed_ranks": sorted(self.armed),
+            "require_shadow": self.require_shadow, "shadow_ranks": sorted(self.shadow),
         }
 
     def dispatch(self, message):
@@ -55,6 +59,8 @@ class PauseCoordinator:
             if op == "fail":
                 self.state, self.failure_reason = "FAILED", str(message["reason"])
             elif op == "authorize":
+                if self.require_shadow and set(self.shadow) != set(range(4)):
+                    raise ValueError("cannot_authorize_before_four_rank_shadow_verification")
                 if self.state == "PAUSED":
                     self.state = "RESUME_REQUESTED"
                 elif self.state not in (
@@ -62,6 +68,26 @@ class PauseCoordinator:
                     "RESUME_AUTHORIZED",
                 ):
                     raise ValueError("cannot_authorize_before_all_ranks_paused")
+            elif op == "shadow_verified":
+                rank, observation = message["tp_rank"], message["observation"]
+                if (not self.require_shadow or self.state != "PAUSED"
+                        or type(rank) is not int or rank not in self.observations):
+                    raise ValueError("shadow_requires_four_rank_pause")
+                if (observation.get("byte_exact") is not True
+                        or observation.get("online_kv_pool_modified") is not False
+                        or observation.get("snapshot_id") != self.transaction_id + "-chunk0"
+                        or observation.get("checkpoint_version") != observation["snapshot_id"]
+                        or any(observation.get(key) != self.observations[rank][key]
+                               for key in ("request_hash", "request_version"))
+                        or not all(observation.get(key) for key in (
+                            "snapshot_id", "checkpoint_version", "manager_epoch", "parity_sha256",
+                            "input_ids_sha256"))):
+                    raise ValueError("incomplete_shadow_verification")
+                if ((self.shadow and observation != next(iter(self.shadow.values())))
+                        or (rank in self.shadow and self.shadow[rank] != observation)):
+                    self.state, self.failure_reason = "FAILED", "shadow_identity_mismatch"
+                else:
+                    self.shadow[rank] = observation
             elif op == "paused":
                 rank = message["tp_rank"]
                 observation = message["observation"]
@@ -150,6 +176,7 @@ def main():
     serve.add_argument("--transaction-id", required=True)
     serve.add_argument("--timeout-s", type=float, default=30)
     serve.add_argument("--identity-output", type=Path, required=True)
+    serve.add_argument("--require-shadow", action="store_true")
     for op in ("status", "authorize", "fail"):
         client = sub.add_parser(op)
         client.add_argument("--socket", type=Path, required=True)
@@ -159,7 +186,8 @@ def main():
     args = parser.parse_args()
     if args.command == "serve":
         logging.basicConfig(level=logging.INFO)
-        coordinator = PauseCoordinator(args.transaction_id, timeout_s=args.timeout_s)
+        coordinator = PauseCoordinator(args.transaction_id, timeout_s=args.timeout_s,
+                                       require_shadow=args.require_shadow)
         with args.identity_output.open("x") as stream:
             json.dump({"epoch": coordinator.epoch,
                        "transaction_id": coordinator.transaction_id}, stream)

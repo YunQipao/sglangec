@@ -42,7 +42,7 @@ def _identity(metadata):
             "source_commit", "core_diff_sha256", "tp_size", "layers",
             "token_start", "token_count", "token_ids_sha256", "dtype",
             "packed_byte_count", "pool_class", "lifetime", "completion_dependency")
-    keys += ("request_version", "checkpoint_version", "manager_epoch")
+    keys += ("request_version", "checkpoint_version", "manager_epoch", "input_ids_sha256")
     return tuple((key, json.dumps(metadata.get(key), sort_keys=True)) for key in keys)
 
 
@@ -260,6 +260,23 @@ class ParityManager:
         with self._lock:
             self._checkpoints.pop(snapshot_id, None)
 
+    def export_parity(self, snapshot_id, expected):
+        """Export only a committed parity block, bound to the caller's version.
+
+        Survivor bytes stay in the paused workers, not in a second manager
+        state machine. The returned copy cannot mutate the checkpoint.
+        """
+        with self._lock:
+            checkpoint = self._checkpoints.get(snapshot_id)
+            if checkpoint is None or checkpoint.state != COMMITTED:
+                raise ValueError("parity_checkpoint_not_committed")
+            metadata = checkpoint.metadata
+            if (expected.get("manager_epoch") != self.manager_epoch
+                    or _identity(expected) != _identity(metadata)
+                    or _layout_identity(expected) != _layout_identity(metadata)):
+                raise ValueError("parity_checkpoint_identity_mismatch")
+            return self._status_locked(checkpoint), checkpoint.parity.tobytes()
+
     def recover_for_test(self, snapshot_id, lost_rank):
         """Explicit test oracle; production manager does not retain originals."""
         if not self.retain_oracle:
@@ -315,16 +332,23 @@ class ParityManagerServer:
             conn.settimeout(2)
             try:
                 metadata, payload = recv_message(conn)
+                response_payload = b""
                 if metadata.get("kind") == "hello":
                     response = {"state": "READY", "manager_epoch": self.manager.manager_epoch}
                 elif metadata.get("kind") == "status":
                     response = self.manager.status(metadata.get("snapshot_id"))
+                elif metadata.get("kind") == "parity":
+                    if payload:
+                        raise ValueError("parity_export_requires_empty_payload")
+                    response, response_payload = self.manager.export_parity(
+                        metadata.get("snapshot_id"), metadata.get("expected", {}))
                 else:
                     response = self.manager.submit(metadata, np.frombuffer(payload, dtype=np.uint8))
             except Exception as exc:
                 response = {"state": FAILED, "reason": type(exc).__name__}
+                response_payload = b""
             try:
-                send_message(conn, {"kind": "response", **response}, b"")
+                send_message(conn, {"kind": "response", **response}, response_payload)
             except OSError:
                 pass
 
@@ -442,6 +466,21 @@ def manager_hello(path, timeout=2.0):
     if response.get("state") != "READY" or not response.get("manager_epoch"):
         raise RuntimeError("parity manager did not provide a live epoch")
     return response["manager_epoch"]
+
+
+def fetch_parity(path, expected, timeout=2.0):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout)
+        client.connect(str(path))
+        send_message(client, {"kind": "parity", "snapshot_id": expected["snapshot_id"],
+                              "expected": expected}, b"")
+        metadata, raw = recv_message(client)
+    if metadata.get("state") != COMMITTED:
+        raise ValueError(f"parity_export_failed:{metadata.get('reason')}")
+    if (len(raw) != expected["packed_byte_count"]
+            or hashlib.sha256(raw).hexdigest() != metadata.get("parity_sha256")):
+        raise ValueError("parity_export_byte_mismatch")
+    return metadata, np.frombuffer(raw, dtype=np.uint8).copy()
 
 
 def main():
