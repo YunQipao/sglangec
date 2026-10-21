@@ -22,6 +22,7 @@ from .parity_manager import (
 )
 from .rank_snapshot import FORMAT, validate_payload
 from .snapshot import digest
+from .m5_capture_profile import profile_capture, stage
 from .xor_codec import recover
 from .m3_recovery import (
     ChunkRecoveryProof, M3RecoveryPlan, recovery_ranges, validate_checkpoint_plan,
@@ -44,6 +45,7 @@ def checked_buffers(pool, layer, slots):
     return k, v
 
 
+@profile_capture
 def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch,
                token_start=0, token_count=256):
     """Read exactly one 256-token chunk at an explicit prompt offset."""
@@ -54,27 +56,39 @@ def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch,
     if token_start + token_count > len(mapping.physical_slots):
         raise ValueError("chunk_range_exceeds_mapping")
     device = pool.k_buffer[0].device
-    slots = torch.tensor(mapping.physical_slots[token_start:token_start + token_count],
-                         dtype=torch.int64, device=device)
+    with stage("slot_tensor"):
+        slots = torch.tensor(mapping.physical_slots[token_start:token_start + token_count],
+                             dtype=torch.int64, device=device)
     chunks, records = [], []
     hashes = {kind: hashlib.sha256() for kind in ("k", "v")}
     offset = 0
     for layer in range(36):
-        pair = checked_buffers(pool, layer, slots)
+        with stage("mapping_and_tensor_checks"):
+            pair = checked_buffers(pool, layer, slots)
         record = dict(layer_id=layer, dtype="torch.bfloat16", packed_shape={},
                       original_shape={}, source_stride={}, device=str(device))
         for kind, tensor in zip(("k", "v"), pair):
-            raw = select_raw_bytes(tensor, slots).cpu().numpy().copy()
+            with stage("gpu_gather_host"):
+                selected = select_raw_bytes(tensor, slots)
+            with stage("d2h_host_blocking"):
+                host = selected.cpu()
+            with stage("cpu_copy"):
+                raw = host.numpy().copy()
+            del selected, host
             record["packed_shape"][kind] = [token_count, 2, 128]
             record["original_shape"][kind] = list(tensor.shape)
             record["source_stride"][kind] = list(tensor.stride())
-            record.update({kind + "_offset": offset, kind + "_nbytes": int(raw.size),
-                           kind + "_sha256": digest(raw)})
-            hashes[kind].update(raw)
+            with stage("segment_hash"):
+                record.update({kind + "_offset": offset, kind + "_nbytes": int(raw.size),
+                               kind + "_sha256": digest(raw)})
+                hashes[kind].update(raw)
             chunks.append(raw)
             offset += raw.size
         records.append(record)
-    payload = np.concatenate(chunks)
+    with stage("cpu_concatenate"):
+        payload = np.concatenate(chunks)
+    with stage("payload_hash"):
+        payload_hash = digest(payload)
     metadata = dict(
         identity, format=FORMAT, provenance="sglang_request", snapshot_id=snapshot_id,
         request_id=hashlib.sha256(req.rid.encode()).hexdigest(), request_id_encoding="sha256",
@@ -90,13 +104,14 @@ def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch,
         physical_slots=list(mapping.physical_slots[token_start:token_start + token_count]),
         slot_generation=list(mapping.slot_generations[token_start:token_start + token_count]),
         layer_records=records,
-        packed_byte_count=int(payload.size), sha256=digest(payload),
+        packed_byte_count=int(payload.size), sha256=payload_hash,
         k_sha256=hashes["k"].hexdigest(), v_sha256=hashes["v"].hexdigest(),
         source_unchanged=True, snapshot_completion_status="complete",
         lifetime="paused_request_row_and_slot_lease",
         completion_dependency="producer_event_then_forward_stream_blocking_d2h",
     )
-    validate_payload(payload, metadata)
+    with stage("payload_validation"):
+        validate_payload(payload, metadata)
     return payload, metadata
 
 
@@ -260,6 +275,8 @@ class SchedulerShadowRecovery:
             if result.get("state") not in (PENDING, COMMITTED):
                 raise ValueError("online_protection_submission_failed")
             self.protection_timing["checkpoint_submit_ms"] = (time.perf_counter() - started) * 1000
+            if os.environ.get("SGLANG_KV_EC_CAPTURE_PROFILE_DIR"):
+                self.protection_timing["submit_transport_ms"] = result.get("transport_ms", {})
             # Only survivors retain their CPU blocks. The target's payload is not
             # retained as a recovery source; its digests/layout remain metadata.
             self.survivor = payload if gate.rank != self.lost_rank else None
@@ -267,8 +284,14 @@ class SchedulerShadowRecovery:
                                     timing=self.protection_timing, started=self.protection_started,
                                     status=None))
         chunk = self.chunks[-1]
+        poll_started = time.perf_counter()
         status = submit_once(self.socket, {"kind": "status", "snapshot_id": self.metadata["snapshot_id"]},
                              b"", timeout=self.timeout(gate))
+        if os.environ.get("SGLANG_KV_EC_CAPTURE_PROFILE_DIR"):
+            timing = self.protection_timing
+            timing["status_roundtrip_ms"] = timing.get("status_roundtrip_ms", 0.) + (
+                time.perf_counter() - poll_started) * 1000
+            timing["status_poll_count"] = timing.get("status_poll_count", 0) + 1
         if status.get("state") == PENDING:
             return False
         validate_checkpoint(status, self.metadata, require_oracles=self.test_oracle)

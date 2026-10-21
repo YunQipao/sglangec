@@ -26,6 +26,7 @@ from .m3_recovery import (
 MEASURED_SOURCES = (
     "scheduler_shadow.py", "scheduler_pause.py", "scheduler_retry.py", "pause_control.py",
     "m3_recovery.py", "m3_performance.py", "accept_pause.py",
+    "m5_capture_profile.py", "capture_timing.py",
 )
 
 
@@ -557,6 +558,8 @@ def main():
     parser.add_argument("--startup-timeout", type=float, default=600)
     parser.add_argument("--pause-timeout", type=float, default=60)
     parser.add_argument("--output", type=Path, help="exclusive new evidence directory for this run")
+    parser.add_argument("--capture-profile", action="store_true",
+                        help="M5 capture tracing; perturbs foreground latency; default off")
     parser.add_argument("--mode", choices=("baseline", "protection_only", "online_recovery", "prefill_retry"),
                         help="explicit independent A/B/C/D mode; omitted retains legacy pause/shadow behavior")
     recovery = parser.add_mutually_exclusive_group()
@@ -709,7 +712,8 @@ def main():
             "--request-id", request_id, "--prompt-tokens", "768",
             "--stream-metrics", "--output", str(root / output)], log, env)
 
-    verdict = {"state": "FAIL", "transaction_id": tx, "run": str(root), "M1": False}
+    verdict = {"state": "FAIL", "transaction_id": tx, "run": str(root), "M1": False,
+               "capture_profile": args.capture_profile}
     if args.mode:
         verdict.update(mode=args.mode, GPU_VALIDATED=False)
     if special:
@@ -805,6 +809,8 @@ def main():
                          SGLANG_KV_EC_PAUSE_OUTPUT=str(root / "ranks"),
                          SGLANG_KV_EC_PAUSE_TIMEOUT_S=str(args.pause_timeout),
                          SGLANG_KV_EC_PAUSE_IPC_TIMEOUT_S="0.5")
+        if args.capture_profile:
+            pause_env["SGLANG_KV_EC_CAPTURE_PROFILE_DIR"] = str(root / "capture-profiles")
         if special:
             pause_env.update(SGLANG_KV_EC_EXPERIMENT_MODE=args.mode,
                              SGLANG_KV_EC_ISOLATED_TX=tx,

@@ -466,6 +466,8 @@ class SchedulerPauseGate:
         Work.wait has a bounded timeout. A missing rank never falls through
         into an attention/model collective with the other three ranks.
         """
+        profile_started = (time.monotonic() if os.environ.get(
+            "SGLANG_KV_EC_CAPTURE_PROFILE_DIR") else None)
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("pause_total_deadline")
@@ -475,6 +477,10 @@ class SchedulerPauseGate:
             group=self.scheduler.tp_cpu_group, async_op=True)
         if work.wait(timeout=timedelta(seconds=remaining)) is False:
             raise TimeoutError("pause_rank_vote_timeout")
+        if profile_started is not None:
+            self.trace.append(dict(
+                monotonic=profile_started, operation="m5_tp_cpu_vote", tp_rank=self.rank,
+                elapsed_ms=(time.monotonic() - profile_started) * 1000))
         return bool(votes.item())
 
     def tick(self):

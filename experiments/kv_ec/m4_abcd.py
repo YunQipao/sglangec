@@ -113,6 +113,9 @@ def summarize(root):
             path = Path(trial["run"]) / mode
             perf, response = audit_mode(path, mode)
             acceptance = load(path / "acceptance.json")
+            require(acceptance.get("capture_profile", False) ==
+                    (manifest.get("capture_profile", False) and mode != "baseline"),
+                    "capture_profile_mode_mismatch")
             tx = acceptance["transaction_id"]
             baseline = (path / "baseline-response.json").stat()
             inode = (baseline.st_dev, baseline.st_ino)
@@ -138,6 +141,7 @@ def summarize(root):
         input_tokens=768, output_tokens=16, lost_rank=0, recover_tokens=256).items()), "unsupported_study_config")
     return dict(
         state="PASS", measurement_revision="ABCD-production-parity-v1",
+        capture_profile=manifest.get("capture_profile", False),
         repeat=len(groups["baseline"]), config=config,
         modes={mode: {k: statistics([row[k] for row in rows])
                       for k, v in rows[0].items()
@@ -160,13 +164,18 @@ def main():
     parser.add_argument("--startup-timeout", type=float, default=600)
     parser.add_argument("--pause-timeout", type=float, default=120)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--capture-profile", action="store_true",
+                        help="M5 capture traces; diagnostic latencies are not production measurements")
     args = parser.parse_args()
+    if args.capture_profile and args.repeat != 1:
+        parser.error("--capture-profile supports only a single diagnostic smoke")
     if args.repeat == 3 and args.smoke_evidence is None:
         parser.error("repeat=3 requires complete --smoke-evidence; never promote failed B/D")
     root = args.output.resolve() if args.output else Path(tempfile.mkdtemp(prefix="kv-ec-abcd-"))
     if args.output:
         root.mkdir(parents=True, exist_ok=False)
     manifest = dict(state="RUNNING", run=str(root), repeat=args.repeat, trials=[],
+                    capture_profile=args.capture_profile,
                     modes=MODES, lost_rank=0, recover_tokens=256,
                     source_sha256={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                    for name in MEASURED_SOURCES})
@@ -180,6 +189,7 @@ def main():
             require(load(args.smoke_evidence / "trials.json")["state"] == "PASS", "smoke_not_pass")
             smoke = summarize(args.smoke_evidence)
             require(smoke["repeat"] == 1, "requires_single_run_smoke")
+            require(not smoke["capture_profile"], "profiled_smoke_not_performance_admission")
             require(load(args.smoke_evidence / "trials.json")["source_sha256"] ==
                     manifest["source_sha256"], "source_changed_since_smoke")
         code = run_logged(
@@ -202,6 +212,8 @@ def main():
                     "--pause-timeout", str(args.pause_timeout), "--output", str(run / mode)]
                 if mode != "baseline":
                     command += ["--shadow-evidence", str(args.shadow_evidence.resolve())]
+                    if args.capture_profile:
+                        command.append("--capture-profile")
                 print(f"START repeat={repeat} mode={mode} run={run / mode}", flush=True)
                 code = run_logged(command, run / f"{mode}.log", cwd=repo, env=env, label=mode)
                 require(code == 0, f"mode_failed:{mode}; no later GPU experiment launched")
