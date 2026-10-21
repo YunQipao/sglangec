@@ -58,6 +58,14 @@ class SchedulerPauseGate:
         # Reject unsupported execution loops at startup, before any request.
         args = scheduler.server_args
         online = os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") == "1"
+        mode = os.environ.get("SGLANG_KV_EC_EXPERIMENT_MODE", "")
+        if mode not in ("", "protection_only", "prefill_retry"):
+            raise PauseRejected("unsupported_experiment_mode")
+        if mode and (online or os.environ.get("SGLANG_KV_EC_SHADOW_RESTORE", "0") != "0"):
+            raise PauseRejected("conflicting_experiment_modes")
+        if mode and (not os.environ.get("SGLANG_KV_EC_ISOLATED_TX")
+                     or not os.environ.get("SGLANG_KV_EC_ONLINE_ADMISSION")):
+            raise PauseRejected("experiment_requires_isolated_admission")
         if os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") not in ("0", "1") or (online and (
                 not os.environ.get("SGLANG_KV_EC_ISOLATED_TX")
                 or not os.environ.get("SGLANG_KV_EC_ONLINE_ADMISSION"))):
@@ -75,10 +83,16 @@ class SchedulerPauseGate:
         )
         # Fingerprint work is startup-only, not inside the pause deadline.
         gate.model_identity = source_identity(args.model_path)
-        if os.environ.get("SGLANG_KV_EC_SHADOW_RESTORE") == "1" or online:
+        if mode and os.environ["SGLANG_KV_EC_ISOLATED_TX"] != gate.identity["transaction_id"]:
+            raise PauseRejected("experiment_transaction_mismatch")
+        if mode == "prefill_retry":
+            from .scheduler_retry import SchedulerPrefillRetry
+            gate.shadow = SchedulerPrefillRetry.from_env()
+            gate.shadow.check_admission(gate)
+        elif os.environ.get("SGLANG_KV_EC_SHADOW_RESTORE") == "1" or online or mode == "protection_only":
             from .scheduler_shadow import SchedulerShadowRecovery
             gate.shadow = SchedulerShadowRecovery.from_env()
-            if online:
+            if online or mode:
                 gate.shadow.check_online_admission(gate)
         return gate
 
@@ -112,6 +126,13 @@ class SchedulerPauseGate:
             if (status.get("lost_rank") != self.shadow.lost_rank
                     or status.get("recover_tokens") != self.shadow.recover_tokens):
                 raise PauseRejected("pause_coordinator_recovery_plan_changed")
+        if self.shadow is not None and getattr(self.shadow, "evidence_key", "") in (
+                "protection_only", "prefill_retry"):
+            key = self.shadow.evidence_key
+            if (status.get("experiment_mode") != key
+                    or status.get("lost_rank") != self.shadow.lost_rank
+                    or status.get("recover_tokens") != self.shadow.recover_tokens):
+                raise PauseRejected("pause_coordinator_experiment_changed")
         if status["state"] == "FAILED":
             raise PauseRejected(f"pause_failed:{status.get('failure_reason')}")
         return status
@@ -180,6 +201,12 @@ class SchedulerPauseGate:
                         chunk["decode_observed_monotonic"] = decoded
                         chunk["timing_ms"]["fault_to_decode_ms"] = (
                             decoded - chunk["fault_monotonic"]) * 1000
+            if self.shadow is not None and getattr(self.shadow, "evidence_key", "") == "prefill_retry":
+                decoded = time.monotonic()
+                self.evidence["decode_observed_monotonic"] = decoded
+                self.evidence["prefill_retry"].update(
+                    decode_observed_monotonic=decoded,
+                    fault_to_first_decode_ms=(decoded - self.shadow.fault_monotonic) * 1000)
             self._write_evidence()
             if self.pending_path.exists():
                 self.pending_path.unlink()
@@ -384,7 +411,7 @@ class SchedulerPauseGate:
                     return True
                 self.evidence["cuda_event_complete"] = True
                 self._revalidate()
-                if self.shadow is not None and getattr(self.shadow, "online", False):
+                if self.shadow is not None and getattr(self.shadow, "protects_prefill", False):
                     if not self.shadow.prepare(self):
                         return True
                     self.evidence["paused_observation_monotonic"] = time.monotonic()
@@ -395,7 +422,7 @@ class SchedulerPauseGate:
                     "model_sha256": self.model_identity["model_sha256"],
                     **({"checkpoint": self.shadow.consensus_checkpoint(self),
                         "checkpoint_committed": True} if self.shadow is not None
-                       and getattr(self.shadow, "online", False) else {}),
+                       and getattr(self.shadow, "protects_prefill", False) else {}),
                 })
                 self.state = "PAUSED"
                 return True
@@ -458,7 +485,8 @@ class SchedulerPauseGate:
             local_blocked = self._tick_local()
             if self.shadow is not None and not self.shadow.done:
                 if self._vote(self.state == "SHADOW_READY"):
-                    key = "online" if getattr(self.shadow, "online", False) else "shadow"
+                    key = getattr(self.shadow, "evidence_key",
+                                  "online" if getattr(self.shadow, "online", False) else "shadow")
                     self.evidence[key] = self.shadow.run(self)
                     self._revalidate()
                     # Peers cannot attest to recovery until the target has also
@@ -486,6 +514,11 @@ class SchedulerPauseGate:
                     .slot_lease_registry.active_lease_count),
                 tp_cpu_resume_vote=True,
             )
+            if self.shadow is not None and getattr(self.shadow, "protection_only", False):
+                self.evidence["protection_only"].update(
+                    protection_blocking_ms=self.evidence["pause_ms"],
+                    parity_commit_ms=sum(c["timing_ms"]["parity_commit_ms"]
+                                         for c in self.evidence["protection"]["chunks"]))
             # Row-release failure on one rank must not allow its peers to
             # start decode. Failed Gloo work is fail-stop.
             if not self._vote(True):

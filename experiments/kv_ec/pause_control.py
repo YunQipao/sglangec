@@ -20,7 +20,8 @@ class PauseCoordinator:
     """One transaction per process. Terminal failures cannot be revived."""
 
     def __init__(self, transaction_id, *, timeout_s=30, clock=time.monotonic,
-                 require_shadow=False, require_online=False, lost_rank=0, recover_tokens=256):
+                 require_shadow=False, require_online=False, lost_rank=0, recover_tokens=256,
+                 experiment_mode=""):
         if not transaction_id or not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("invalid pause transaction/deadline")
         self.transaction_id = transaction_id
@@ -34,7 +35,13 @@ class PauseCoordinator:
         self.validated = set()
         self.released = set()
         self.armed = set()
-        self.require_shadow = require_shadow or require_online
+        if experiment_mode not in ("", "protection_only", "prefill_retry"):
+            raise ValueError("unsupported_experiment_mode")
+        if experiment_mode and (require_shadow or require_online):
+            raise ValueError("conflicting_experiment_modes")
+        self.experiment_mode = experiment_mode
+        self.retry_ready, self.retry_released = {}, set()
+        self.require_shadow = require_shadow or require_online or bool(experiment_mode)
         self.require_online = require_online
         recovery_ranges(recover_tokens)
         if type(lost_rank) is not int or lost_rank not in range(4):
@@ -53,6 +60,9 @@ class PauseCoordinator:
             "require_shadow": self.require_shadow, "shadow_ranks": sorted(self.shadow),
             "require_online": self.require_online,
             "lost_rank": self.lost_rank, "recover_tokens": self.recover_tokens,
+            "experiment_mode": self.experiment_mode,
+            "retry_ready_ranks": sorted(self.retry_ready),
+            "retry_released_ranks": sorted(self.retry_released),
         }
 
     def dispatch(self, message):
@@ -78,6 +88,49 @@ class PauseCoordinator:
                     "RESUME_AUTHORIZED",
                 ):
                     raise ValueError("cannot_authorize_before_all_ranks_paused")
+            elif op in ("retry_ready", "retry_released"):
+                rank = message.get("tp_rank")
+                if (self.experiment_mode != "prefill_retry" or self.state != "PAUSED"
+                        or type(rank) is not int or rank not in self.observations):
+                    raise ValueError("retry_requires_four_rank_pause")
+                if op == "retry_ready":
+                    proof = message.get("observation", {})
+                    if (proof.get("event_complete") is not True
+                            or proof.get("lease_validated") is not True
+                            or proof.get("fault_injected") is not (rank == self.lost_rank)
+                            or proof.get("fault_bytes_changed") is not (rank == self.lost_rank)
+                            or not proof.get("input_ids_sha256")
+                            or (self.retry_ready and proof["input_ids_sha256"] !=
+                                next(iter(self.retry_ready.values()))["input_ids_sha256"])
+                            or any(proof.get(k) != self.observations[rank][k]
+                                   for k in ("request_hash", "request_version"))):
+                        raise ValueError("retry_handoff_missing_proof")
+                    if rank in self.retry_ready and proof != self.retry_ready[rank]:
+                        self.state, self.failure_reason = "FAILED", "retry_handoff_changed"
+                    self.retry_ready[rank] = proof
+                else:
+                    if set(self.retry_ready) != set(range(4)):
+                        raise ValueError("retry_release_before_four_rank_handoff")
+                    self.retry_released.add(rank)
+            elif op == "shadow_verified" and self.experiment_mode == "prefill_retry":
+                rank, proof = message["tp_rank"], message["observation"]
+                if (self.state != "PAUSED" or type(rank) is not int or rank not in self.observations
+                        or self.retry_released != set(range(4))
+                        or any(proof.get(k) is not True for k in (
+                            "byte_exact", "retry_rebuilt", "history_preserved",
+                            "fresh_allocation", "new_lease_validated"))
+                        or any(proof.get(k) is not False for k in (
+                            "used_committed_parity", "rollback_used_for_recovery",
+                            "duplicate_output_emitted"))
+                        or proof.get("request_hash") != self.observations[rank]["request_hash"]
+                        or proof.get("original_request_version") != self.observations[rank]["request_version"]
+                        or proof.get("input_ids_sha256") != next(iter(self.retry_ready.values()))["input_ids_sha256"]
+                        or proof.get("fault_boundary_output_count") != 1
+                        or proof.get("rebuilt_prefix_tokens") != 768):
+                    raise ValueError("retry_rebuild_missing_proof")
+                if self.shadow and proof != next(iter(self.shadow.values())):
+                    self.state, self.failure_reason = "FAILED", "retry_rebuild_consensus_changed"
+                self.shadow[rank] = proof
             elif op == "shadow_verified":
                 rank, observation = message["tp_rank"], message["observation"]
                 if (not self.require_shadow or self.state != "PAUSED"
@@ -123,6 +176,13 @@ class PauseCoordinator:
                     elif (self.lost_rank != 0 or self.recover_tokens != 256
                           or observation.get("rank0_source_excluded") is not True):
                         raise ValueError("incomplete_online_legacy_plan")
+                if self.experiment_mode == "protection_only":
+                    if (observation.get("protection_only") is not True
+                            or any(observation.get(k) is not False for k in (
+                                "fault_injected", "recovery_executed", "used_committed_parity"))
+                            or any(observation.get(k) != self.observations[rank]["checkpoint"].get(k)
+                                   for k in self.observations[rank]["checkpoint"])):
+                        raise ValueError("protection_only_invalid_proof")
                 if ((self.shadow and observation != next(iter(self.shadow.values())))
                         or (rank in self.shadow and self.shadow[rank] != observation)):
                     self.state, self.failure_reason = "FAILED", "shadow_identity_mismatch"
@@ -141,7 +201,7 @@ class PauseCoordinator:
                     raise ValueError("late_pause_observation")
                 if not observation.get("event_complete"):
                     raise ValueError("cuda_event_incomplete")
-                if self.require_online:
+                if self.require_online or self.experiment_mode == "protection_only":
                     checkpoint = observation.get("checkpoint")
                     if (observation.get("checkpoint_committed") is not True or not isinstance(checkpoint, dict)
                             or checkpoint.get("snapshot_id") != self.transaction_id + "-chunk0"
@@ -236,6 +296,9 @@ def main():
     serve.add_argument("--identity-output", type=Path, required=True)
     serve.add_argument("--require-shadow", action="store_true")
     serve.add_argument("--require-online", action="store_true")
+    serve.add_argument("--experiment-mode", choices=("protection_only", "prefill_retry"), default="")
+    serve.add_argument("--production-parity", action="store_true",
+                       help="explicit new C measurement revision, without recovery-based parity test oracle")
     serve.add_argument("--lost-rank", type=int, choices=range(4), default=0)
     serve.add_argument("--recover-tokens", type=int, choices=(256, 512, 768), default=256)
     for op in ("status", "authorize", "fail"):
@@ -249,11 +312,13 @@ def main():
         logging.basicConfig(level=logging.INFO)
         coordinator = PauseCoordinator(args.transaction_id, timeout_s=args.timeout_s,
                                        require_shadow=args.require_shadow, require_online=args.require_online,
-                                       lost_rank=args.lost_rank, recover_tokens=args.recover_tokens)
+                                       lost_rank=args.lost_rank, recover_tokens=args.recover_tokens,
+                                       experiment_mode=args.experiment_mode)
         with args.identity_output.open("x") as stream:
             json.dump({"epoch": coordinator.epoch, "transaction_id": coordinator.transaction_id,
+                       **({"parity_test_oracle": False} if args.production_parity else {}),
                        **(dict(lost_rank=args.lost_rank, recover_tokens=args.recover_tokens)
-                          if args.require_online else {})}, stream)
+                          if args.require_online or args.experiment_mode else {})}, stream)
         PauseControlServer(args.socket, coordinator).serve_forever()
     else:
         message = dict(json.loads(args.identity.read_text()), op=args.command)

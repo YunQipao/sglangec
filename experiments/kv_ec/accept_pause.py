@@ -23,6 +23,24 @@ from .m3_recovery import (
     ChunkRecoveryProof, M3RecoveryPlan, recovery_ranges, validate_checkpoint_plan,
 )
 
+MEASURED_SOURCES = (
+    "scheduler_shadow.py", "scheduler_pause.py", "scheduler_retry.py", "pause_control.py",
+    "m3_recovery.py", "m3_performance.py", "accept_pause.py",
+)
+
+
+def experiment_performance_record(experiment_mode, response, records, *, config):
+    """Keep client notes separate from the all-rank protection/retry clock."""
+    metric_keys = {
+        "protection_only": ("protection_blocking_ms", "parity_commit_ms"),
+        "prefill_retry": ("fault_to_rebuilt_state_ms", "fault_to_first_decode_ms", "prefill_forward_ms"),
+    }[experiment_mode]
+    return dict(
+        mode=experiment_mode, config=config, **response["client_metrics_ms"],
+        **{key: max(record[experiment_mode][key] for record in records) for key in metric_keys},
+        rank_metrics=[record[experiment_mode] for record in records],
+        timing_note="all-rank max; enclosing intervals overlap; first-decode is rank-local result, not SSE")
+
 
 def resolve_ports(port=None, baseline_port=None, pause_port=None):
     if port is not None and baseline_port is not None and port != baseline_port:
@@ -36,7 +54,7 @@ def resolve_ports(port=None, baseline_port=None, pause_port=None):
     return baseline, paused
 
 
-def check_evidence(root, identity, *, online=False):
+def check_evidence(root, identity, *, online=False, retry=False):
     expected_ranks = [0, 1, 2, 3]
     for rank in expected_ranks:
         record = json.loads((root / f"pause-rank-{rank}.json").read_text())
@@ -48,7 +66,7 @@ def check_evidence(root, identity, *, online=False):
             ("allocator_lease_released", True), ("row_protection_released", True),
             ("active_slot_leases_after_release", 0), ("cuda_event_complete", True),
             ("cuda_event_recorded", True),
-            ("online_kv_pool_modified", online and rank == identity.get("lost_rank", 0)), ("failure", None),
+            ("online_kv_pool_modified", (online or retry) and rank == identity.get("lost_rank", 0)), ("failure", None),
         ):
             if (key not in record or type(record[key]) is not type(expected)
                     or record[key] != expected):
@@ -56,7 +74,7 @@ def check_evidence(root, identity, *, online=False):
         if record["decode_output_count"] < 2 or record["scheduler_skipped_iterations"] < 1:
             raise ValueError(f"rank{rank}: no actual pause/decode observed")
         for key in ("request_generation", "slot_generations"):
-            if record[key + "_before"] != record[key + "_after"]:
+            if not retry and record[key + "_before"] != record[key + "_after"]:
                 raise ValueError(f"rank{rank}:{key} changed")
         status = record["coordinator_final"]
         if (status["epoch"] != identity["epoch"]
@@ -67,6 +85,88 @@ def check_evidence(root, identity, *, online=False):
             raise ValueError(f"rank{rank}: incomplete coordinator handshake")
     if list(root.glob("*.error.json")) or list(root.glob("*.pending.json")):
         raise ValueError("rank failure or incomplete decode evidence exists")
+
+
+def check_experiment_evidence(root, identity, checkpoints, response, experiment_mode):
+    """Strict B/D audit, separate from the immutable legacy M1/M3 contract."""
+    import math
+    check_evidence(root, identity, retry=experiment_mode == "prefill_retry")
+    records = [json.loads((root / f"pause-rank-{r}.json").read_text()) for r in range(4)]
+    consensus = records[0][experiment_mode]["consensus"]
+    for rank, record in enumerate(records):
+        proof = record[experiment_mode]
+        status = record["coordinator_final"]
+        if (proof["consensus"] != consensus or status.get("experiment_mode") != experiment_mode
+                or status.get("shadow_ranks") != list(range(4))
+                or consensus.get("input_ids_sha256") != response["input_ids_sha256"]
+                or consensus.get("request_hash") != record["request_hash"]):
+            raise ValueError("experiment_consensus_or_input_mismatch")
+        if experiment_mode == "protection_only":
+            if (proof.get("checkpoint_committed") is not True or proof.get("source_unchanged") is not True
+                    or any(proof.get(k) is not False for k in (
+                        "fault_injected", "recovery_executed", "kv_writeback_executed",
+                        "online_kv_pool_modified"))
+                    or "online" in record or "prefill_retry" in record
+                    or len(checkpoints) != identity["recover_tokens"] // 256):
+                raise ValueError("protection_only_executed_recovery_or_missing_commit")
+            chunks = record["protection"]["chunks"]
+            if len(chunks) != len(checkpoints):
+                raise ValueError("protection_only_incomplete_chunks")
+            for index, (chunk, checkpoint) in enumerate(zip(chunks, checkpoints)):
+                if (checkpoint.get("state") != "COMMITTED" or checkpoint.get("oracle_checks") != []
+                        or checkpoint.get("checksum_deferred")
+                        or checkpoint.get("snapshot_id") != identity["transaction_id"] + f"-chunk{index}"
+                        or checkpoint.get("input_ids_sha256") != response["input_ids_sha256"]
+                        or chunk["state"] != "COMMITTED"
+                        or chunk["source_sha256"] != checkpoint["rank_hashes"][str(rank)]["sha256"]
+                        or chunk["parity_sha256"] != checkpoint["parity_sha256"]
+                        or chunk["snapshot_id"] != checkpoint["snapshot_id"]
+                        or chunk["committed_monotonic"] > record["paused_observation_monotonic"]
+                        or chunk["token_start"] != index * 256 or chunk["token_count"] != 256):
+                    raise ValueError("protection_only_checkpoint_binding")
+            keys = ("protection_blocking_ms", "parity_commit_ms")
+            if (proof["protection_blocking_ms"] != record["pause_ms"]
+                    or proof["parity_commit_ms"] != sum(
+                        c["timing_ms"]["parity_commit_ms"] for c in chunks)):
+                raise ValueError("protection_only_timing_not_bound_to_pause_or_commit")
+        else:
+            if (checkpoints or "protection" in record or "online" in record
+                    or proof.get("fault_injected") is not (rank == identity["lost_rank"])
+                    or proof.get("fault_bytes_changed") is not (rank == identity["lost_rank"])
+                    or proof["prompt_hashes_before"] != proof["prompt_hashes_after"]
+                    or len(proof["prompt_hashes_before"]) != 3
+                    or proof.get("output_count_before") != 1 or proof.get("output_count_after") != 1
+                    or not proof.get("stream_offsets_before")
+                    or proof["stream_offsets_before"] != proof.get("stream_offsets_after")
+                    or status.get("retry_ready_ranks") != list(range(4))
+                    or status.get("retry_released_ranks") != list(range(4))
+                    or any(consensus.get(k) is not True for k in (
+                        "retry_rebuilt", "byte_exact", "history_preserved",
+                        "fresh_allocation", "new_lease_validated"))
+                    or any(consensus.get(k) is not False for k in (
+                        "used_committed_parity", "rollback_used_for_recovery", "duplicate_output_emitted"))
+                    or consensus.get("fault_boundary_output_count") != 1
+                    or consensus.get("rebuilt_prefix_tokens") != 768
+                    or (record["row"], record["request_generation_before"]) ==
+                       (proof["rebuilt_row"], proof["rebuilt_request_generation"])
+                    or (record["physical_slots_before"], record["slot_generations_before"]) ==
+                       (record["physical_slots_after"], record["slot_generations_after"])
+                    or proof["rebuilt_request_generation"] != record["request_generation_after"]
+                    or proof["rebuilt_slot_generations"] != record["slot_generations_after"]
+                    or not proof["fault_monotonic"] < proof["rebuilt_state_monotonic"] <
+                           proof["decode_observed_monotonic"]):
+                raise ValueError("retry_missing_real_reallocation_rebuild_or_history_proof")
+            for key, end in (("fault_to_rebuilt_state_ms", "rebuilt_state_monotonic"),
+                             ("fault_to_first_decode_ms", "decode_observed_monotonic")):
+                if not math.isclose(proof[key], (proof[end] - proof["fault_monotonic"]) * 1000,
+                                    rel_tol=1e-9, abs_tol=1e-6):
+                    raise ValueError("retry_fault_timing_not_bound_to_fault_clock")
+            keys = ("fault_to_rebuilt_state_ms", "fault_to_first_decode_ms", "prefill_forward_ms")
+        for key in keys:
+            value = proof.get(key)
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{experiment_mode}_invalid_timing:{key}")
+    return records
 
 
 def check_shadow_evidence(root, identity):
@@ -137,7 +237,8 @@ def check_m3_online_evidence(root, identity, checkpoints, response):
     bound = validate_checkpoint_plan(consensus, transaction_id=identity["transaction_id"],
                                      lost_rank=lost, recover_tokens=tokens)
     hashes = lambda values: hashlib.sha256(np.asarray(values, dtype="<i8")).hexdigest()
-    oracles = [{"lost_rank": r, "byte_exact": True} for r in range(4)]
+    oracles = ([{"lost_rank": r, "byte_exact": True} for r in range(4)]
+               if identity.get("parity_test_oracle", True) else [])
     for key in ("byte_exact", "checkpoint_committed_before_fault", "used_committed_parity",
                 "target_source_excluded", "fault_injected", "fault_bytes_changed",
                 "writeback_byte_exact", "online_kv_pool_modified"):
@@ -324,7 +425,7 @@ def check_online_evidence(root, identity, checkpoint, response):
             for rank, record in enumerate(records)}
 
 
-def verify_run(root, baseline_response, pause_response, *, online=False):
+def verify_run(root, baseline_response, pause_response, *, online=False, retry=False):
     """Read-only M1 audit of a completed run; never authorizes a live worker."""
     verdict = {"state": "FAIL", "M1": False, "run": str(root.resolve()), "checks": {}}
     checks = verdict["checks"]
@@ -332,7 +433,7 @@ def verify_run(root, baseline_response, pause_response, *, online=False):
         identity = json.loads((root / "identity.json").read_text())
         verdict["transaction_id"] = identity["transaction_id"]
         verdict["coordinator_epoch"] = identity["epoch"]
-        check_evidence(root / "ranks", identity, **({"online": True} if online else {}))
+        check_evidence(root / "ranks", identity, online=online, retry=retry)
         checks["rank_resume_decode_generations_and_release"] = "PASS"
         records = [json.loads((root / "ranks" / f"pause-rank-{rank}.json").read_text())
                    for rank in range(4)]
@@ -392,7 +493,8 @@ def verify_run(root, baseline_response, pause_response, *, online=False):
         with redirect_stdout(io.StringIO()):
             compare([baseline_response, pause_response])
         checks["strict_baseline_match"] = "PASS"
-        verdict.update(state="PASS", M1=True, reason="completed M1 evidence verified; no new GPU experiment performed")
+        verdict.update(state="PASS", M1=not retry,
+                       reason="completed pause evidence verified; no new GPU experiment performed")
     except (OSError, ValueError, KeyError, TypeError, AssertionError) as exc:
         verdict["reason"] = f"{type(exc).__name__}: {exc}"
     return verdict
@@ -455,6 +557,8 @@ def main():
     parser.add_argument("--startup-timeout", type=float, default=600)
     parser.add_argument("--pause-timeout", type=float, default=60)
     parser.add_argument("--output", type=Path, help="exclusive new evidence directory for this run")
+    parser.add_argument("--mode", choices=("baseline", "protection_only", "online_recovery", "prefill_retry"),
+                        help="explicit independent A/B/C/D mode; omitted retains legacy pause/shadow behavior")
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument("--shadow", action="store_true",
                         help="run committed-parity GPU shadow recovery while paused; never live writes")
@@ -465,11 +569,20 @@ def main():
     parser.add_argument("--shadow-evidence", type=Path,
                         help="previous completed shadow run required for --online-restore")
     args = parser.parse_args()
+    if args.mode and (args.shadow or args.online_restore):
+        parser.error("--mode cannot be combined with legacy --shadow/--online-restore")
+    if args.mode == "online_recovery":
+        args.online_restore = True
+    special = args.mode in ("protection_only", "prefill_retry")
+    if args.mode == "prefill_retry" and args.recover_tokens != 256:
+        parser.error("initial D supports only 256 lost tokens and a 768-token prompt")
     if args.online_restore and args.shadow_evidence is None:
         parser.error("--online-restore requires --shadow-evidence (no new shadow experiment)")
-    if args.shadow_evidence is not None and not args.online_restore:
+    if args.shadow_evidence is not None and not (args.online_restore or special):
         parser.error("--shadow-evidence requires --online-restore")
-    if not args.online_restore and (args.lost_rank != 0 or args.recover_tokens != 256):
+    if special and args.shadow_evidence is None:
+        parser.error("B/D require --shadow-evidence for isolated model/source admission")
+    if not (args.online_restore or special) and (args.lost_rank != 0 or args.recover_tokens != 256):
         parser.error("--lost-rank and --recover-tokens require --online-restore")
     if args.verify_run is not None:
         if args.output:
@@ -477,7 +590,26 @@ def main():
         verdict = verify_run(
             args.verify_run,
             args.baseline_response or args.verify_run / "baseline-response.json",
-            args.pause_response or args.verify_run / "pause-response.json", online=args.online_restore)
+            args.pause_response or args.verify_run / "pause-response.json", online=args.online_restore,
+            retry=args.mode == "prefill_retry")
+        if special:
+            try:
+                if verdict["state"] != "PASS":
+                    raise ValueError(f"saved_pause_audit_failed:{verdict.get('reason')}")
+                root = args.verify_run
+                response = json.loads((root / "pause-response.json").read_text())
+                identity = json.loads((root / "identity.json").read_text())
+                if (identity.get("lost_rank"), identity.get("recover_tokens")) != (
+                        args.lost_rank, args.recover_tokens):
+                    raise ValueError("offline_requested_plan_mismatch")
+                checkpoints = json.loads((root / "checkpoints.json").read_text()) if (
+                    root / "checkpoints.json").exists() else []
+                check_experiment_evidence(root / "ranks", identity, checkpoints, response, args.mode)
+                compare([root / "baseline-response.json", root / "pause-response.json"])
+                verdict.update(state="PASS", M1=False, mode=args.mode, EXPERIMENT_PASS=True,
+                               reason="B/D rank-local saved evidence verified, not a new GPU run")
+            except (OSError, ValueError, KeyError, TypeError, AssertionError) as exc:
+                verdict.update(state="FAIL", reason=str(exc))
         if args.online_restore:
             verdict.update(M2_PASS=False, M3_PASS=False)
             if verdict["M1"]:
@@ -578,6 +710,10 @@ def main():
             "--stream-metrics", "--output", str(root / output)], log, env)
 
     verdict = {"state": "FAIL", "transaction_id": tx, "run": str(root), "M1": False}
+    if args.mode:
+        verdict.update(mode=args.mode, GPU_VALIDATED=False)
+    if special:
+        verdict["EXPERIMENT_PASS"] = False
     if args.shadow or args.online_restore:
         verdict.update(M2_PASS=False, SHADOW_PASS=False)
     if args.online_restore:
@@ -588,7 +724,7 @@ def main():
         verdict.update(baseline_port=baseline_port, pause_port=pause_port)
         baseline_url = f"http://127.0.0.1:{baseline_port}"
         pause_url = f"http://127.0.0.1:{pause_port}"
-        admission = admit_online(args.shadow_evidence, args.model) if args.online_restore else None
+        admission = admit_online(args.shadow_evidence, args.model) if args.online_restore or special else None
         if args.shadow and os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") != "0":
             raise ValueError("shadow_mode_forbids_online_restore_environment_flag")
         gpus = args.gpus.split(",")
@@ -633,6 +769,16 @@ def main():
         alive(baseline, "baseline server")
         stop_owned(baseline)
         processes.remove(baseline)
+        if args.mode == "baseline":
+            response = json.loads((root / "baseline-response.json").read_text())
+            performance = dict(mode="baseline", **response["client_metrics_ms"],
+                               model_identifier=args.model, gpu_uuids=[gpu_ids[g] for g in gpus],
+                               input_ids_sha256=response["input_ids_sha256"], sampling=response["sampling"])
+            (root / "performance-baseline.json").write_text(json.dumps(performance, indent=2) + "\n")
+            verdict.update(state="PASS", mode="baseline", GPU_VALIDATED=True, reason="independent real TP4 baseline",
+                           gpu_uuids=[gpu_ids[g] for g in gpus])
+            print(f"PASS baseline; Evidence: {root}", flush=True)
+            return 0
 
         coordinator_args = [
             "serve", "--socket", str(root / "pause.sock"), "--transaction-id", tx,
@@ -642,6 +788,11 @@ def main():
             coordinator_args.append("--require-shadow")
         if args.online_restore:
             coordinator_args.extend(["--require-online", "--lost-rank", str(args.lost_rank),
+                                     "--recover-tokens", str(args.recover_tokens)])
+            if args.mode == "online_recovery":
+                coordinator_args.append("--production-parity")
+        if special:
+            coordinator_args.extend(["--experiment-mode", args.mode, "--lost-rank", str(args.lost_rank),
                                      "--recover-tokens", str(args.recover_tokens)])
         coordinator = spawn("experiments.kv_ec.pause_control", coordinator_args, "coordinator.log", env)
         wait_for(lambda: (root / "pause.sock").exists(), 10, "coordinator startup timeout",
@@ -654,18 +805,26 @@ def main():
                          SGLANG_KV_EC_PAUSE_OUTPUT=str(root / "ranks"),
                          SGLANG_KV_EC_PAUSE_TIMEOUT_S=str(args.pause_timeout),
                          SGLANG_KV_EC_PAUSE_IPC_TIMEOUT_S="0.5")
-        if args.shadow or args.online_restore:
+        if special:
+            pause_env.update(SGLANG_KV_EC_EXPERIMENT_MODE=args.mode,
+                             SGLANG_KV_EC_ISOLATED_TX=tx,
+                             SGLANG_KV_EC_ONLINE_ADMISSION=json.dumps(admission),
+                             SGLANG_KV_EC_LOST_RANK=str(args.lost_rank),
+                             SGLANG_KV_EC_RECOVER_TOKENS=str(args.recover_tokens))
+        if args.shadow or args.online_restore or args.mode == "protection_only":
             from .parity_manager import manager_hello
             manager = spawn("experiments.kv_ec.parity_manager", [
                 "--socket", str(root / "parity.sock"), "--timeout", str(args.pause_timeout),
-                "--test-oracle"], "parity-manager.log", env)
+                *([] if args.mode else ["--test-oracle"])], "parity-manager.log", env)
             wait_for(lambda: (root / "parity.sock").exists(), 10, "parity startup timeout",
                      [(manager, "parity manager")])
             pause_env.update(
-                SGLANG_KV_EC_SHADOW_RESTORE="0" if args.online_restore else "1",
+                SGLANG_KV_EC_SHADOW_RESTORE="1" if args.shadow else "0",
                 SGLANG_KV_EC_ONLINE_RESTORE="1" if args.online_restore else "0",
                 SGLANG_KV_EC_SHADOW_PARITY_SOCKET=str(root / "parity.sock"),
                 SGLANG_KV_EC_SHADOW_MANAGER_EPOCH=manager_hello(root / "parity.sock"))
+            if args.mode:
+                pause_env["SGLANG_KV_EC_PARITY_TEST_ORACLE"] = "0"
             if args.online_restore:
                 pause_env.update(SGLANG_KV_EC_ISOLATED_TX=tx,
                                  SGLANG_KV_EC_ONLINE_ADMISSION=json.dumps(admission),
@@ -683,7 +842,8 @@ def main():
         def all_paused():
             status = control("status")
             return (status["state"] == "PAUSED" and status["paused_ranks"] == [0, 1, 2, 3]
-                    and (not (args.shadow or args.online_restore) or status.get("shadow_ranks") == [0, 1, 2, 3]))
+                    and (not (args.shadow or args.online_restore or special)
+                         or status.get("shadow_ranks") == [0, 1, 2, 3]))
 
         wait_for(all_paused, args.pause_timeout, "four-rank PAUSED timeout",
                  [(coordinator, "coordinator"), (paused_server, "pause server"),
@@ -697,13 +857,41 @@ def main():
         wait_for(lambda: all((root / "ranks" / f"pause-rank-{r}.json").exists()
                             for r in range(4)), 10, "decode evidence timeout",
                  [(paused_server, "pause server"), (coordinator, "coordinator")])
-        check_evidence(root / "ranks", identity, **({"online": True} if args.online_restore else {}))
+        check_evidence(root / "ranks", identity, online=args.online_restore, retry=args.mode == "prefill_retry")
         compare([root / "baseline-response.json", root / "pause-response.json"])
         wait_for(lambda: healthy(pause_url), 10, "post-decode health failed", [(paused_server, "pause server")])
         server_log = (root / "pause-server.log").read_text()
         if "Scheduler hit an exception" in server_log or "Traceback (most recent call last)" in server_log:
             raise RuntimeError("server log contains an exception")
         verdict.update(state="PASS", M1=True, reason="TP4 paused, authorized, decoded; exact 16-token baseline match")
+        if special:
+            audit = verify_run(root, root / "baseline-response.json", root / "pause-response.json",
+                               retry=args.mode == "prefill_retry")
+            if audit["state"] != "PASS":
+                raise ValueError(f"experiment_pause_audit_failed:{audit['reason']}")
+            checkpoints = []
+            if args.mode == "protection_only":
+                from .parity_manager import submit_once
+                checkpoints = [submit_once(root / "parity.sock", {
+                    "kind": "status", "snapshot_id": tx + f"-chunk{i}"}, b"", timeout=2)
+                    for i in range(args.recover_tokens // 256)]
+                (root / "checkpoints.json").write_text(json.dumps(checkpoints, indent=2) + "\n")
+            response = json.loads((root / "pause-response.json").read_text())
+            records = check_experiment_evidence(root / "ranks", identity, checkpoints, response, args.mode)
+            config = dict(
+                admission, lost_rank=args.lost_rank, recover_tokens=args.recover_tokens,
+                gpu_uuids=[gpu_ids[g] for g in gpus], tp=4, dtype="bf16", layout="nhd", page_size=1,
+                overlap=False, prefix_cache=False, input_tokens=768, output_tokens=16,
+                input_ids_sha256=response["input_ids_sha256"], sampling=response["sampling"],
+                torch_version=torch.__version__, cuda_version=torch.version.cuda,
+                parity_test_oracle=False, experiment_source_sha256={
+                    name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                    for name in MEASURED_SOURCES})
+            performance = experiment_performance_record(args.mode, response, records, config=config)
+            (root / f"performance-{args.mode.replace('_', '-')}.json").write_text(
+                json.dumps(performance, indent=2) + "\n")
+            verdict.update(mode=args.mode, EXPERIMENT_PASS=True, GPU_VALIDATED=True, M1=args.mode != "prefill_retry",
+                           output_ids_identical=True, reason="real B/D completed; strict rank proof and baseline token match")
         if args.shadow:
             verdict["recovery_timing_ms_by_rank"] = check_shadow_evidence(root / "ranks", identity)
             from .parity_manager import submit_once
@@ -747,10 +935,18 @@ def main():
                 gpu_uuids=[gpu_ids[g] for g in gpus], tp=4, dtype="bf16", layout="nhd", page_size=1,
                 overlap=False, prefix_cache=False, sampling=response["sampling"],
                 torch_version=torch.__version__, cuda_version=torch.version.cuda,
+                **({"parity_test_oracle": False} if args.mode else {}),
                 experiment_source_sha256={
                     name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                    for name in ("scheduler_shadow.py", "scheduler_pause.py", "pause_control.py",
-                                 "m3_recovery.py", "m3_performance.py", "accept_pause.py")}))
+                    for name in (MEASURED_SOURCES if args.mode else (
+                        "scheduler_shadow.py", "scheduler_pause.py", "pause_control.py",
+                        "m3_recovery.py", "m3_performance.py", "accept_pause.py"))}))
+            if args.mode:
+                ranks = [json.loads((root / "ranks" / f"pause-rank-{r}.json").read_text())
+                         for r in range(4)]
+                first_fault = min(c["fault_monotonic"] for c in target["online"]["chunks"])
+                performance["fault_to_first_decode_ms"] = max(
+                    (r["decode_observed_monotonic"] - first_fault) * 1000 for r in ranks)
             with (root / "performance-online.json").open("x") as handle:
                 json.dump(performance, handle, indent=2)
             verdict.update(M2_PASS=args.lost_rank == 0 and args.recover_tokens == 256, M3_PASS=True,
@@ -758,9 +954,15 @@ def main():
                            checkpoint_committed_before_fault=True, fault_injected=True, fault_bytes_changed=True,
                            used_committed_parity=True, target_source_excluded=True, online_kv_pool_modified=True,
                            writeback_byte_exact=True, decode_observed=True, output_ids_identical=True)
+            if args.mode:
+                verdict["GPU_VALIDATED"] = True
     except (Exception, KeyboardInterrupt) as exc:
         reason = exc.output.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         verdict.update(state="FAIL", reason=f"{type(exc).__name__}: {reason}")
+        if args.mode:
+            verdict["GPU_VALIDATED"] = False
+        if special:
+            verdict["EXPERIMENT_PASS"] = False
         if args.shadow or args.online_restore:
             verdict["SHADOW_PASS"] = False
             verdict["M2_PASS"] = False

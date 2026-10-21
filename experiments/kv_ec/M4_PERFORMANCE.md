@@ -1,5 +1,20 @@
 # M4 Performance Baseline
 
+## Current B/D Development (2026-10-21)
+
+`accept_pause.py --mode` now exposes independent `baseline`,
+`protection_only`, `online_recovery`, and `prefill_retry` runs.
+`m4_abcd.py` is the new unified smoke/three-repeat driver. B and D are
+**implemented and CPU-tested, not yet GPU-accepted** in this environment.
+The archived A/C methodology and measurements below remain unchanged.
+Statements below saying B/D are unimplemented describe that older harness,
+not the new development implementation. See [M4_ABCD.md](M4_ABCD.md) for
+the current safety contract, commands, evidence and explicit GPU blocker.
+
+The latest historical Pilot `/tmp/kv-ec-m4-trials-a2uy7v97` was re-audited:
+12/12 independent A/C trials pass, four configurations with three repeats.
+No new B/D latency or EC-versus-retry speedup is claimed.
+
 ## Scope and Evidence
 
 The M3 correctness matrix `/tmp/kv-ec-m3-matrix-9h4va7t5` is real TP4 GPU
