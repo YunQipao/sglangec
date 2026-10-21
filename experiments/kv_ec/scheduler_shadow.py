@@ -20,7 +20,7 @@ from .parity_manager import (
     COMMITTED, PENDING, _identity, _layout_identity, fetch_parity,
     manager_hello, submit_once,
 )
-from .rank_snapshot import FORMAT, validate_payload
+from .rank_snapshot import FORMAT, validate_payload, validate_payload_structure
 from .snapshot import digest
 from .m5_capture_profile import profile_capture, stage
 from .xor_codec import recover
@@ -135,7 +135,9 @@ def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch,
         completion_dependency="producer_event_then_forward_stream_blocking_d2h",
     )
     with stage("payload_validation"):
-        validate_payload(payload, metadata)
+        # Segment and aggregate digests were produced during the capture scan.
+        # The manager independently performs complete checksum validation.
+        validate_payload_structure(payload, metadata)
     return payload, metadata
 
 
