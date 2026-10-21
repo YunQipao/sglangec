@@ -22,12 +22,9 @@ from .launch_debug import check_port
 from .m3_recovery import (
     ChunkRecoveryProof, M3RecoveryPlan, recovery_ranges, validate_checkpoint_plan,
 )
+from .study_validation import runtime_sources
 
-MEASURED_SOURCES = (
-    "scheduler_shadow.py", "scheduler_pause.py", "scheduler_retry.py", "pause_control.py",
-    "m3_recovery.py", "m3_performance.py", "accept_pause.py",
-    "m5_capture_profile.py", "capture_timing.py",
-)
+MEASURED_SOURCES = runtime_sources()
 
 
 def experiment_performance_record(experiment_mode, response, records, *, config):

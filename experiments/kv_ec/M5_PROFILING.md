@@ -1,5 +1,10 @@
 # M5 Capture Profiling
 
+For the later Hash optimization, completed three-run evidence, independent
+read-only re-audit and incremental performance comparison, see
+[M5_REAUDIT.md](M5_REAUDIT.md). Historical status sections below describe
+the earlier profiling and Slot-optimization stages.
+
 ## Status
 
 The original profiling smoke `/tmp/kv-ec-m5-profile-U3QwOr/smoke` passed

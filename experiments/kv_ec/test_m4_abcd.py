@@ -382,6 +382,7 @@ class StudyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch("sys.argv", [
                 "m4_abcd", "--gpus", "0,1,2,3", "--shadow-evidence", "/prior",
                 "--output", str(Path(tmp) / "new")]), patch(
+                "experiments.kv_ec.m4_abcd.check_live_sources", return_value="fixture"), patch(
                 "experiments.kv_ec.m4_abcd.run_logged", return_value=1) as run:
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 1)

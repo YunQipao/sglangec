@@ -11,11 +11,15 @@ from pathlib import Path
 import os
 import sys
 import tempfile
+import subprocess
 
 from .accept_pause import MEASURED_SOURCES, check_experiment_evidence, verify_run
 from .m4_analysis import audit_case, load, require
 from .m4_trials import run_logged, statistics
 from .request_debug import compare
+from .study_validation import (
+    CONFIG_KEYS, Inconclusive, check_live_sources, compatible_config,
+)
 
 MODES = ("baseline", "protection_only", "online_recovery", "prefill_retry")
 PERFORMANCE = {
@@ -24,13 +28,43 @@ PERFORMANCE = {
     "online_recovery": "performance-online.json",
     "prefill_retry": "performance-prefill-retry.json",
 }
-COMMON_CONFIG = (
-    "lost_rank", "recover_tokens",
-    "model_identifier", "model_sha256", "source_commit", "core_diff_sha256",
-    "gpu_uuids", "tp", "dtype", "layout", "page_size", "overlap", "prefix_cache",
-    "input_tokens", "output_tokens", "input_ids_sha256", "sampling",
-    "torch_version", "cuda_version", "experiment_source_sha256", "parity_test_oracle",
-)
+COMMON_CONFIG = CONFIG_KEYS
+
+
+def preflight_config(args, smoke):
+    """Probe identity only, before any server is launched; never used offline."""
+    import torch
+    import numpy as np
+    from transformers import AutoTokenizer
+    from .debug_capture import source_identity
+    commit = check_live_sources()
+    # Prepared identities may hide a model change; the study must fingerprint
+    # the actual configured files before accepting a previous smoke.
+    if os.environ.get("SGLANG_KV_EC_PREPARED_IDENTITY"):
+        raise ValueError("preflight_forbids_inherited_prepared_identity")
+    tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
+    ids = tokenizer.encode(
+        "KV cache research with artificial public test data. " * 160,
+        add_special_tokens=False)[:768]
+    require(len(ids) == 768, "preflight_input_must_have_768_tokens")
+    config = dict(
+        source_identity(args.model), source_commit=commit,
+        torch_version=torch.__version__, cuda_version=torch.version.cuda,
+        lost_rank=0, recover_tokens=256, tp=4, dtype="bf16", layout="nhd", page_size=1,
+        overlap=False, prefix_cache=False, input_tokens=768, output_tokens=16,
+        input_ids_sha256=hashlib.sha256(np.asarray(ids, dtype="<i8").tobytes()).hexdigest(),
+        sampling=dict(temperature=0, max_new_tokens=16, ignore_eos=True),
+        parity_test_oracle=False,
+        experiment_source_sha256={
+            n: hashlib.sha256(Path(__file__).with_name(n).read_bytes()).hexdigest()
+            for n in MEASURED_SOURCES})
+    listing = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"], text=True)
+    ids = dict(line.strip().split(", ") for line in listing.splitlines())
+    selected = args.gpus.split(",")
+    require(len(selected) == 4 and len(set(selected)) == 4, "requires_four_distinct_GPUs")
+    config["gpu_uuids"] = [ids[g] for g in selected]
+    return config
 
 
 def audit_mode(root, mode):
@@ -48,6 +82,14 @@ def audit_mode(root, mode):
                 "baseline_config_mismatch")
         for key in ("ttft_ms", "tpot_ms", "request_total_ms"):
             require(perf[key] == response["client_metrics_ms"][key], "baseline_timing_mismatch")
+        log = (root / "baseline-server.log").read_text(errors="replace")
+        require(all(f"TP{r}]" in log for r in range(4)) and "Load weight end." in log
+                and "Qwen3ForCausalLM" in log and '"POST /generate HTTP/1.1" 200' in log,
+                "missing_real_baseline_TP4_execution")
+        require(not any(s in log for s in (
+            "Scheduler hit an exception", "Traceback (most recent call last)",
+            "SlotLeaseRejected", "protected_slot_free", "registry_closed")),
+            "failed_baseline_scheduler_or_lease")
         return perf, response
     compare([root / "baseline-response.json", root / "pause-response.json"])
     response = load(root / "pause-response.json")
@@ -126,7 +168,7 @@ def summarize(root):
             if mode == "baseline":
                 baseline_uuids = perf["gpu_uuids"]
             else:
-                current = {k: perf["config"][k] for k in COMMON_CONFIG}
+                current = dict(perf["config"])
                 require(config is None or config == current, "mode_or_repeat_configuration_drift")
                 config = current
                 require(baseline_uuids == config["gpu_uuids"], "baseline_GPU_UUID_mismatch")
@@ -153,8 +195,10 @@ def summarize(root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--gpus", required=True)
-    parser.add_argument("--shadow-evidence", type=Path, required=True)
+    parser.add_argument("--gpus")
+    parser.add_argument("--shadow-evidence", type=Path)
+    parser.add_argument("--verify-study", type=Path,
+                        help="read-only re-audit; never launches CPU tests, servers or GPU jobs")
     parser.add_argument("--repeat", type=int, choices=(1, 3), default=1)
     parser.add_argument("--smoke-evidence", type=Path,
                         help="audited single-run complete A/B/C/D required for repeat=3")
@@ -167,6 +211,18 @@ def main():
     parser.add_argument("--capture-profile", action="store_true",
                         help="M5 capture traces; diagnostic latencies are not production measurements")
     args = parser.parse_args()
+    if args.verify_study:
+        if not args.smoke_evidence or not args.output:
+            parser.error("--verify-study requires --smoke-evidence and --output JSON")
+        from .study_audit import verify_study, write_report
+        report = verify_study(args.verify_study, args.smoke_evidence)
+        write_report(report, args.output)
+        print(f"OFFLINE_REAUDIT={report['state']} report={args.output}")
+        if report.get("reason"):
+            print(report["reason"])
+        return 0 if report["state"] == "PASS" else 1
+    if not args.gpus or not args.shadow_evidence:
+        parser.error("live studies require --gpus and --shadow-evidence")
     if args.capture_profile and args.repeat != 1:
         parser.error("--capture-profile supports only a single diagnostic smoke")
     if args.repeat == 3 and args.smoke_evidence is None:
@@ -179,19 +235,37 @@ def main():
                     modes=MODES, lost_rank=0, recover_tokens=256,
                     source_sha256={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                                    for name in MEASURED_SOURCES})
+    manifest["run_parameters"] = {
+        key: getattr(args, key) for key in (
+            "gpus", "model", "baseline_port", "pause_port", "startup_timeout", "pause_timeout")}
     repo = Path(__file__).resolve().parents[2]
     env = dict(os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
     def save():
         (root / "trials.json").write_text(json.dumps(manifest, indent=2) + "\n")
     save()
     try:
+        if args.repeat == 1:
+            check_live_sources()
         if args.repeat == 3:
             require(load(args.smoke_evidence / "trials.json")["state"] == "PASS", "smoke_not_pass")
             smoke = summarize(args.smoke_evidence)
             require(smoke["repeat"] == 1, "requires_single_run_smoke")
             require(not smoke["capture_profile"], "profiled_smoke_not_performance_admission")
-            require(load(args.smoke_evidence / "trials.json")["source_sha256"] ==
-                    manifest["source_sha256"], "source_changed_since_smoke")
+            saved_parameters = load(args.smoke_evidence / "trials.json").get("run_parameters")
+            if saved_parameters is None:
+                raise Inconclusive("legacy_smoke_missing_launch_parameters_use_offline_reaudit")
+            manifest["smoke_source_equivalence_proof"] = compatible_config(
+                smoke["config"], preflight_config(args, smoke),
+                before_recorded=load(args.smoke_evidence / "trials.json")["source_sha256"],
+                after_recorded=manifest["source_sha256"],
+                before_parameters=saved_parameters,
+                after_parameters=manifest["run_parameters"])
+            for trial in load(args.smoke_evidence / "trials.json")["trials"]:
+                for mode in MODES:
+                    saved = load(Path(trial["run"]) / mode / "acceptance.json")
+                    require(saved["baseline_port"] == args.baseline_port
+                            and saved["pause_port"] == args.pause_port,
+                            "port_configuration_changed_since_smoke")
         code = run_logged(
             [sys.executable, "-m", "unittest", "discover", "-s", "experiments/kv_ec", "-p", "test_*.py", "-v"],
             root / "cpu-regression.log", cwd=repo, env=env, label="CPU")
@@ -223,12 +297,19 @@ def main():
             trial["state"] = "PASS"
             save()
         result = summarize(root)
+        check_live_sources()
         if args.repeat == 3:
-            require(result["config"] == smoke["config"], "configuration_changed_since_smoke")
+            manifest["final_source_equivalence_proof"] = compatible_config(
+                smoke["config"], result["config"],
+                before_recorded=load(args.smoke_evidence / "trials.json")["source_sha256"],
+                after_recorded=manifest["source_sha256"],
+                before_parameters=saved_parameters,
+                after_parameters=manifest["run_parameters"])
         (root / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
         manifest["state"] = "PASS"
     except (Exception, KeyboardInterrupt) as exc:
-        manifest.update(state="FAIL", reason=f"{type(exc).__name__}: {exc}")
+        manifest.update(state="INCONCLUSIVE" if isinstance(exc, Inconclusive) else "FAIL",
+                        reason=f"{type(exc).__name__}: {exc}")
         for trial in manifest["trials"]:
             if trial["state"] == "RUNNING":
                 trial["state"] = "FAIL"

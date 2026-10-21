@@ -1,8 +1,6 @@
 """Audit unprofiled GPU trials and gate repeats on preliminary B/C results."""
 
 import argparse
-from contextlib import redirect_stdout
-import io
 import json
 import math
 from pathlib import Path
@@ -10,8 +8,9 @@ import re
 import statistics
 import subprocess
 
-from .m4_abcd import COMMON_CONFIG, summarize
 from .m4_analysis import load, require
+from .study_audit import validate_completed, verify_study
+from .study_validation import Inconclusive, compare_config_fields
 
 METRICS = {
     "A_request_total_ms": ("baseline", "request_total_ms"),
@@ -33,10 +32,10 @@ def compare_summaries(baseline, candidate, *, min_b_improvement_pct=1., max_c_re
                 "comparison_requires_unprofiled_PASS")
     # Experimental source hashes and commits are intentionally different.
     # Model, hardware, sampling, layout, and dirty inference-source hash are not.
-    for key in COMMON_CONFIG:
-        if key not in ("source_commit", "experiment_source_sha256"):
-            require(baseline["config"][key] == candidate["config"][key],
-                    f"incomparable_config:{key}")
+    try:
+        compare_config_fields(baseline["config"], candidate["config"])
+    except ValueError as exc:
+        raise ValueError(f"incomparable_config:{exc}") from exc
     metrics = {}
     for name, (mode, key) in METRICS.items():
         values = []
@@ -71,11 +70,27 @@ def compare_summaries(baseline, candidate, *, min_b_improvement_pct=1., max_c_re
 
 
 def audited_summary(root):
-    manifest = load(root / "trials.json")
-    require(manifest["state"] == "PASS" and manifest.get("cpu_returncode") == 0,
-            "requires_completed_GPU_run_and_CPU_regression")
-    with redirect_stdout(io.StringIO()):
-        summary = summarize(root)
+    root = Path(root)
+    if root.is_file():
+        saved = load(root)
+        require(saved.get("schema") == "kv-ec-study-reaudit-v1"
+                and saved.get("state") == "PASS", "requires_independent_reaudit_PASS")
+        # A report is not an override: rerun every audit and compare its hashes
+        # and reconstructed values, rejecting stale or hand-edited reports.
+        fresh = verify_study(saved["study"], saved["smoke_evidence"])
+        require(fresh["state"] == "PASS" and fresh == saved, "stale_or_modified_reaudit_report")
+        summary = fresh["reconstructed_summary"]
+        summary = dict(summary, acceptance_origin="completed_run_offline_reaudit_PASS",
+                       original_manifest_state=fresh["original_manifest_state"],
+                       source_validation=fresh["source_equivalence_proof"]["after"])
+        root = Path(saved["study"])
+        manifest = load(root / "trials.json")
+    else:
+        checked = validate_completed(root)
+        summary = dict(checked["summary"], acceptance_origin="original_run_PASS",
+                       original_manifest_state="PASS",
+                       source_validation=checked["source"])
+        manifest = checked["manifest"]
     return summary, [load(Path(trial["run"]) / "baseline" / "baseline-response.json")
                      for trial in manifest["trials"]]
 
@@ -94,7 +109,14 @@ def compare_runs(baseline, candidate, **thresholds):
     result = compare_summaries(before, after, **thresholds)
     result.update(baseline=str(baseline), candidate=str(candidate),
                   baseline_source=before["config"]["experiment_source_sha256"],
-                  candidate_source=after["config"]["experiment_source_sha256"])
+                  candidate_source=after["config"]["experiment_source_sha256"],
+                  baseline_acceptance_origin=before["acceptance_origin"],
+                  candidate_acceptance_origin=after["acceptance_origin"],
+                  candidate_original_manifest_state=after["original_manifest_state"],
+                  baseline_source_proof=before["source_validation"],
+                  candidate_source_proof=after["source_validation"],
+                  inference_tree_equal=(before["source_validation"]["inference_tree"]
+                                        == after["source_validation"]["inference_tree"]))
     return result
 
 
@@ -115,7 +137,8 @@ def main():
         require(args.expect_repeat is None or result["candidate_repeat"] == args.expect_repeat,
                 "unexpected_candidate_repeat_count")
     except (Exception, KeyboardInterrupt) as exc:
-        result = dict(state="FAIL", reason=f"{type(exc).__name__}: {exc}")
+        result = dict(state="INCONCLUSIVE" if isinstance(exc, Inconclusive) else "FAIL",
+                      reason=f"{type(exc).__name__}: {exc}")
     with args.output.open("x") as stream:
         json.dump(result, stream, indent=2)
         stream.write("\n")
