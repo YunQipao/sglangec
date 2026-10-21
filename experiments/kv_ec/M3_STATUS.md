@@ -117,48 +117,50 @@ No raw KV is persisted or uploaded by this acceptance path.
 
 ## Execution Status
 
-Actual run on 2026-10-21, branch `research/online-xor-profiling`, based on
-`afbedc3cb4` with the uncommitted integration changes:
+**M3 real GPU correctness acceptance is complete: 12/12 PASS.**
 
-- Full CPU regression: **197 tests in 148.033s, OK, 9 skips**. Skips are
-  sandbox-restricted real TCP/Unix/socketpair tests, not successful IPC tests.
-- CPU-backed live call-path tests cover all 12 target/range combinations,
-  all three survivor positions for every target (768-token case),
-  noncontiguous physical slots, second-chunk failure rollback, duplicate
-  recovery rejection, plan voting and negative evidence mutations.
-- A=(0,256): **environment preflight FAIL**, NVIDIA-SMI cannot communicate
-  with the driver; no `/dev/nvidia*` devices are exposed. No server,
-  coordinator or parity service was launched; no logical GPU fault occurred.
-- B=(1,256), C=(0,768), and every remaining combination: **NOT_RUN**.
-  No new GPU combination passed. The ordered runner stopped immediately.
-- Read-only historical M2 audit: PASS on
-  `/tmp/kv-ec-pause-accept-ptx_ia1k`. Historical shadow audit: PASS on
-  `/tmp/kv-ec-pause-accept-o1pg2zr8`. These are previous hardware records,
-  not new GPU execution.
+The authoritative run is `/tmp/kv-ec-m3-matrix-9h4va7t5`, executed on
+2026-10-21, approximately 03:35-04:03 UTC. The full CPU regression preceded
+the GPU matrix. This supersedes the earlier sandbox-only preflight failure.
 
-Evidence:
+| Lost Rank | 256 Tokens | 512 Tokens | 768 Tokens |
+| --- | --- | --- | --- |
+| 0 | PASS | PASS | PASS |
+| 1 | PASS | PASS | PASS |
+| 2 | PASS | PASS | PASS |
+| 3 | PASS | PASS | PASS |
+
+The M4 read-only audit reruns the existing M1/M3 verifiers on all 12 cases,
+checks all four rank records and per-chunk checkpoints, corroborates actual
+TP4 CUDA execution with server logs and four GPU UUIDs, and recomputes
+the saved performance values from raw rank evidence. All checks pass.
+Each case has a distinct transaction, independent baseline response file
+and its own baseline server execution. All input hashes, model/software
+fingerprints, GPU UUIDs, inference configuration and sampling match.
+
+M2 default rank0/256 shows no regression. M3-A (dynamic rank) and M3-B
+(multi-chunk recovery) are hardware-complete for the supported 768-token
+single-request workload. CPU fault-injection regressions remain distinct
+from successful real GPU acceptance; GPU negative-path tests are not implied.
+
+Evidence and analysis:
 
 ```text
-/tmp/kv-ec-m3-online-20261021-final/cpu-regression.log
-/tmp/kv-ec-m3-online-20261021-final/matrix.json
-/tmp/kv-ec-m3-online-20261021-final/rank0-tokens256.log
-/tmp/kv-ec-m3-online-20261021-final/rank0-tokens256/acceptance.json
-/tmp/kv-ec-m3-historical-m2-audit-20261021.json
-/tmp/kv-ec-m3-historical-shadow-audit-20261021.json
+/tmp/kv-ec-m3-matrix-9h4va7t5/matrix.json
+/tmp/kv-ec-m3-matrix-9h4va7t5/cpu-regression.log
+/tmp/kv-ec-m3-matrix-9h4va7t5/rank{0,1,2,3}-tokens{256,512,768}/
+/tmp/kv-ec-m4-audit-20261021-final/audit.json
+/tmp/kv-ec-m4-audit-20261021-final/performance.csv
+/tmp/kv-ec-m4-audit-20261021-final/REPORT.md
 ```
 
-There is **no new GPU performance record**: `performance-online.json`
-is written only after successful GPU acceptance. CPU fixture timings must
-not be substituted for real measurements.
+There are 12 real `performance-online.json` files, **one sample per
+configuration**. They are not stable Median/P95 estimates. The audit finds
+only JSON/log artifacts, no persisted raw KV. Code uses local Unix/Gloo
+and loopback HTTP; this is not a historical network-egress attestation.
 
-M2 CPU regression and historical audit show no observed regression, but a
-fresh GPU A rerun is still required. M3-A (dynamic rank) and M3-B (multiple
-chunks) are implemented, **not hardware-complete**. Large A/B/C/D performance
-experiments must not start.
-
-Remaining risks are unverified real CUDA scatter/event behavior, Gloo Gather
-to nonzero target ranks, actual multi-chunk GPU rollback under failures, and
-real IPC/concurrency behavior skipped by this sandbox. Multi-chunk retention
-and protection cost also require hardware measurements. Restore access to a
-GPU-capable, socket-capable environment, verify four idle GPUs, and rerun the
-ordered acceptance before continuing.
+M4 can now begin controlled 3-run A/C pilot measurements. Protection-only B
+and genuine prefill-retry D are not implemented in the M3 acceptance path.
+No complete A/B/C/D comparison or recovery speedup is claimed.
+See `M4_PERFORMANCE.md` for metric boundaries, existing measurements,
+repeatability commands and the safe retry implementation plan.
