@@ -29,20 +29,39 @@ from .m3_recovery import (
 )
 
 
-def checked_buffers(pool, layer, slots):
-    """Resolve actual owner tensors, never calculate offsets from pool size."""
+def _checked_tensor_pair(pool, layer, device):
+    """Resolve every actual owner and layout, independent of slot values."""
     k, v = pool.get_kv_buffer(layer)
     for kind, tensor, owner in (("k", k, pool.k_buffer[layer]),
                                 ("v", v, pool.v_buffer[layer])):
         if (tensor is not owner or tensor.dtype != torch.bfloat16
                 or tensor.ndim != 3 or tuple(tensor.shape[1:]) != (2, 128)
                 or not tensor.is_contiguous() or tuple(tensor.stride()) != (256, 128, 1)
-                or tensor.device != slots.device or slots.dtype != torch.int64
-                or slots.ndim != 1 or slots.numel() != 256
+                or tensor.device != device):
+            raise ValueError(f"unsupported_shadow_tensor_or_mapping:layer={layer}:{kind}")
+    return k, v
+
+
+def checked_buffers(pool, layer, slots):
+    """Recovery/write paths always validate their current slot tensor."""
+    pair = _checked_tensor_pair(pool, layer, slots.device)
+    for kind, tensor in zip(("k", "v"), pair):
+        if (slots.dtype != torch.int64 or slots.ndim != 1 or slots.numel() != 256
                 or int(slots.min()) <= 0 or int(slots.max()) >= tensor.shape[0]
                 or slots.unique().numel() != slots.numel()):
             raise ValueError(f"unsupported_shadow_tensor_or_mapping:layer={layer}:{kind}")
-    return k, v
+    return pair
+
+
+def _capture_slot_bounds(slots):
+    # pack_chunk owns this freshly allocated index tensor. No operation in
+    # capture mutates it; only its values, not any KV data, are checked once.
+    if slots.dtype != torch.int64 or slots.ndim != 1 or slots.numel() != 256:
+        raise ValueError("unsupported_shadow_tensor_or_mapping:capture_slots")
+    minimum, maximum = int(slots.min()), int(slots.max())
+    if minimum <= 0 or slots.unique().numel() != slots.numel():
+        raise ValueError("unsupported_shadow_tensor_or_mapping:capture_slots")
+    return minimum, maximum
 
 
 @profile_capture
@@ -59,12 +78,17 @@ def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch,
     with stage("slot_tensor"):
         slots = torch.tensor(mapping.physical_slots[token_start:token_start + token_count],
                              dtype=torch.int64, device=device)
+    with stage("mapping_and_tensor_checks"):
+        _, slot_maximum = _capture_slot_bounds(slots)
     chunks, records = [], []
     hashes = {kind: hashlib.sha256() for kind in ("k", "v")}
     offset = 0
     for layer in range(36):
         with stage("mapping_and_tensor_checks"):
-            pair = checked_buffers(pool, layer, slots)
+            pair = _checked_tensor_pair(pool, layer, slots.device)
+            for kind, tensor in zip(("k", "v"), pair):
+                if slot_maximum >= tensor.shape[0]:
+                    raise ValueError(f"unsupported_shadow_tensor_or_mapping:layer={layer}:{kind}")
         record = dict(layer_id=layer, dtype="torch.bfloat16", packed_shape={},
                       original_shape={}, source_stride={}, device=str(device))
         for kind, tensor in zip(("k", "v"), pair):
