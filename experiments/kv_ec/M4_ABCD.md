@@ -6,23 +6,26 @@ Branch: `research/online-xor-profiling`. Changes are confined to experiments.
 No inference-source changes, environment upgrades, cross-node work, task
 takeovers, raw KV files or uploaders are introduced.
 
-This implementation is **not GPU-accepted**. On 2026-10-21 this execution
+GPU acceptance status: **A/B/C/D single-run smoke PASS and three-repeat
+study PASS**, from existing evidence `/tmp/kv-ec-abcd-PYvwwJ/`. The later
+GPU run was performed in the user's GPU environment; this current execution
 environment has no `/dev/nvidia*`, and `nvidia-smi` cannot communicate with
-the driver. CPU tests cannot establish GPU byte correctness or performance.
-Three independent GPU repeats must not start until a complete single-run
-A/B/C/D smoke has passed on four idle GPUs.
+the driver. The evidence was audited read-only here. Do not infer GPU
+correctness from CPU tests alone.
 
-CPU regression: **222 tests in 151.963 seconds, OK (9 skipped)**. The skips
-are socket/listener tests denied by this sandbox, not skipped Lease checks.
-New B/D control, no-recovery protection, production-parity reconstruction,
-actual allocator generation/release/protection, stream-history and study
-admission tests pass. Their CPU forward/event surrogates are explicitly
-not real GPU evidence.
-The unified driver's second complete regression also passed: **222 tests
-in 147.248 seconds, OK (9 skipped)**, before it stopped at A's NVIDIA
-preflight. No B/C/D server was started by that driver.
+Latest smoke manifest: `/tmp/kv-ec-abcd-PYvwwJ/smoke/trials.json`.
+All four acceptance records and performance artifacts are present and
+strict `summarize()` audit returns PASS with no measured-source drift.
+The existing three-repeat manifest at
+`/tmp/kv-ec-abcd-PYvwwJ/three/trials.json` also audits PASS. No additional
+three-repeat run was started during this turn.
 
-Current execution evidence: `/tmp/kv-ec-abcd-dev-4mds2A/`.
+Current CPU regression: **224 tests in 148.500 seconds, OK (9 skipped)**;
+log: `/tmp/kv-ec-m4-first-failure-zWdkIZ/cpu-regression.log`. Skips are
+sandbox socket/listener restrictions, not skipped Lease checks. Earlier
+regressions had 222 tests before the two performance-record tests were added.
+
+Earlier preflight evidence: `/tmp/kv-ec-abcd-dev-4mds2A/`.
 `B-smoke/acceptance.json` and `D-smoke/acceptance.json` both report
 `state=FAIL`, `GPU_VALIDATED=false`, `EXPERIMENT_PASS=false`, with the
 NVIDIA driver error. No model server was launched or fault injected.
@@ -30,9 +33,9 @@ NVIDIA driver error. No model server was launched or fault injected.
 are non-sensitive local records. `unified-smoke/` holds the unified
 driver's additional CPU/preflight evidence. No three-repeat study is
 claimed or promoted from these failed preflights.
-`execution-status.json` summarizes both CPU runs, the re-audit, the real
-preflight failures, environment/source metadata and the outstanding GPU
-work. It is not an acceptance PASS.
+`execution-status.json` summarizes the earlier preflight failures and is
+not the acceptance manifest; use the later smoke and three-repeat manifests
+above for current GPU results.
 
 ### B/D Report Construction Fix (2026-10-21)
 
@@ -59,11 +62,11 @@ trial: original acceptance files remain FAIL and were not rewritten.
 The unified smoke correctly stopped at B; the subsequent three-repeat
 study correctly rejected it with `smoke_not_pass`.
 
-Recovery procedure: run a fresh complete A/B/C/D single-repeat smoke in a
-new output directory, then use that successful smoke for the three-repeat
-study. Do not reuse failed output directories, manually promote old
-acceptance, or skip the smoke admission check. No additional standalone
-B/D run is required because the unified smoke includes both modes.
+The later passing smoke and three-repeat study supersede the old failed
+runs as current acceptance results; old FAIL artifacts remain unchanged.
+For a future source change, first run a fresh single-repeat smoke and only
+consider a separately approved repeat study after it passes. Never manually
+promote failed acceptance or skip the smoke admission check.
 
 | Mode | Implementation |
 | --- | --- |
