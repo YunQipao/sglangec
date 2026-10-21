@@ -116,6 +116,31 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual(meta["physical_slots"], list(slots))
         self.assertEqual(meta["slot_generation"], [7] * 256)
 
+    def test_real_layout_packing_selects_requested_independent_chunk(self):
+        raw = torch.arange(1024 * 2 * 128 * 2, dtype=torch.int64).to(torch.uint8)
+        k = raw.view(torch.bfloat16).reshape(1024, 2, 128)
+        v = raw.bitwise_xor(37).view(torch.bfloat16).reshape(1024, 2, 128)
+        pool = NS(k_buffer=[k] * 36, v_buffer=[v] * 36,
+                  get_kv_buffer=lambda layer: (k, v))
+        slots = tuple(range(768, 0, -1))
+        mapping = NS(physical_slots=slots, slot_generations=(9,) * 768, req_pool_idx=1,
+                     req_generation=5, request_version="v1", tp_rank=2)
+        req = NS(rid="fixture", origin_input_ids=list(range(768)))
+        payload, meta = pack_chunk(
+            pool, mapping, req, {}, snapshot_id="cp-chunk1", manager_epoch="epoch",
+            token_start=256, token_count=256)
+        self.assertEqual(meta["token_start"], 256)
+        self.assertEqual(meta["token_count"], 256)
+        self.assertEqual(meta["physical_slots"], list(slots[256:512]))
+        self.assertEqual(meta["slot_generation"], [9] * 256)
+        self.assertEqual(meta["token_ids_sha256"], __import__(
+            "experiments.kv_ec.snapshot", fromlist=["digest"]).digest(
+                np.asarray(req.origin_input_ids[256:512], dtype="<i8")))
+        self.assertEqual(payload.size, 36 * 2 * 256 * 2 * 128 * 2)
+        with self.assertRaisesRegex(ValueError, "256_aligned"):
+            pack_chunk(pool, mapping, req, {}, snapshot_id="bad", manager_epoch="epoch",
+                       token_start=0, token_count=512)
+
     def test_invalid_mapping_stride_or_owner_is_rejected(self):
         tensor = torch.empty((300, 2, 128), dtype=torch.bfloat16)
         pool = NS(k_buffer=[tensor], v_buffer=[tensor], get_kv_buffer=lambda layer: (tensor, tensor))

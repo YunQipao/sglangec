@@ -36,15 +36,23 @@ def checked_buffers(pool, layer, slots):
                 or tensor.device != slots.device or slots.dtype != torch.int64
                 or slots.ndim != 1 or slots.numel() != 256
                 or int(slots.min()) <= 0 or int(slots.max()) >= tensor.shape[0]
-                or slots.unique().numel() != 256):
+                or slots.unique().numel() != slots.numel()):
             raise ValueError(f"unsupported_shadow_tensor_or_mapping:layer={layer}:{kind}")
     return k, v
 
 
-def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch):
-    """Read only mapped chunk 0, in the established rank-bin canonical format."""
+def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch,
+               token_start=0, token_count=256):
+    """Read exactly one 256-token chunk at an explicit prompt offset."""
+    if type(token_start) is not int or type(token_count) is not int:
+        raise ValueError("chunk_range_must_be_integer")
+    if token_count != 256 or token_start < 0 or token_start % 256:
+        raise ValueError("chunk_range_must_be_256_aligned")
+    if token_start + token_count > len(mapping.physical_slots):
+        raise ValueError("chunk_range_exceeds_mapping")
     device = pool.k_buffer[0].device
-    slots = torch.tensor(mapping.physical_slots[:256], dtype=torch.int64, device=device)
+    slots = torch.tensor(mapping.physical_slots[token_start:token_start + token_count],
+                         dtype=torch.int64, device=device)
     chunks, records = [], []
     hashes = {kind: hashlib.sha256() for kind in ("k", "v")}
     offset = 0
@@ -54,7 +62,7 @@ def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch):
                       original_shape={}, source_stride={}, device=str(device))
         for kind, tensor in zip(("k", "v"), pair):
             raw = select_raw_bytes(tensor, slots).cpu().numpy().copy()
-            record["packed_shape"][kind] = [256, 2, 128]
+            record["packed_shape"][kind] = [token_count, 2, 128]
             record["original_shape"][kind] = list(tensor.shape)
             record["source_stride"][kind] = list(tensor.stride())
             record.update({kind + "_offset": offset, kind + "_nbytes": int(raw.size),
@@ -70,12 +78,15 @@ def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch):
         req_pool_idx=mapping.req_pool_idx, req_generation=mapping.req_generation,
         request_version=mapping.request_version, checkpoint_version=snapshot_id,
         manager_epoch=manager_epoch, tp_rank=mapping.tp_rank, tp_size=4,
-        layers=list(range(36)), token_start=0, token_count=256, prompt_token_count=768,
-        token_ids_sha256=digest(np.asarray(req.origin_input_ids[:256], dtype="<i8")),
+        layers=list(range(36)), token_start=token_start, token_count=token_count,
+        prompt_token_count=len(req.origin_input_ids),
+        token_ids_sha256=digest(np.asarray(req.origin_input_ids[token_start:token_start + token_count],
+                                           dtype="<i8")),
         input_ids_sha256=digest(np.asarray(req.origin_input_ids, dtype="<i8")),
         dtype="torch.bfloat16", pool_class=type(pool).__module__ + "." + type(pool).__name__,
-        physical_slots=list(mapping.physical_slots[:256]),
-        slot_generation=list(mapping.slot_generations[:256]), layer_records=records,
+        physical_slots=list(mapping.physical_slots[token_start:token_start + token_count]),
+        slot_generation=list(mapping.slot_generations[token_start:token_start + token_count]),
+        layer_records=records,
         packed_byte_count=int(payload.size), sha256=digest(payload),
         k_sha256=hashes["k"].hexdigest(), v_sha256=hashes["v"].hexdigest(),
         source_unchanged=True, snapshot_completion_status="complete",
@@ -121,7 +132,7 @@ def write_mapped_bytes(pool, slots, buffers):
         if len(sources) != 2:
             raise ValueError("online_write_requires_k_and_v")
         for live, source in zip(pair, sources):
-            if (source.dtype != torch.uint8 or source.shape != (256, 2, 256)
+            if (source.dtype != torch.uint8 or source.shape != (slots.numel(), 2, 256)
                     or source.device != live.device or not source.is_contiguous()
                     or source.untyped_storage().data_ptr() == live.untyped_storage().data_ptr()):
                 raise ValueError("online_write_invalid_or_aliased_source")

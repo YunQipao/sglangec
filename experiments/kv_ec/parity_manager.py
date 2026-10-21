@@ -206,7 +206,8 @@ class ParityManager:
                 raise ValueError("prototype supports 128/256/512 tokens")
             for record in metadata.get("layer_records", []):
                 if (not 0 <= record["layer_id"] < 36 or
-                        any(record["packed_shape"][kind] != [count, 8 // tp, 128] for kind in ("k", "v"))):
+                        any(record["packed_shape"][kind] != [count, 8 // tp, 128]
+                            for kind in ("k", "v"))):
                     raise ValueError("Qwen3 TP-sharded shape required")
         payload = np.asarray(payload)
         if payload.dtype != np.uint8 or payload.ndim != 1:
