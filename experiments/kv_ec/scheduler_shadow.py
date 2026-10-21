@@ -1,7 +1,7 @@
 """Opt-in recovery inside SchedulerPauseGate's existing row/slot lease.
 
 Online writes require an isolated admitted experiment. Parity comes from the
-committed manager; Gloo gathers only survivors, never rank 0's rollback bytes.
+committed manager; Gloo gathers only survivors, never the target's rollback bytes.
 """
 
 from datetime import timedelta
@@ -23,6 +23,9 @@ from .parity_manager import (
 from .rank_snapshot import FORMAT, validate_payload
 from .snapshot import digest
 from .xor_codec import recover
+from .m3_recovery import (
+    ChunkRecoveryProof, M3RecoveryPlan, recovery_ranges, validate_checkpoint_plan,
+)
 
 
 def checked_buffers(pool, layer, slots):
@@ -109,15 +112,20 @@ def validate_checkpoint(status, expected):
         raise ValueError("shadow_requires_four_parity_oracles")
 
 
-def reconstruct(parity, survivors, status, expected):
+def reconstruct(parity, survivors, status, expected, *, lost_rank=0):
     validate_checkpoint(status, expected)
-    if len(survivors) != 3 or digest(parity) != status["parity_sha256"]:
+    if (type(lost_rank) is not int or lost_rank not in range(4)
+            or len(survivors) != 3 or digest(parity) != status["parity_sha256"]):
         raise ValueError("shadow_parity_or_survivor_count_mismatch")
-    for rank, block in enumerate(survivors, 1):
+    ranks = [rank for rank in range(4) if rank != lost_rank]
+    for rank, block in zip(ranks, survivors):
         if (block.dtype != np.uint8 or block.ndim != 1 or block.size != parity.size
                 or digest(block) != status["rank_hashes"][str(rank)]["sha256"]):
             raise ValueError(f"shadow_survivor_version_or_bytes_mismatch:rank={rank}")
-    restored = recover([None, *survivors], parity)
+    blocks = [None] * 4
+    for rank, block in zip(ranks, survivors):
+        blocks[rank] = block
+    restored = recover(blocks, parity)
     validate_payload(restored, expected)
     return restored
 
@@ -157,13 +165,20 @@ def zero_mapped_bytes(pool, slots):
 
 
 class SchedulerShadowRecovery:
-    def __init__(self, socket, manager_epoch, *, online=False):
+    def __init__(self, socket, manager_epoch, *, online=False, lost_rank=0, recover_tokens=256):
         if not Path(socket).is_absolute() or not manager_epoch:
             raise ValueError("shadow_requires_absolute_socket_and_manager_epoch")
         self.socket, self.manager_epoch = socket, manager_epoch
         self.done = False
         self.metadata = self.status = self.event = None
         self.online = online
+        self.ranges = recovery_ranges(recover_tokens)
+        if type(lost_rank) is not int or lost_rank not in range(4):
+            raise ValueError("lost_rank_must_be_0_1_2_or_3")
+        self.lost_rank, self.recover_tokens = lost_rank, recover_tokens
+        self.chunks = []
+        self.modified_chunks = []
+        self.recovery_started = False
         self.protection_mapping = self.survivor = None
         self.protection_timing = {}
         self.rollback = self.recovered = self.slots = None
@@ -181,7 +196,9 @@ class SchedulerShadowRecovery:
                 or not os.environ.get("SGLANG_KV_EC_ONLINE_ADMISSION"))):
             raise ValueError("online_restore_disabled_until_real_shadow_gpu_acceptance")
         return cls(os.environ["SGLANG_KV_EC_SHADOW_PARITY_SOCKET"],
-                   os.environ["SGLANG_KV_EC_SHADOW_MANAGER_EPOCH"], online=online)
+                   os.environ["SGLANG_KV_EC_SHADOW_MANAGER_EPOCH"], online=online,
+                   lost_rank=int(os.environ.get("SGLANG_KV_EC_LOST_RANK", "0")),
+                   recover_tokens=int(os.environ.get("SGLANG_KV_EC_RECOVER_TOKENS", "256")))
 
     def check_online_admission(self, gate):
         admission = json.loads(os.environ["SGLANG_KV_EC_ONLINE_ADMISSION"])
@@ -204,34 +221,42 @@ class SchedulerShadowRecovery:
         fault exists yet. Each rank submits once, then polls without blocking
         the other ranks' event loops or introducing a second lease protocol.
         """
-        if not self.online or self.status is not None:
+        if not self.online or (len(self.chunks) == len(self.ranges)
+                               and all(c.get("status") is not None for c in self.chunks)):
             return True
         self.validate(gate)
         gate._revalidate()
         pool = gate.scheduler.model_worker.model_runner.token_to_kv_pool
-        if self.metadata is None:
+        # Only one pending checkpoint at a time: the manager's original
+        # max_pending=1 remains sufficient, and no rank can race ahead.
+        if not self.chunks or self.chunks[-1].get("status") is not None:
+            start, count = self.ranges[len(self.chunks)]
             if not torch.cuda.is_available() or pool.k_buffer[0].device.type != "cuda":
                 raise ValueError("online_protection_requires_cuda")
             self.check_online_admission(gate)
             self.protection_started = time.monotonic()
             self.protection_mapping = gate.mapping
+            self.protection_timing = {}
             with torch.cuda.stream(gate.scheduler.forward_stream):
                 gate.scheduler.forward_stream.wait_event(gate.event)
                 started = time.perf_counter()
                 payload, self.metadata = pack_chunk(
                     pool, gate.mapping, gate.req, gate.model_identity,
-                    snapshot_id=gate.identity["transaction_id"] + "-chunk0",
-                    manager_epoch=self.manager_epoch)
+                    snapshot_id=gate.identity["transaction_id"] + f"-chunk{start // 256}",
+                    manager_epoch=self.manager_epoch, token_start=start, token_count=count)
                 self.protection_timing["capture_d2h_and_hash_ms"] = (time.perf_counter() - started) * 1000
             started = time.perf_counter()
             result = submit_once(self.socket, self.metadata, payload, timeout=self.timeout(gate))
             if result.get("state") not in (PENDING, COMMITTED):
                 raise ValueError("online_protection_submission_failed")
             self.protection_timing["checkpoint_submit_ms"] = (time.perf_counter() - started) * 1000
-            # Only survivors retain their CPU blocks. Rank 0's payload is not
+            # Only survivors retain their CPU blocks. The target's payload is not
             # retained as a recovery source; its digests/layout remain metadata.
-            if gate.rank != 0:
-                self.survivor = payload
+            self.survivor = payload if gate.rank != self.lost_rank else None
+            self.chunks.append(dict(metadata=self.metadata, survivor=self.survivor,
+                                    timing=self.protection_timing, started=self.protection_started,
+                                    status=None))
+        chunk = self.chunks[-1]
         status = submit_once(self.socket, {"kind": "status", "snapshot_id": self.metadata["snapshot_id"]},
                              b"", timeout=self.timeout(gate))
         if status.get("state") == PENDING:
@@ -240,21 +265,49 @@ class SchedulerShadowRecovery:
         self.status = status
         self.commit_observed = time.monotonic()
         self.protection_timing["protection_total_ms"] = (self.commit_observed - self.protection_started) * 1000
-        gate.evidence["protection"] = dict(
+        self.protection_timing["parity_commit_ms"] = status["parity_commit_ms"]
+        chunk.update(status=status, committed_monotonic=self.commit_observed)
+        protection = dict(
             snapshot_id=self.metadata["snapshot_id"], checkpoint_version=self.metadata["checkpoint_version"],
             manager_epoch=self.manager_epoch, parity_sha256=status["parity_sha256"],
             source_sha256=self.metadata["sha256"], request_version=gate.mapping.request_version,
             layer_records=self.metadata["layer_records"],
             committed_monotonic=self.commit_observed, state=COMMITTED,
             stage="normal_prefill_before_paused_observation", timing_ms=self.protection_timing)
+        protection.update(token_start=self.metadata["token_start"], token_count=256)
+        chunk["protection"] = protection
+        gate.evidence["protection"] = dict(self.chunks[0]["protection"],
+                                         chunks=[c["protection"] for c in self.chunks if c.get("status")])
+        if len(self.chunks) != len(self.ranges):
+            return False
+        self._activate_chunk(self.chunks[0])
         return True
 
-    def consensus_checkpoint(self, gate):
+    def _activate_chunk(self, chunk):
+        self.metadata, self.status = chunk["metadata"], chunk["status"]
+        self.survivor, self.protection_timing = chunk["survivor"], chunk["timing"]
+
+    def chunk_checkpoint(self, gate):
         return dict(snapshot_id=self.metadata["snapshot_id"],
                     checkpoint_version=self.metadata["checkpoint_version"], manager_epoch=self.manager_epoch,
                     parity_sha256=self.status["parity_sha256"], request_hash=gate.evidence["request_hash"],
                     request_version=gate.mapping.request_version,
                     input_ids_sha256=self.metadata["input_ids_sha256"])
+
+    def consensus_checkpoint(self, gate):
+        first = self.chunk_checkpoint(gate)
+        checkpoints = []
+        for chunk in self.chunks:
+            meta, status = chunk["metadata"], chunk["status"]
+            if status is None:
+                raise ValueError("online_requires_all_checkpoints_committed")
+            checkpoints.append(dict(first, snapshot_id=meta["snapshot_id"],
+                                    checkpoint_version=meta["checkpoint_version"],
+                                    parity_sha256=status["parity_sha256"],
+                                    token_start=meta["token_start"], token_count=256))
+        # Keep the chunk0 fields for M2 readers; bind the entire plan as well.
+        return dict(first, lost_rank=self.lost_rank, recover_tokens=self.recover_tokens,
+                    chunk_count=len(checkpoints), chunks=checkpoints)
 
     def fence(self, gate):
         self.event = torch.cuda.Event()
@@ -291,6 +344,99 @@ class SchedulerShadowRecovery:
         # _fatal closes the registry and retains both row and slot ownership.
 
     def run_online(self, gate):
+        if not self.chunks:
+            # Preserve the original missing-checkpoint/CUDA diagnostics.
+            return self._run_online_chunk(gate)
+        if self.done or self.recovery_started or self.write_started or self.modified_chunks:
+            raise ValueError("online_duplicate_recovery_forbidden")
+        self.recovery_started = True
+        plan = M3RecoveryPlan(transaction_id=gate.identity["transaction_id"],
+                              recover_tokens=self.recover_tokens, lost_rank=self.lost_rank,
+                              manager_epoch=self.manager_epoch)
+        checkpoint = self.consensus_checkpoint(gate)
+        validate_checkpoint_plan(checkpoint, transaction_id=gate.identity["transaction_id"],
+                                 lost_rank=self.lost_rank, recover_tokens=self.recover_tokens)
+        results = []
+        try:
+            # Every range and live version must validate before the FIRST fault.
+            seen = set()
+            for chunk in self.chunks:
+                self._activate_chunk(chunk)
+                gate._revalidate()
+                self.validate(gate)
+                slots = self.metadata["physical_slots"]
+                if seen.intersection(slots):
+                    raise ValueError("online_duplicate_physical_slot")
+                seen.update(slots)
+                status = submit_once(self.socket, {"kind": "status", "snapshot_id": self.metadata["snapshot_id"]},
+                                     b"", timeout=self.timeout(gate))
+                validate_checkpoint(status, self.metadata)
+                with torch.cuda.stream(gate.scheduler.forward_stream):
+                    gate.scheduler.forward_stream.wait_event(gate.event)
+                    current, meta = pack_chunk(
+                        gate.scheduler.model_worker.model_runner.token_to_kv_pool,
+                        gate.mapping, gate.req, gate.model_identity,
+                        snapshot_id=self.metadata["snapshot_id"], manager_epoch=self.manager_epoch,
+                        token_start=self.metadata["token_start"])
+                if meta != self.metadata:
+                    raise ValueError("online_live_bytes_or_version_changed_since_protection")
+                del current, meta
+            if not gate._vote(True):
+                raise ValueError("online_all_chunks_prefault_vote_failed")
+            for chunk in self.chunks:
+                self._activate_chunk(chunk)
+                result = self._run_online_chunk(gate)
+                # Survivors may attest only after the target's GPU validation.
+                if not gate._vote(True):
+                    raise ValueError("online_chunk_completion_vote_failed")
+                plan.add(ChunkRecoveryProof(
+                    snapshot_id=self.metadata["snapshot_id"],
+                    checkpoint_version=self.metadata["checkpoint_version"], manager_epoch=self.manager_epoch,
+                    token_start=self.metadata["token_start"], token_count=256, lost_rank=self.lost_rank,
+                    committed_ranks=frozenset(range(4)),
+                    survivor_ranks_used=frozenset(set(range(4)) - {self.lost_rank}),
+                    parity_committed_before_fault=True, parity_version_valid=True,
+                    request_generation_unchanged=True, slot_generations_unchanged=True, layer_count=36,
+                    kv_writeback_byte_exact=True, validation_byte_exact=True))
+                results.append(result)
+            authorization = plan.authorize_resume()
+            self._activate_chunk(self.chunks[0])
+            # Aggregate only recovery costs, never protection or the external
+            # authorize wait. End-to-end fault->decode is recorded separately.
+            timing = {}
+            for result in results:
+                for key, value in result["timing_ms"].items():
+                    timing[key] = timing.get(key, 0.) + value
+            timing["recovery_ms"] = sum(r["timing_ms"]["chunk_recovery_ms"] for r in results)
+            consensus = dict(checkpoint, byte_exact=True, online_kv_pool_modified=True,
+                             checkpoint_committed_before_fault=True, fault_injected=True,
+                             fault_bytes_changed=True, used_committed_parity=True,
+                             target_source_excluded=True, rank0_source_excluded=self.lost_rank == 0,
+                             writeback_byte_exact=True, recovery_plan=authorization)
+            aggregate = dict(results[0], lost_rank=self.lost_rank, recover_tokens=self.recover_tokens,
+                             chunk_count=len(results), chunks=results, consensus=consensus,
+                             timing_ms=timing)
+            gate.evidence["online"] = aggregate
+            return aggregate
+        except BaseException as exc:
+            # Every modified chunk remains referenced for local rollback,
+            # including the failed chunk. Rollback never authorizes resume.
+            pool = gate.scheduler.model_worker.model_runner.token_to_kv_pool
+            outcomes = []
+            for saved in reversed(self.modified_chunks):
+                self.slots, self.rollback = saved["slots"], saved["rollback"]
+                self.rollback_failure(gate, pool, exc)
+                failure = gate.evidence["online"]
+                outcomes.append(dict(physical_slots_sha256=digest(
+                    np.asarray(self.slots.cpu().tolist(), dtype="<i8")),
+                    attempted=failure["rollback_attempted"], byte_exact=failure["rollback_byte_exact"],
+                    failure=failure.get("rollback_failure")))
+            if outcomes:
+                gate.evidence["online"]["rollback_chunks"] = outcomes
+                gate.evidence["online"]["rollback_byte_exact"] = all(o["byte_exact"] for o in outcomes)
+            raise
+
+    def _run_online_chunk(self, gate):
         if not self.online or self.status is None or self.protection_mapping != gate.mapping:
             raise ValueError("online_requires_preexisting_committed_checkpoint_and_mapping")
         if not torch.cuda.is_available():
@@ -305,30 +451,35 @@ class SchedulerShadowRecovery:
         device = pool.k_buffer[0].device
         if device.type != "cuda":
             raise ValueError("online_requires_cuda_pool")
-        self.slots = torch.tensor(gate.mapping.physical_slots[:256], dtype=torch.int64, device=device)
-        timing = dict(self.protection_timing)
-        result = dict(mode="online", tp_rank=gate.rank, device=str(device), recovered_rank=0,
-                      token_start=0, token_count=256, layers=list(range(36)),
+        start = self.metadata["token_start"]
+        self.slots = torch.tensor(gate.mapping.physical_slots[start:start + 256], dtype=torch.int64, device=device)
+        timing = {}
+        chunk_started = time.perf_counter()
+        result = dict(mode="online", tp_rank=gate.rank, device=str(device), recovered_rank=self.lost_rank,
+                      lost_rank=self.lost_rank, token_start=start, token_count=256, layers=list(range(36)),
+                      survivor_ranks_used=[r for r in range(4) if r != self.lost_rank],
                       checkpoint_committed_before_fault=True, used_committed_parity=True,
-                      rank0_source_excluded=True, fault_injected=False, fault_bytes_changed=False,
+                      target_source_excluded=True, rank0_source_excluded=self.lost_rank == 0,
+                      fault_injected=False, fault_bytes_changed=False,
                       rollback_used_for_recovery=False,
                       online_kv_pool_modified=False, writeback_byte_exact=False,
                       original_sha256=self.metadata["sha256"], rollback_byte_exact=False,
                       input_ids_sha256=self.metadata["input_ids_sha256"],
-                      physical_slots_sha256=digest(np.asarray(gate.mapping.physical_slots[:256], dtype="<i8")),
+                      physical_slots_sha256=digest(np.asarray(gate.mapping.physical_slots[start:start + 256], dtype="<i8")),
+                      slot_generations_sha256=digest(np.asarray(gate.mapping.slot_generations[start:start + 256], dtype="<i8")),
                       timing_ms=timing, oracle_checks=self.status["oracle_checks"],
                       timing_clock="perf_counter_wall_ms_except_explicit_cuda_event_ms",
-                      checkpoint=self.consensus_checkpoint(gate))
+                      checkpoint=self.chunk_checkpoint(gate))
         gate.evidence["online"] = result
         try:
             with torch.cuda.stream(gate.scheduler.forward_stream):
                 gate.scheduler.forward_stream.wait_event(gate.event)
                 started = time.perf_counter()
                 current, metadata = pack_chunk(pool, gate.mapping, gate.req, gate.model_identity,
-                    snapshot_id=self.metadata["snapshot_id"], manager_epoch=self.manager_epoch)
+                    snapshot_id=self.metadata["snapshot_id"], manager_epoch=self.manager_epoch, token_start=start)
                 if metadata != self.metadata:
                     raise ValueError("online_live_bytes_or_version_changed_since_protection")
-                if gate.rank != 0 and not np.array_equal(current, self.survivor):
+                if gate.rank != self.lost_rank and not np.array_equal(current, self.survivor):
                     raise ValueError("online_survivor_changed_since_protection")
                 del current, metadata
                 timing["prefault_live_validation_ms"] = (time.perf_counter() - started) * 1000
@@ -339,11 +490,11 @@ class SchedulerShadowRecovery:
                     raise ValueError("online_committed_checkpoint_changed")
                 self.validate(gate)
                 gate._revalidate()
-                # All ranks validate the preexisting checkpoint BEFORE rank 0
+                # All ranks validate the preexisting checkpoint BEFORE the target
                 # can inject. Existing CPU TP voting, not a new state machine.
                 if not gate._vote(True):
                     raise ValueError("online_prefault_vote_failed")
-                if gate.rank == 0:
+                if gate.rank == self.lost_rank:
                     started = time.perf_counter()
                     self.rollback = [tuple(live.detach().view(torch.uint8).index_select(0, self.slots).contiguous()
                                            for live in checked_buffers(pool, layer, self.slots)) for layer in range(36)]
@@ -362,9 +513,13 @@ class SchedulerShadowRecovery:
                     gate._revalidate()
                     self.validate(gate)
                     gate._call("status")
-                    self.fault_monotonic = time.monotonic()
-                    result["fault_monotonic"] = self.fault_monotonic
+                    fault_time = time.monotonic()
+                    chunk_started = time.perf_counter()
+                    if self.fault_monotonic is None:
+                        self.fault_monotonic = fault_time
+                    result["fault_monotonic"] = fault_time
                     self.write_started = self.modified = True
+                    self.modified_chunks.append(dict(slots=self.slots, rollback=self.rollback))
                     result.update(fault_injected=True, online_kv_pool_modified=True)
                     zero_mapped_bytes(pool, self.slots)
                     self.fence(gate)
@@ -378,17 +533,17 @@ class SchedulerShadowRecovery:
                     if changed == 0:
                         raise ValueError("online_fault_did_not_change_bytes")
                     result.update(fault_bytes_changed=True, changed_byte_count=changed)
-                    timing["fault_injection_and_verify_ms"] = (time.monotonic() - self.fault_monotonic) * 1000
+                    timing["fault_injection_and_verify_ms"] = (time.monotonic() - fault_time) * 1000
                 contribution = (torch.zeros(self.metadata["packed_byte_count"], dtype=torch.uint8)
-                                if gate.rank == 0 else torch.from_numpy(self.survivor))
-                gathered = [torch.empty_like(contribution) for _ in range(4)] if gate.rank == 0 else None
+                                if gate.rank == self.lost_rank else torch.from_numpy(self.survivor))
+                gathered = [torch.empty_like(contribution) for _ in range(4)] if gate.rank == self.lost_rank else None
                 started = time.perf_counter()
-                work = torch.distributed.gather(contribution, gather_list=gathered, dst=0,
+                work = torch.distributed.gather(contribution, gather_list=gathered, dst=self.lost_rank,
                                                group=gate.scheduler.tp_cpu_group, async_op=True)
                 if work.wait(timeout=timedelta(seconds=self.timeout(gate))) is False:
                     raise TimeoutError("online_survivor_gather_timeout")
                 timing["survivor_gather_ms"] = (time.perf_counter() - started) * 1000
-                if gate.rank == 0:
+                if gate.rank == self.lost_rank:
                     started = time.perf_counter()
                     exported, parity = fetch_parity(self.socket, self.metadata, timeout=self.timeout(gate))
                     validate_checkpoint(exported, self.metadata)
@@ -396,9 +551,11 @@ class SchedulerShadowRecovery:
                         raise ValueError("online_parity_changed_after_fault")
                     timing["parity_fetch_ms"] = (time.perf_counter() - started) * 1000
                     started = time.perf_counter()
-                    # No rollback argument and no rank 0 payload: only three
+                    # No rollback argument and no target payload: only three
                     # survivors plus the BEFORE-fault committed parity.
-                    restored = reconstruct(parity, [block.numpy() for block in gathered[1:]], exported, self.metadata)
+                    restored = reconstruct(parity, [block.numpy() for rank, block in enumerate(gathered)
+                                                   if rank != self.lost_rank], exported, self.metadata,
+                                           lost_rank=self.lost_rank)
                     timing["xor_and_cpu_verify_ms"] = (time.perf_counter() - started) * 1000
                     metrics = {}
                     tensors, timing["h2d_ms"], timing["recovered_gpu_verify_ms"] = restore_rank_to_gpu(
@@ -420,15 +577,17 @@ class SchedulerShadowRecovery:
                     verify_mapped_bytes(pool, self.slots, self.recovered)
                     verify_mapped_bytes(pool, self.slots, self.rollback)
                     final, final_meta = pack_chunk(pool, gate.mapping, gate.req, gate.model_identity,
-                        snapshot_id=self.metadata["snapshot_id"], manager_epoch=self.manager_epoch)
+                        snapshot_id=self.metadata["snapshot_id"], manager_epoch=self.manager_epoch, token_start=start)
                     if final_meta != self.metadata:
                         raise ValueError("online_final_hash_or_mapping_mismatch")
                     result.update(writeback_byte_exact=True, restored_sha256=digest(final),
-                                  rollback_sha256=rollback_hash.hexdigest())
+                                  rollback_sha256=rollback_hash.hexdigest(),
+                                  layer_validation=[dict(layer_id=layer, k_byte_exact=True, v_byte_exact=True)
+                                                    for layer in range(36)])
                     timing["writeback_gpu_and_hash_verify_ms"] = (time.perf_counter() - started) * 1000
                 else:
                     current, metadata = pack_chunk(pool, gate.mapping, gate.req, gate.model_identity,
-                        snapshot_id=self.metadata["snapshot_id"], manager_epoch=self.manager_epoch)
+                        snapshot_id=self.metadata["snapshot_id"], manager_epoch=self.manager_epoch, token_start=start)
                     if metadata != self.metadata:
                         raise ValueError("online_survivor_changed_during_recovery")
                     result["survivor_unchanged"] = True
@@ -437,13 +596,16 @@ class SchedulerShadowRecovery:
             gate._revalidate()
             result.update(cuda_event_complete=True, request_generation=gate.mapping.req_generation,
                           slot_generations_unchanged=True, mapping_unchanged=True,
-                          consensus=dict(self.consensus_checkpoint(gate), byte_exact=True,
+                          consensus=dict(self.chunk_checkpoint(gate), byte_exact=True,
                               online_kv_pool_modified=True, checkpoint_committed_before_fault=True,
                               fault_injected=True, fault_bytes_changed=True, used_committed_parity=True,
-                              rank0_source_excluded=True, writeback_byte_exact=True))
+                              target_source_excluded=True, rank0_source_excluded=self.lost_rank == 0,
+                              writeback_byte_exact=True))
+            timing["chunk_recovery_ms"] = (time.perf_counter() - chunk_started) * 1000
             return result
         except BaseException as exc:
-            self.rollback_failure(gate, pool, exc)
+            if not self.chunks:
+                self.rollback_failure(gate, pool, exc)
             raise
 
     def timeout(self, gate):

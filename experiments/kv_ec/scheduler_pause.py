@@ -108,6 +108,10 @@ class SchedulerPauseGate:
         for key in ("epoch", "transaction_id"):
             if status.get(key) != self.identity[key]:
                 raise PauseRejected("pause_coordinator_restarted")
+        if self.shadow is not None and getattr(self.shadow, "online", False):
+            if (status.get("lost_rank") != self.shadow.lost_rank
+                    or status.get("recover_tokens") != self.shadow.recover_tokens):
+                raise PauseRejected("pause_coordinator_recovery_plan_changed")
         if status["state"] == "FAILED":
             raise PauseRejected(f"pause_failed:{status.get('failure_reason')}")
         return status
@@ -165,10 +169,17 @@ class SchedulerPauseGate:
                 online_kv_pool_modified=bool(self.shadow and getattr(self.shadow, "modified", False)),
             )
             if self.shadow is not None and getattr(self.shadow, "online", False):
-                self.evidence["online"]["decode_observed_monotonic"] = time.monotonic()
+                decoded = time.monotonic()
+                self.evidence["decode_observed_monotonic"] = decoded
+                self.evidence["online"]["decode_observed_monotonic"] = decoded
                 if self.shadow.fault_monotonic is not None:
                     self.evidence["online"]["timing_ms"]["fault_to_decode_ms"] = (
                         time.monotonic() - self.shadow.fault_monotonic) * 1000
+                for chunk in self.evidence["online"].get("chunks", []):
+                    if chunk.get("fault_injected"):
+                        chunk["decode_observed_monotonic"] = decoded
+                        chunk["timing_ms"]["fault_to_decode_ms"] = (
+                            decoded - chunk["fault_monotonic"]) * 1000
             self._write_evidence()
             if self.pending_path.exists():
                 self.pending_path.unlink()
@@ -450,7 +461,7 @@ class SchedulerPauseGate:
                     key = "online" if getattr(self.shadow, "online", False) else "shadow"
                     self.evidence[key] = self.shadow.run(self)
                     self._revalidate()
-                    # Peers cannot attest to recovery until rank 0 has also
+                    # Peers cannot attest to recovery until the target has also
                     # completed every byte check and its final CUDA event.
                     if not self._vote(True):
                         raise PauseRejected("shadow_completion_vote_failed")

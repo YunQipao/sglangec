@@ -18,6 +18,29 @@ def recovery_ranges(recover_tokens: int) -> tuple[tuple[int, int], ...]:
     return tuple((start, CHUNK_TOKENS) for start in range(0, recover_tokens, CHUNK_TOKENS))
 
 
+def validate_checkpoint_plan(checkpoint, *, transaction_id, lost_rank, recover_tokens):
+    """Validate metadata binding at the coordinator, not GPU execution."""
+    ranges = recovery_ranges(recover_tokens)
+    chunks = checkpoint.get("chunks")
+    if (checkpoint.get("lost_rank") != lost_rank
+            or checkpoint.get("recover_tokens") != recover_tokens
+            or checkpoint.get("chunk_count") != len(ranges)
+            or not isinstance(chunks, list) or len(chunks) != len(ranges)):
+        raise ValueError("online_checkpoint_plan_mismatch")
+    for chunk, (start, count) in zip(chunks, ranges):
+        snapshot = f"{transaction_id}-chunk{start // CHUNK_TOKENS}"
+        if (chunk.get("snapshot_id") != snapshot or chunk.get("checkpoint_version") != snapshot
+                or chunk.get("token_start") != start or chunk.get("token_count") != count
+                or not chunk.get("parity_sha256")
+                or any(not chunk.get(key) or chunk.get(key) != checkpoint.get(key)
+                       for key in ("manager_epoch", "request_hash", "request_version", "input_ids_sha256"))):
+            raise ValueError("online_checkpoint_chunk_mismatch")
+    if any(checkpoint.get(key) != chunks[0].get(key)
+           for key in ("snapshot_id", "checkpoint_version", "parity_sha256")):
+        raise ValueError("online_checkpoint_chunk0_mismatch")
+    return chunks
+
+
 @dataclass(frozen=True)
 class ChunkRecoveryProof:
     snapshot_id: str

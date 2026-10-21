@@ -19,6 +19,9 @@ import uuid
 from .cross_rank_control import request as control_request
 from .request_debug import compare
 from .launch_debug import check_port
+from .m3_recovery import (
+    ChunkRecoveryProof, M3RecoveryPlan, recovery_ranges, validate_checkpoint_plan,
+)
 
 
 def resolve_ports(port=None, baseline_port=None, pause_port=None):
@@ -45,7 +48,7 @@ def check_evidence(root, identity, *, online=False):
             ("allocator_lease_released", True), ("row_protection_released", True),
             ("active_slot_leases_after_release", 0), ("cuda_event_complete", True),
             ("cuda_event_recorded", True),
-            ("online_kv_pool_modified", online and rank == 0), ("failure", None),
+            ("online_kv_pool_modified", online and rank == identity.get("lost_rank", 0)), ("failure", None),
         ):
             if (key not in record or type(record[key]) is not type(expected)
                     or record[key] != expected):
@@ -121,8 +124,132 @@ def check_shadow_evidence(root, identity):
     return {str(rank): record["shadow"]["timing_ms"] for rank, record in enumerate(records)}
 
 
+def check_m3_online_evidence(root, identity, checkpoints, response):
+    """Audit actual rank-local GPU operations, not CPU plan flags alone."""
+    import numpy as np
+    lost, tokens = identity.get("lost_rank", 0), identity.get("recover_tokens", 256)
+    ranges = recovery_ranges(tokens)
+    if not isinstance(checkpoints, list) or len(checkpoints) != len(ranges):
+        raise ValueError("M3_missing_checkpoint_chunks")
+    check_evidence(root, identity, online=True)
+    records = [json.loads((root / f"pause-rank-{rank}.json").read_text()) for rank in range(4)]
+    consensus = records[0]["online"]["consensus"]
+    bound = validate_checkpoint_plan(consensus, transaction_id=identity["transaction_id"],
+                                     lost_rank=lost, recover_tokens=tokens)
+    hashes = lambda values: hashlib.sha256(np.asarray(values, dtype="<i8")).hexdigest()
+    oracles = [{"lost_rank": r, "byte_exact": True} for r in range(4)]
+    for key in ("byte_exact", "checkpoint_committed_before_fault", "used_committed_parity",
+                "target_source_excluded", "fault_injected", "fault_bytes_changed",
+                "writeback_byte_exact", "online_kv_pool_modified"):
+        if consensus.get(key) is not True:
+            raise ValueError(f"M3_missing_consensus:{key}")
+    earliest_fault = min(c["fault_monotonic"] for c in records[lost]["online"]["chunks"])
+    timings = {}
+    for rank, record in enumerate(records):
+        online = record["online"]
+        slots, generations = record["physical_slots_before"], record["slot_generations_before"]
+        if (online.get("consensus") != consensus or online.get("lost_rank") != lost
+                or online.get("recover_tokens") != tokens or online.get("chunk_count") != len(ranges)
+                or len(online.get("chunks", [])) != len(ranges)
+                or len(record.get("protection", {}).get("chunks", [])) != len(ranges)
+                or len(slots) != 768 or len(set(slots)) != 768 or any(s <= 0 for s in slots)
+                or slots != record["physical_slots_after"] or len(generations) != 768
+                or record["coordinator_final"].get("require_online") is not True
+                or record["coordinator_final"].get("shadow_ranks") != list(range(4))
+                or record["coordinator_final"].get("lost_rank") != lost
+                or record["coordinator_final"].get("recover_tokens") != tokens):
+            raise ValueError(f"M3_rank{rank}_plan_mapping_or_coordinator_mismatch")
+        plan = M3RecoveryPlan(transaction_id=identity["transaction_id"], lost_rank=lost,
+                              recover_tokens=tokens, manager_epoch=consensus["manager_epoch"])
+        seen = set()
+        for index, (start, count) in enumerate(ranges):
+            proof = online["chunks"][index]
+            protection = record["protection"]["chunks"][index]
+            checkpoint = checkpoints[index]
+            binding = bound[index]
+            expected_checkpoint = {key: value for key, value in binding.items()
+                                   if key not in ("token_start", "token_count")}
+            if (proof.get("mode") != "online" or proof.get("tp_rank") != rank
+                    or not str(proof.get("device", "")).startswith("cuda")
+                    or proof.get("recovered_rank") != lost or proof.get("lost_rank") != lost
+                    or proof.get("token_start") != start or proof.get("token_count") != count
+                    or proof.get("layers") != list(range(36))
+                    or proof.get("survivor_ranks_used") != [r for r in range(4) if r != lost]
+                    or proof.get("rollback_used_for_recovery") is not False
+                    or proof.get("input_ids_sha256") != response["input_ids_sha256"]
+                    or proof.get("request_generation") != record["request_generation_before"]
+                    or proof.get("checkpoint") != expected_checkpoint
+                    or proof.get("oracle_checks") != oracles
+                    or proof.get("physical_slots_sha256") != hashes(slots[start:start + count])
+                    or proof.get("slot_generations_sha256") != hashes(generations[start:start + count])
+                    or seen.intersection(slots[start:start + count])):
+                raise ValueError(f"M3_rank{rank}_chunk{index}_execution_binding")
+            seen.update(slots[start:start + count])
+            for key in ("cuda_event_complete", "checkpoint_committed_before_fault", "used_committed_parity",
+                        "target_source_excluded", "slot_generations_unchanged", "mapping_unchanged"):
+                if proof.get(key) is not True:
+                    raise ValueError(f"M3_rank{rank}_chunk{index}_missing:{key}")
+            if (checkpoint.get("state") != "COMMITTED" or checkpoint.get("checksum_deferred")
+                    or checkpoint.get("oracle_checks") != oracles
+                    or any(checkpoint.get(key) != binding[key] for key in (
+                        "snapshot_id", "checkpoint_version", "manager_epoch", "parity_sha256",
+                        "request_version", "input_ids_sha256", "token_start", "token_count"))
+                    or protection.get("state") != "COMMITTED"
+                    or protection.get("stage") != "normal_prefill_before_paused_observation"
+                    or not protection["committed_monotonic"] <= record["paused_observation_monotonic"] < earliest_fault
+                    or any(protection.get(key) != binding[key] for key in (
+                        "snapshot_id", "checkpoint_version", "manager_epoch", "parity_sha256",
+                        "request_version", "token_start", "token_count"))
+                    or protection.get("source_sha256") != proof["original_sha256"]
+                    or proof["original_sha256"] != checkpoint["rank_hashes"][str(rank)]["sha256"]
+                    or binding["request_hash"] != record["request_hash"]
+                    or binding["input_ids_sha256"] != response["input_ids_sha256"]):
+                raise ValueError(f"M3_rank{rank}_chunk{index}_protection_or_checkpoint")
+            if rank == lost:
+                if (any(proof.get(key) is not True for key in (
+                        "fault_injected", "fault_bytes_changed", "online_kv_pool_modified", "writeback_byte_exact"))
+                        or proof.get("changed_byte_count", 0) <= 0
+                        or proof.get("restored_sha256") != proof["original_sha256"]
+                        or proof.get("rollback_sha256") != proof["original_sha256"]
+                        or proof.get("rollback_attempted") or proof.get("rollback_byte_exact")
+                        or not record["paused_observation_monotonic"] < proof["fault_monotonic"] <
+                            record["decode_observed_monotonic"]
+                        or proof.get("layer_validation") != [
+                            dict(layer_id=layer, k_byte_exact=True, v_byte_exact=True) for layer in range(36)]):
+                    raise ValueError(f"M3_target_chunk{index}_fault_writeback_or_layer_validation")
+                for key in ("fault_injection_and_verify_ms", "survivor_gather_ms", "parity_fetch_ms",
+                            "xor_and_cpu_verify_ms", "h2d_ms", "h2d_cuda_event_ms", "recovered_gpu_verify_ms",
+                            "kv_writeback_ms", "writeback_gpu_and_hash_verify_ms", "chunk_recovery_ms",
+                            "fault_to_decode_ms"):
+                    value = proof.get("timing_ms", {}).get(key)
+                    if type(value) not in (int, float) or not 0 <= value < float("inf"):
+                        raise ValueError(f"M3_target_chunk{index}_timing:{key}")
+            elif (proof.get("survivor_unchanged") is not True
+                  or any(proof.get(key) is not False for key in (
+                      "fault_injected", "fault_bytes_changed", "online_kv_pool_modified", "writeback_byte_exact"))):
+                raise ValueError(f"M3_rank{rank}_chunk{index}_survivor_modified")
+            for key in ("capture_d2h_and_hash_ms", "checkpoint_submit_ms", "protection_total_ms", "parity_commit_ms"):
+                value = protection.get("timing_ms", {}).get(key)
+                if type(value) not in (int, float) or not 0 <= value < float("inf"):
+                    raise ValueError(f"M3_rank{rank}_chunk{index}_protection_timing:{key}")
+            plan.add(ChunkRecoveryProof(
+                snapshot_id=binding["snapshot_id"], checkpoint_version=binding["checkpoint_version"],
+                manager_epoch=binding["manager_epoch"], token_start=start, token_count=count, lost_rank=lost,
+                committed_ranks=frozenset(range(4)),
+                survivor_ranks_used=frozenset(set(range(4)) - {lost}),
+                parity_committed_before_fault=True, parity_version_valid=True,
+                request_generation_unchanged=True, slot_generations_unchanged=True, layer_count=36,
+                kv_writeback_byte_exact=True, validation_byte_exact=True))
+        if consensus.get("recovery_plan") != plan.authorize_resume():
+            raise ValueError("M3_resume_without_complete_plan")
+        timings[str(rank)] = dict(online["timing_ms"], scheduler_pause_resume_ms=record["pause_ms"])
+    return timings
+
+
 def check_online_evidence(root, identity, checkpoint, response):
     """M2 requires rank-local GPU execution evidence, not just consensus flags."""
+    if isinstance(checkpoint, list):
+        return check_m3_online_evidence(root, identity, checkpoint, response)
     check_evidence(root, identity, online=True)
     import numpy as np
     records = [json.loads((root / f"pause-rank-{rank}.json").read_text()) for rank in range(4)]
@@ -327,11 +454,14 @@ def main():
     parser.add_argument("--pause-port", type=int, help="pause TCP port (default: baseline+1)")
     parser.add_argument("--startup-timeout", type=float, default=600)
     parser.add_argument("--pause-timeout", type=float, default=60)
+    parser.add_argument("--output", type=Path, help="exclusive new evidence directory for this run")
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument("--shadow", action="store_true",
                         help="run committed-parity GPU shadow recovery while paused; never live writes")
     recovery.add_argument("--online-restore", action="store_true",
-                          help="isolated rank0 chunk0 logical fault and real KV restore; default OFF")
+                          help="isolated target-rank logical fault and real per-chunk GPU KV restore; default OFF")
+    parser.add_argument("--lost-rank", type=int, choices=range(4), default=0)
+    parser.add_argument("--recover-tokens", type=int, choices=(256, 512, 768), default=256)
     parser.add_argument("--shadow-evidence", type=Path,
                         help="previous completed shadow run required for --online-restore")
     args = parser.parse_args()
@@ -339,20 +469,36 @@ def main():
         parser.error("--online-restore requires --shadow-evidence (no new shadow experiment)")
     if args.shadow_evidence is not None and not args.online_restore:
         parser.error("--shadow-evidence requires --online-restore")
+    if not args.online_restore and (args.lost_rank != 0 or args.recover_tokens != 256):
+        parser.error("--lost-rank and --recover-tokens require --online-restore")
     if args.verify_run is not None:
+        if args.output:
+            parser.error("--output is only for a new GPU run")
         verdict = verify_run(
             args.verify_run,
             args.baseline_response or args.verify_run / "baseline-response.json",
             args.pause_response or args.verify_run / "pause-response.json", online=args.online_restore)
         if args.online_restore:
-            verdict["M2_PASS"] = False
+            verdict.update(M2_PASS=False, M3_PASS=False)
             if verdict["M1"]:
                 try:
+                    identity = json.loads((args.verify_run / "identity.json").read_text())
+                    if (identity.get("lost_rank", 0) != args.lost_rank
+                            or identity.get("recover_tokens", 256) != args.recover_tokens):
+                        raise ValueError("offline_requested_plan_mismatch")
+                    checkpoints_path = args.verify_run / "checkpoints.json"
+                    checkpoint = json.loads((checkpoints_path if checkpoints_path.exists()
+                                             else args.verify_run / "checkpoint.json").read_text())
                     verdict["recovery_timing_ms_by_rank"] = check_online_evidence(
-                        args.verify_run / "ranks", json.loads((args.verify_run / "identity.json").read_text()),
-                        json.loads((args.verify_run / "checkpoint.json").read_text()),
+                        args.verify_run / "ranks", identity, checkpoint,
                         json.loads((args.pause_response or args.verify_run / "pause-response.json").read_text()))
-                    verdict.update(M2_PASS=True, reason="online fault recovery verified from saved GPU evidence")
+                    verdict.update(M2_PASS=args.lost_rank == 0 and args.recover_tokens == 256,
+                                   M3_PASS=isinstance(checkpoint, list), lost_rank=args.lost_rank,
+                                   recover_tokens=args.recover_tokens, chunk_count=args.recover_tokens // 256,
+                                   reason="online fault recovery verified from saved GPU evidence")
+                    if isinstance(checkpoint, list):
+                        verdict["chunks"] = json.loads((args.verify_run / "ranks" /
+                                                       f"pause-rank-{args.lost_rank}.json").read_text())["online"]["chunks"]
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     verdict.update(state="FAIL", reason=str(exc))
         if args.shadow:
@@ -377,7 +523,11 @@ def main():
         return 0 if verdict["state"] == "PASS" else 1
     if args.baseline_response or args.pause_response or args.report:
         parser.error("--baseline-response, --pause-response and --report require --verify-run")
-    root = Path(tempfile.mkdtemp(prefix="kv-ec-pause-accept-"))
+    if args.output is None:
+        root = Path(tempfile.mkdtemp(prefix="kv-ec-pause-accept-"))
+    else:
+        root = args.output.resolve()
+        root.mkdir(parents=True, exist_ok=False)
     tx = "pause-" + uuid.uuid4().hex
     print(f"RUN={root}\nTX={tx}", flush=True)
     processes, logs = [], []
@@ -430,6 +580,9 @@ def main():
     verdict = {"state": "FAIL", "transaction_id": tx, "run": str(root), "M1": False}
     if args.shadow or args.online_restore:
         verdict.update(M2_PASS=False, SHADOW_PASS=False)
+    if args.online_restore:
+        verdict.update(M3_PASS=False, lost_rank=args.lost_rank, recover_tokens=args.recover_tokens,
+                       chunk_count=args.recover_tokens // 256)
     try:
         baseline_port, pause_port = resolve_ports(args.port, args.baseline_port, args.pause_port)
         verdict.update(baseline_port=baseline_port, pause_port=pause_port)
@@ -488,7 +641,8 @@ def main():
         if args.shadow:
             coordinator_args.append("--require-shadow")
         if args.online_restore:
-            coordinator_args.append("--require-online")
+            coordinator_args.extend(["--require-online", "--lost-rank", str(args.lost_rank),
+                                     "--recover-tokens", str(args.recover_tokens)])
         coordinator = spawn("experiments.kv_ec.pause_control", coordinator_args, "coordinator.log", env)
         wait_for(lambda: (root / "pause.sock").exists(), 10, "coordinator startup timeout",
                  [(coordinator, "coordinator")])
@@ -514,7 +668,9 @@ def main():
                 SGLANG_KV_EC_SHADOW_MANAGER_EPOCH=manager_hello(root / "parity.sock"))
             if args.online_restore:
                 pause_env.update(SGLANG_KV_EC_ISOLATED_TX=tx,
-                                 SGLANG_KV_EC_ONLINE_ADMISSION=json.dumps(admission))
+                                 SGLANG_KV_EC_ONLINE_ADMISSION=json.dumps(admission),
+                                 SGLANG_KV_EC_LOST_RANK=str(args.lost_rank),
+                                 SGLANG_KV_EC_RECOVER_TOKENS=str(args.recover_tokens))
         paused_server = server("pause", pause_env)
         paused_client = client(env, "kv-ec-pause-request", "pause-response.json", "pause-client.log", pause_url)
 
@@ -572,15 +728,35 @@ def main():
                 raise ValueError(f"online_M1_audit_failed:{audit['reason']}")
             verdict["checks"] = audit["checks"]
             from .parity_manager import submit_once
-            checkpoint = submit_once(root / "parity.sock", {
-                "kind": "status", "snapshot_id": tx + "-chunk0"}, b"", timeout=2)
+            checkpoints = [submit_once(root / "parity.sock", {
+                "kind": "status", "snapshot_id": tx + f"-chunk{index}"}, b"", timeout=2)
+                for index in range(args.recover_tokens // 256)]
+            checkpoint = checkpoints[0]
             with (root / "checkpoint.json").open("x") as handle:
                 json.dump(checkpoint, handle, indent=2)
+            with (root / "checkpoints.json").open("x") as handle:
+                json.dump(checkpoints, handle, indent=2)
             response = json.loads((root / "pause-response.json").read_text())
-            verdict["recovery_timing_ms_by_rank"] = check_online_evidence(root / "ranks", identity, checkpoint, response)
-            verdict.update(M2_PASS=True, reason="GPU online fault/writeback byte-exact; original decode matches baseline",
+            verdict["recovery_timing_ms_by_rank"] = check_online_evidence(root / "ranks", identity, checkpoints, response)
+            target = json.loads((root / "ranks" / f"pause-rank-{args.lost_rank}.json").read_text())
+            verdict["chunks"] = target["online"]["chunks"]
+            from .m3_performance import online_record
+            performance = online_record(target, response, config=dict(
+                admission, lost_rank=args.lost_rank, recover_tokens=args.recover_tokens,
+                input_ids_sha256=response["input_ids_sha256"], input_tokens=768, output_tokens=16,
+                gpu_uuids=[gpu_ids[g] for g in gpus], tp=4, dtype="bf16", layout="nhd", page_size=1,
+                overlap=False, prefix_cache=False, sampling=response["sampling"],
+                torch_version=torch.__version__, cuda_version=torch.version.cuda,
+                experiment_source_sha256={
+                    name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                    for name in ("scheduler_shadow.py", "scheduler_pause.py", "pause_control.py",
+                                 "m3_recovery.py", "m3_performance.py", "accept_pause.py")}))
+            with (root / "performance-online.json").open("x") as handle:
+                json.dump(performance, handle, indent=2)
+            verdict.update(M2_PASS=args.lost_rank == 0 and args.recover_tokens == 256, M3_PASS=True,
+                           reason="GPU online fault/writeback byte-exact; original decode matches baseline",
                            checkpoint_committed_before_fault=True, fault_injected=True, fault_bytes_changed=True,
-                           used_committed_parity=True, rank0_source_excluded=True, online_kv_pool_modified=True,
+                           used_committed_parity=True, target_source_excluded=True, online_kv_pool_modified=True,
                            writeback_byte_exact=True, decode_observed=True, output_ids_identical=True)
     except (Exception, KeyboardInterrupt) as exc:
         reason = exc.output.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
@@ -588,6 +764,8 @@ def main():
         if args.shadow or args.online_restore:
             verdict["SHADOW_PASS"] = False
             verdict["M2_PASS"] = False
+            if args.online_restore:
+                verdict["M3_PASS"] = False
     finally:
         for process in reversed(processes):
             stop_owned(process)
@@ -598,6 +776,9 @@ def main():
     print(f"{verdict['state']}: {verdict['reason']}\nEvidence: {root}", flush=True)
     if args.shadow or args.online_restore:
         print(f"SHADOW_PASS={str(verdict['SHADOW_PASS']).lower()}\nM2_PASS={str(verdict['M2_PASS']).lower()}\nreason={verdict['reason']}")
+    if args.online_restore:
+        print(f"M3_PASS={str(verdict['M3_PASS']).lower()}\nlost_rank={args.lost_rank}\n"
+              f"recover_tokens={args.recover_tokens}\nchunk_count={args.recover_tokens // 256}")
     return 0 if verdict["state"] == "PASS" else 1
 
 
