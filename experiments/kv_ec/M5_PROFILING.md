@@ -2,11 +2,21 @@
 
 ## Status
 
-Instrumentation and read-only evidence inventory are implemented. No
-capture optimization, asynchronous protection, reduced safety checks or
-speedup is claimed. Real M5 GPU measurements are blocked in this execution
-environment: `nvidia-smi` cannot communicate with the NVIDIA driver.
-Do not choose a production optimization from CPU fixtures or mixed timers.
+The original profiling smoke `/tmp/kv-ec-m5-profile-U3QwOr/smoke` passed
+A/B/C/D on real GPUs. Its profiled request latencies are NOT performance
+comparisons against unprofiled M4.
+
+The first capture optimization is implemented in commit `da729bea19`:
+validate the fresh, capture-local immutable Slot tensor's min/max/unique
+once per capture instead of 72 times. Every K/V owner, layout, dtype,
+device and individual capacity bound remains checked. Recovery/write paths
+retain their immediate mapping checks. No KV bytes, hashes, mapping
+identity, checkpoint layout, Lease, Event or Scheduler protocol changes.
+No asynchronous protection is introduced.
+
+Current execution environment cannot communicate with the NVIDIA driver.
+No post-optimization GPU PASS or speedup is claimed; check the GPU once,
+then run the commands below in the real four-GPU environment.
 
 The original M4 evidence `/tmp/kv-ec-abcd-PYvwwJ/` is unchanged.
 The pre-M5 experiment sources are archived from commit
@@ -18,7 +28,7 @@ The archive contains experiment source only, not model weights or KV bytes.
 Use the saved M4 measured-source hashes to identify its GPU revision;
 the archive commit includes later experiment-only work.
 
-Current validation:
+Instrumentation-stage validation (before the optimization):
 
 - Targeted CPU: 37 tests, OK (1 skipped).
 - Full CPU: 231 tests in 154.612 seconds, OK (9 skipped).
@@ -135,16 +145,87 @@ Read-only legacy baseline inventory (output must not already exist):
   --output /tmp/kv-ec-m5-original-m4-inventory.json
 ```
 
-## Next Gate
+## First Optimization
 
-After a real profiled 4/4 PASS, identify the largest exclusive cost and
-implement only one optimization. Candidates include batching the existing
-72 transfers, pinned asynchronous capture with completed producer/copy
-events, or avoiding measured redundant CPU materialization. None is yet
-selected. Any asynchronous design must bound queued bytes/checkpoints,
-retain source leases until reads complete, fail closed on worker errors
-and never announce protection before COMMITTED.
+Real B profiling, median over eight capture invocations (four ranks,
+initial protection plus source recheck): mapping/tensor checks 47.841 ms,
+segment hashes 59.752 ms, payload hash 26.103 ms, full payload validation
+81.142 ms, gather host 11.312 ms and D2H host 11.324 ms.
+An inspected original trace contains 72 `aten::min`, 72 `aten::max`,
+72 `aten::_unique2`, and 289 `cudaStreamSynchronize` events. Device
+gather-kernel duration is about 0.091 ms and all capture D2H activities
+about 1.119 ms, including scalar mapping-check readbacks. These device
+durations overlap enclosing host scopes and cannot be added to them.
 
-Re-run full CPU and real GPU correctness, then compare an **unprofiled**
-single-run smoke against M4 with identical model, GPU UUIDs, prompt, sampler
-and output. No optimization-before/after GPU comparison exists yet.
+The selected change removes duplicate GPU reductions/synchronizations,
+not a necessary predicate. The captured Slot tensor is created privately
+inside `pack_chunk` and never mutated or published. Its verified extrema
+and uniqueness are valid throughout that one call only; each new capture
+recomputes them. The maximum is checked against every layer's K and V
+capacity, not against a representative pool tensor. No GPU payload buffer
+is added. Actual GPU peak memory is not measured by the M4 schema.
+
+Hashing remains intentionally unchanged: segment/aggregate hashes are
+computed during capture and recomputed during payload validation; the
+manager also validates its owned bytes. These remain a substantial next
+candidate, but removing them needs a separate equivalence argument.
+The 72 payload gathers and blocking D2H copies are also unchanged.
+
+`test_m5_capture_optimization.py` verifies exactly one min/max/unique,
+canonical bytes, hashes and XOR parity, rejection of invalid/freshly changed
+mappings, late-layer ownership/layout/capacity, and recovery-side rejection
+of a Slot tensor modified after capture.
+
+Optimization validation: targeted capture/shadow/profiling 26 tests OK;
+comparison policy 4 tests OK; full CPU regression **239 tests in 149.599
+seconds, OK (9 skipped)**. Full log:
+`/tmp/kv-ec-m5-opt-validation-CYjMNb/cpu-regression.log`.
+Skips are sandbox socket restrictions, not Lease/Event checks.
+The comparison CLI successfully re-audited old M4 against itself without
+claiming improvement and rejected the real profiled smoke as a performance
+candidate. No GPU run was attempted after the one failed driver check.
+
+## Unprofiled Validation
+
+Run from the repo root; no Profiler flag. The driver runs full CPU tests
+before checking GPU idleness, correctness and four-rank lifecycle proofs.
+Never reuse an existing output directory.
+
+```bash
+PY=/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python
+RUNS=$(mktemp -d /tmp/kv-ec-m5-opt-XXXXXX)
+echo "Evidence: $RUNS"
+"$PY" -u -m experiments.kv_ec.m4_abcd \
+  --gpus 0,1,2,3 --shadow-evidence /tmp/kv-ec-pause-accept-o1pg2zr8 \
+  --repeat 1 --output "$RUNS/smoke"
+```
+
+Only run repeats if the strict comparison and preliminary benefit gate pass:
+
+```bash
+"$PY" -m experiments.kv_ec.m5_compare \
+  --candidate "$RUNS/smoke" --expect-repeat 1 \
+  --output "$RUNS/smoke-comparison.json" --require-positive &&
+"$PY" -u -m experiments.kv_ec.m4_abcd \
+  --gpus 0,1,2,3 --shadow-evidence /tmp/kv-ec-pause-accept-o1pg2zr8 \
+  --repeat 3 --smoke-evidence "$RUNS/smoke" --output "$RUNS/three"
+```
+
+Automatic final audit/comparison, retaining negative results:
+
+```bash
+"$PY" -m experiments.kv_ec.m5_compare \
+  --candidate "$RUNS/three" --expect-repeat 3 \
+  --output "$RUNS/three-comparison.json" --require-positive
+```
+
+Default baseline is `/tmp/kv-ec-abcd-PYvwwJ/three`. The comparison re-audits
+real GPU artifacts, CPU completion, cross-revision tokens, GPU UUIDs,
+model/sampling/layout/software configuration and unchanged inference
+sources. Profiled evidence is rejected. Default repeat gate requires
+B blocking and B-minus-A request overhead to improve by more than 1%,
+with C fault-to-decode and total time regressing by no more than 5%.
+These are explicit admission heuristics, not statistical significance.
+Single-run gains are preliminary; three runs are still a pilot.
+GPU memory peak and CPU thread-time improvement remain unmeasured until
+comparable new data exist. No second capture optimization was bundled.
