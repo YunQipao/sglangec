@@ -1,0 +1,18 @@
+{
+  "state": "PASS",
+  "transaction_id": "pause-a34fa863c45b4e7dacefba7133db25a8",
+  "run": "/tmp/kv-ec-m5-next-2Yab76/smoke/repeat1/prefill_retry",
+  "M1": false,
+  "capture_profile": false,
+  "mode": "prefill_retry",
+  "GPU_VALIDATED": true,
+  "EXPERIMENT_PASS": true,
+  "baseline_port": 30359,
+  "pause_port": 30360,
+  "port_checks": {
+    "baseline": "available",
+    "pause": "available_with_reuseaddr (no listener; consistent with TIME_WAIT)"
+  },
+  "reason": "real B/D completed; strict rank proof and baseline token match",
+  "output_ids_identical": true
+}
