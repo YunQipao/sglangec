@@ -1,0 +1,25 @@
+{
+  "transaction_id": "pause-abcf30b055544c53a4b4c24ba7c62e3c",
+  "epoch": "19deb254-25cb-4048-8a0e-0f7f3567e0dc",
+  "state": "PAUSED",
+  "failure_reason": null,
+  "paused_ranks": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "validated_ranks": [],
+  "released_ranks": [],
+  "armed_ranks": [],
+  "require_shadow": true,
+  "shadow_ranks": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "require_online": true,
+  "lost_rank": 1,
+  "recover_tokens": 256
+}

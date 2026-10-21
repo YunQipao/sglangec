@@ -1,0 +1,132 @@
+{
+  "mode": "online_recovery",
+  "config": {
+    "model_identifier": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+    "model_sha256": "7b9847a1e1530259c3b60505e32f1c8aa99ca20bd26c8de4ac5ede00262cc347",
+    "source_commit": "aba05b1e27bfdb763a41aed9dc012fdbfb7cb019",
+    "core_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost_rank": 3,
+    "recover_tokens": 768,
+    "input_ids_sha256": "c7d0884c059a295b8b3352d41ef73584361c1906f46c08e0e3a81c614b90bb0f",
+    "input_tokens": 768,
+    "output_tokens": 16,
+    "gpu_uuids": [
+      "GPU-264e0c1d-84a1-6c4b-1dc9-2642b67bd1e6",
+      "GPU-ef4e2292-6328-13af-3198-a1ed9198d3c4",
+      "GPU-a6984ac4-fa44-c087-7069-734b7e0482a0",
+      "GPU-dc33e507-c67b-85a8-4ed9-37c7e92f7c14"
+    ],
+    "tp": 4,
+    "dtype": "bf16",
+    "layout": "nhd",
+    "page_size": 1,
+    "overlap": false,
+    "prefix_cache": false,
+    "sampling": {
+      "temperature": 0,
+      "max_new_tokens": 16,
+      "ignore_eos": true
+    },
+    "torch_version": "2.13.0+cu130",
+    "cuda_version": "13.0",
+    "experiment_source_sha256": {
+      "scheduler_shadow.py": "e00fb7e5f29bcc312fe007bbc5d9a4ce18c98c98487c93812687c29f8cfa3950",
+      "scheduler_pause.py": "d89a1de7507d90d33caccdb3ed7acc4cea05c77c32e4a3ea41ca6e896d0c9f8a",
+      "pause_control.py": "a921e6e171d440e7141d33eb34b15989a14d954b290a489ff99c3c9ba16042c6",
+      "m3_recovery.py": "7e03364c5029ab969aeccb6404106a7b3346542cc4c9fe4ad279156bbe9716dd",
+      "m3_performance.py": "c0fa3e80e9acfe14c672c79ccce9d633e3dd79640f87b17e3d1bbe730753301b",
+      "accept_pause.py": "d8f3e8aa300683adf9ffc5d4b3190e7c65a7bd94bc943471165e2595dbd50393"
+    }
+  },
+  "request_total_ms": 6009.500258136541,
+  "ttft_ms": 212.2649170923978,
+  "tpot_ms": 386.4823560696095,
+  "note": "client streaming TTFT and amortized TPOT, includes HTTP/SSE overhead",
+  "protection_overhead_ms": 1371.0729682352394,
+  "parity_commit_ms": 1010.6721750926226,
+  "recovery_ms": 1476.3239677995443,
+  "cpu_xor_ms": 436.58388685435057,
+  "gather_ms": 165.03700707107782,
+  "h2d_ms": 35.154700999999996,
+  "kv_writeback_ms": 22.183937020599842,
+  "validation_ms": 569.1495720799243,
+  "fault_to_decode_ms": 2243.664658162743,
+  "chunks": [
+    {
+      "token_start": 0,
+      "snapshot_id": "pause-305066def39a442696f60ff48246940c-chunk0",
+      "recovery_timing_ms": {
+        "prefault_live_validation_ms": 138.86134093627334,
+        "rollback_capture_ms": 37.76537301018834,
+        "fault_injection_and_verify_ms": 45.17234512604773,
+        "survivor_gather_ms": 73.94415815360844,
+        "parity_fetch_ms": 42.83219715580344,
+        "xor_and_cpu_verify_ms": 145.68191999569535,
+        "h2d_ms": 11.654499999999999,
+        "recovered_gpu_verify_ms": 7.103669000000003,
+        "h2d_cuda_event_ms": 5.660319991409779,
+        "kv_writeback_ms": 7.385749835520983,
+        "writeback_gpu_and_hash_verify_ms": 191.1817779764533,
+        "chunk_recovery_ms": 540.3189428616315,
+        "fault_to_decode_ms": 2243.6636979691684
+      },
+      "protection_timing_ms": {
+        "capture_d2h_and_hash_ms": 236.65583902038634,
+        "checkpoint_submit_ms": 130.09152794256806,
+        "protection_total_ms": 473.24502817355096,
+        "parity_commit_ms": 92.68419095315039
+      }
+    },
+    {
+      "token_start": 256,
+      "snapshot_id": "pause-305066def39a442696f60ff48246940c-chunk1",
+      "recovery_timing_ms": {
+        "prefault_live_validation_ms": 139.4741740077734,
+        "rollback_capture_ms": 38.82784093730152,
+        "fault_injection_and_verify_ms": 22.738466039299965,
+        "survivor_gather_ms": 46.259431866928935,
+        "parity_fetch_ms": 40.799590991809964,
+        "xor_and_cpu_verify_ms": 145.678938832134,
+        "h2d_ms": 11.729296000000001,
+        "recovered_gpu_verify_ms": 6.764582000000001,
+        "h2d_cuda_event_ms": 5.665696024894714,
+        "kv_writeback_ms": 7.3512461967766285,
+        "writeback_gpu_and_hash_verify_ms": 178.9174140430987,
+        "chunk_recovery_ms": 472.6707038935274,
+        "fault_to_decode_ms": 1494.5570409763604
+      },
+      "protection_timing_ms": {
+        "capture_d2h_and_hash_ms": 179.0310051292181,
+        "checkpoint_submit_ms": 128.2932530157268,
+        "protection_total_ms": 436.24217598699033,
+        "parity_commit_ms": 468.0387950502336
+      }
+    },
+    {
+      "token_start": 512,
+      "snapshot_id": "pause-305066def39a442696f60ff48246940c-chunk2",
+      "recovery_timing_ms": {
+        "prefault_live_validation_ms": 137.06992799416184,
+        "rollback_capture_ms": 36.876138066872954,
+        "fault_injection_and_verify_ms": 22.568359971046448,
+        "survivor_gather_ms": 44.83341705054045,
+        "parity_fetch_ms": 33.96240598522127,
+        "xor_and_cpu_verify_ms": 145.2230280265212,
+        "h2d_ms": 11.770904999999996,
+        "recovered_gpu_verify_ms": 7.210036999999998,
+        "h2d_cuda_event_ms": 5.700607985258102,
+        "kv_writeback_ms": 7.446940988302231,
+        "writeback_gpu_and_hash_verify_ms": 177.97209206037223,
+        "chunk_recovery_ms": 463.33432104438543,
+        "fault_to_decode_ms": 813.0593509413302
+      },
+      "protection_timing_ms": {
+        "capture_d2h_and_hash_ms": 207.74860703386366,
+        "checkpoint_submit_ms": 127.49820598401129,
+        "protection_total_ms": 461.5857640746981,
+        "parity_commit_ms": 449.94918908923864
+      }
+    }
+  ],
+  "timing_note": "recovery_ms excludes protection, external authorization wait and decode; fault_to_decode_ms includes automatic coordinator/resume/decode latency"
+}
