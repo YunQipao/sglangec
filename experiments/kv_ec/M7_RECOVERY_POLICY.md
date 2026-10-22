@@ -15,13 +15,17 @@ pure function over checkpoint state, fault rank, token range, request
 lifecycle, Row/Slot Generation, Manager Epoch, and four-rank readiness. It
 does not inspect or retain KV bytes.
 
-The current post-Resume hook cannot safely execute the existing 768-token
-Prefill Retry transaction after decode has been observed: replay would cross
-the normal scheduler handoff and could duplicate output. Therefore
-pre-`COMMITTED` failures are recorded as `PREFILL_RETRY`-eligible by the pure
-policy and then converted to `FAIL_CLOSED` by the hook with reason
-`prefill_retry_unsupported_after_decode_observed:*`. They never call
-`fetch_parity`, `reconstruct`, or GPU writeback.
+The post-Resume hook treats protection readiness and fault intent separately.
+`UNPROTECTED`, `SNAPSHOT_READY`, and `COMMITTING` without an explicit fault
+request remain nonblocking: Decode continues while commit is pending. If a
+fault is explicitly requested before `COMMITTED`, the pure policy recommends
+`PREFILL_RETRY`, but this post-Resume lifecycle cannot safely replay the
+768-token prefill without crossing the scheduler handoff or duplicating
+output. It therefore records the recommendation and fails closed. It never
+calls `fetch_parity`, `reconstruct`, or GPU writeback before commit. Once all
+ranks are `COMMITTED` and decode has been observed, M6-B2's deliberate
+logical-fault test boundary records `fault_requested` and enters the existing
+EC path after a four-rank policy vote.
 
 All ranks exchange the policy code at a fixed collective point. A mismatch,
 request cancellation, Manager Epoch change, Row/Slot Generation change,

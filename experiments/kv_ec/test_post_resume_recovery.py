@@ -153,7 +153,7 @@ class PostResumeSchedulerTests(unittest.TestCase):
                     g.tick()
             g._fatal.assert_called_once()
 
-    def test_uncommitted_checkpoint_fails_closed_with_policy_reason(self):
+    def test_committing_without_fault_continues_decode(self):
         from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
         with tempfile.TemporaryDirectory() as tmp:
             g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
@@ -163,15 +163,115 @@ class PostResumeSchedulerTests(unittest.TestCase):
             g.post_resume = PostResumeRecovery()
             with patch("experiments.kv_ec.post_resume_recovery.torch.distributed.all_gather",
                        side_effect=self.collective()):
+                self.assertFalse(g.tick())
+            self.assertEqual(g.post_resume.state, "RUNNING")
+            self.assertEqual(g.scheduler.token_to_kv_pool_allocator.slot_lease_registry.active_lease_count, 0)
+            self.assertFalse(g._fatal.called)
+            self.assertFalse(g.evidence["recovery_readiness"]["fault_requested"])
+            self.assertEqual(g.evidence["recovery_readiness"]["action"],
+                             "WAIT_AND_CONTINUE_DECODE")
+
+    def test_explicit_fault_before_commit_fails_closed_without_parity(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            g.shadow.worker.state = "COMMITTING"
+            g.post_resume_enabled = True
+            g.post_resume_mode = "m6b2"
+            g.post_resume = PostResumeRecovery()
+            g.evidence["fault_requested"] = True
+            with patch("experiments.kv_ec.post_resume_recovery.torch.distributed.all_gather",
+                       side_effect=self.collective()):
                 with self.assertRaises(PauseRejected):
                     g.tick()
             self.assertEqual(g.post_resume.state, "FAILED")
-            self.assertEqual(g.scheduler.token_to_kv_pool_allocator.slot_lease_registry.active_lease_count, 0)
             policy = g.evidence["recovery_policy_decision"]
             self.assertEqual(policy["action"], "FAIL_CLOSED")
+            self.assertEqual(policy["recommended_action"], "PREFILL_RETRY")
             self.assertFalse(policy["use_parity"])
-            record = g.evidence["post_resume_recovery"]
-            self.assertFalse(record["parity_used"] or record["kv_written"])
+            self.assertFalse(g.evidence["post_resume_recovery"]["parity_used"])
+
+    def test_mixed_committing_and_committed_ranks_wait_without_recovery(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            g.shadow.worker.state = "COMMITTING"
+            g.post_resume_mode = "m6b2"
+            g.post_resume_enabled = True
+            g.post_resume = PostResumeRecovery()
+            def mixed(output, local, group=None, async_op=False):
+                for index, item in enumerate(output):
+                    item.copy_(local)
+                    item[0] = 1 if index in (1, 3) else 2
+                return Work()
+            with patch("experiments.kv_ec.post_resume_recovery.torch.distributed.all_gather",
+                       side_effect=mixed):
+                self.assertFalse(g.tick())
+            self.assertEqual(g.post_resume.state, "RUNNING")
+            self.assertFalse(g._fatal.called)
+            self.assertEqual(g.evidence["recovery_readiness"]["rank_readiness"], [2, 1, 2, 1])
+            self.assertEqual(g.scheduler.token_to_kv_pool_allocator.slot_lease_registry.active_lease_count, 0)
+
+    def test_live_manager_epoch_change_still_fails_closed_while_waiting(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            g.post_resume_mode = "m6b2"
+            g.post_resume_enabled = True
+            g.post_resume = PostResumeRecovery()
+            g.shadow.manager_epoch = "restarted-manager"
+            with patch("experiments.kv_ec.post_resume_recovery.torch.distributed.all_gather",
+                       side_effect=self.collective()):
+                with self.assertRaises(PauseRejected):
+                    g.tick()
+            self.assertEqual(g.evidence["readiness_failure"], "manager_epoch_changed")
+            self.assertTrue(g._fatal.called)
+
+    def test_row_generation_change_still_fails_closed_while_waiting(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            g.post_resume_mode = "m6b2"
+            g.post_resume_enabled = True
+            g.post_resume = PostResumeRecovery()
+            g.shadow.worker.state = "COMMITTING"
+            g.shadow.worker.metadata.update(
+                req_pool_idx=1, req_generation=2, request_version="request-v1",
+                physical_slots=[8] * 256, slot_generation=[1] * 256)
+            changed = NS(req_pool_idx=2, req_generation=2,
+                         request_version="request-v1", physical_slots=tuple([8] * 256),
+                         slot_generations=tuple([1] * 256),
+                         slot_generation_available=True)
+            import experiments.kv_ec.post_resume_recovery as module
+            with patch.object(module, "read_scheduler_mapping", return_value=changed), \
+                    patch.object(module.torch.distributed, "all_gather",
+                                 side_effect=self.collective()):
+                with self.assertRaises(PauseRejected):
+                    g.tick()
+            self.assertEqual(g.evidence["readiness_failure"], "row_slot_generation_changed")
+            self.assertTrue(g._fatal.called)
+
+    def test_all_committed_ready_ranks_enter_existing_b2_transaction(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            g.post_resume_mode = "m6b2"
+            g.post_resume_enabled = True
+            g.post_resume = PostResumeRecovery()
+            fake_recovery = dict(fault_injected=True, parity_used=True, kv_written=True,
+                                 byte_exact=True, four_rank_vote=True, timings={})
+            import experiments.kv_ec.post_resume_recovery as module
+            with patch.object(module.torch.distributed, "all_gather",
+                              side_effect=self.collective()), \
+                    patch.object(module.torch.cuda, "is_available", return_value=True), \
+                    patch.object(module.torch.cuda, "Event", CompletedEvent), \
+                    patch.object(module.torch.cuda, "current_stream", return_value=object()), \
+                    patch.object(module, "pack_chunk", return_value=(b"metadata", {
+                        "checkpoint_version": "tx-chunk0", "manager_epoch": "manager"})), \
+                    patch.object(g.post_resume, "_b2", return_value=fake_recovery) as b2:
+                self.assertFalse(g.tick())
+            b2.assert_called_once()
+            self.assertEqual(g.evidence["recovery_policy_decision"]["action"], "EC_RECOVERY")
 
     def test_committed_state_records_unanimous_ec_policy(self):
         from experiments.kv_ec.post_resume_recovery import (

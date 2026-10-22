@@ -47,10 +47,30 @@ class PostResumeRecovery:
         self.owner = None
         self.row_protected = False
         self.slot_leased = False
+        self.readiness_trace = []
+        self._last_readiness_signature = None
 
     def _record(self, state, **fields):
         self.state = state
         self.trace.append(dict(state=state, monotonic=time.monotonic(), **fields))
+
+    def _note_readiness(self, gate, local_code, rank_codes, fault_requested):
+        worker = getattr(gate.shadow, "worker", None)
+        state = getattr(worker, "state", "UNPROTECTED")
+        entry = dict(
+            checkpoint_state=state, local_readiness=local_code,
+            rank_readiness=list(rank_codes), fault_requested=bool(fault_requested),
+            action=("WAIT_AND_CONTINUE_DECODE" if not fault_requested
+                    and not all(code == 1 for code in rank_codes) else "RECOVERY_GATE"),
+            monotonic=time.monotonic())
+        signature = tuple(entry[key] for key in (
+            "checkpoint_state", "local_readiness", "rank_readiness",
+            "fault_requested", "action"))
+        if signature != self._last_readiness_signature:
+            self.readiness_trace.append(entry)
+            self._last_readiness_signature = signature
+        gate.evidence["recovery_readiness"] = {
+            key: value for key, value in entry.items()}
 
     def _all_gather(self, gate, local):
         """One fixed-order collective; local eligibility never gates its call."""
@@ -64,11 +84,12 @@ class PostResumeRecovery:
             raise TimeoutError("m6b1_collective_timeout")
         return [tuple(int(x) for x in item.tolist()) for item in values]
 
-    def _collect(self, gate, *, readiness, checkpoint_id, checkpoint_epoch):
+    def _collect(self, gate, *, readiness, checkpoint_id, checkpoint_epoch,
+                 fault_requested=False):
         # Transaction identity is deterministic from the existing coordinator
         # admission; mismatched request/checkpoint/epoch prevents unanimous entry.
         fields = (gate.identity["transaction_id"], gate.target,
-                  checkpoint_id, checkpoint_epoch)
+                  checkpoint_id, checkpoint_epoch, bool(fault_requested))
         local = torch.tensor([readiness, *(_word(x) for x in fields)],
                              dtype=torch.int64, device="cpu")
         gathered = self._all_gather(gate, local)
@@ -88,10 +109,42 @@ class PostResumeRecovery:
             return 3, checkpoint, epoch
         if req.finished() or req.is_retracted or req.to_finish is not None:
             return 3, checkpoint, epoch
-        if worker is None or getattr(worker, "state", None) != "COMMITTED":
-            # A non-committed checkpoint is a *decision input*, not a silent
-            # defer: the four-rank policy vote decides EC vs Prefill retry.
+        live_epoch = str(getattr(shadow, "manager_epoch", ""))
+        if epoch and live_epoch and epoch != live_epoch:
+            gate.evidence["readiness_failure"] = "manager_epoch_changed"
+            return 4, checkpoint, epoch
+        binding_keys = ("req_pool_idx", "req_generation", "request_version",
+                        "physical_slots", "slot_generation")
+        present = [key for key in binding_keys if key in metadata]
+        if present:
+            if len(present) != len(binding_keys):
+                gate.evidence["readiness_failure"] = "checkpoint_mapping_binding_incomplete"
+                return 4, checkpoint, epoch
+            try:
+                mapping = read_scheduler_mapping(
+                    gate.scheduler, req, token_start=0, token_count=256)
+                matches = (
+                    mapping.req_pool_idx == metadata["req_pool_idx"]
+                    and mapping.req_generation == metadata["req_generation"]
+                    and mapping.request_version == metadata["request_version"]
+                    and list(mapping.physical_slots) == metadata["physical_slots"]
+                    and list(mapping.slot_generations) == metadata["slot_generation"]
+                    and mapping.slot_generation_available
+                )
+            except Exception as exc:
+                gate.evidence["readiness_failure"] = (
+                    "mapping_validation:" + type(exc).__name__)
+                return 4, checkpoint, epoch
+            if not matches:
+                gate.evidence["readiness_failure"] = "row_slot_generation_changed"
+                return 4, checkpoint, epoch
+        state = getattr(worker, "state", None) if worker is not None else "UNPROTECTED"
+        if state in ("UNPROTECTED", "SNAPSHOT_READY", "COMMITTING"):
+            # Protection readiness is not a fault signal. The request continues
+            # normal scheduling while the background commit is pending.
             return 2, checkpoint, epoch
+        if state == "FAILED" or state not in ("COMMITTED",):
+            return 4, checkpoint, epoch
         if not gate.evidence.get("decode_observed", False):
             return 0, checkpoint, epoch
         return 1, checkpoint, epoch
@@ -128,7 +181,8 @@ class PostResumeRecovery:
         code = {EC_RECOVERY: 1, PREFILL_RETRY: 2, FAIL_CLOSED: 0}[decision.action]
         gathered, identity_ok = self._collect(
             gate, readiness=code, checkpoint_id=self.checkpoint_id,
-            checkpoint_epoch=self.epoch)
+            checkpoint_epoch=self.epoch,
+            fault_requested=bool(gate.evidence.get("fault_requested", False)))
         codes = [row[0] for row in gathered]
         if not identity_ok or len(set(codes)) != 1:
             return RecoveryDecision(FAIL_CLOSED, "four_rank_policy_divergence")
@@ -167,7 +221,10 @@ class PostResumeRecovery:
             state=FAILED, failure_reason=reason, transaction_id=self.txid,
             checkpoint_id=self.checkpoint_id, checkpoint_epoch=self.epoch,
             parity_used=False, kv_written=False, trace=self.trace,
-            policy=gate.evidence.get("recovery_policy_decision"))
+            policy=gate.evidence.get("recovery_policy_decision"),
+            fault_requested=bool(gate.evidence.get("fault_requested", False)),
+            checkpoint_state=getattr(getattr(gate.shadow, "worker", None), "state", None),
+            readiness_trace=self.readiness_trace)
         gate.evidence["post_resume_recovery"] = record
         self._write_record(gate, record)
         # A failed mapping/checkpoint proof must not allow this request to
@@ -338,27 +395,49 @@ class PostResumeRecovery:
             return False
         gate.deadline = time.monotonic() + gate.timeout_s
         readiness, checkpoint, epoch = self._local_readiness(gate)
+        requested_fault = bool(gate.evidence.get("fault_requested", False))
         gathered, identity_ok = self._collect(
             gate, readiness=readiness, checkpoint_id=checkpoint,
-            checkpoint_epoch=epoch)
+            checkpoint_epoch=epoch, fault_requested=requested_fault)
         codes = [row[0] for row in gathered]
+        self._note_readiness(gate, readiness, codes, requested_fault)
         self.txid = f"{gate.identity['transaction_id']}:m6b1:{checkpoint}"
         self.checkpoint_id, self.epoch = checkpoint, epoch
-        if not identity_ok or any(code == 3 for code in codes):
+        if not identity_ok or any(code in (3, 4) for code in codes):
             # A missing/cancelled/inconsistent request is a unanimous safe
             # refusal, not a rank-local branch into another collective.
             return self._reject(gate, "rank_identity_or_request_not_unanimous")
         if gate.post_resume_mode != "m6b2" and not all(code == 1 for code in codes):
             return False
-        if gate.post_resume_mode == "m6b2" and all(code == 0 for code in codes):
-            return False
+        if gate.post_resume_mode == "m6b2" and not all(code == 1 for code in codes):
+            if not requested_fault:
+                return False
+            decision = self._b2_policy(gate, None, None)
+            gate.evidence["recovery_policy_decision"] = dict(
+                action=decision.action, reason=decision.reason,
+                recommended_action=decision.action, use_parity=decision.use_parity,
+                evidence=decision.evidence, rank_codes=codes, fault_requested=True)
+            if decision.action != FAIL_CLOSED:
+                recommended_action = decision.action
+                decision = RecoveryDecision(
+                    FAIL_CLOSED,
+                    "prefill_retry_unsupported_after_decode_observed:" + decision.reason)
+                gate.evidence["recovery_policy_decision"].update(
+                    action=decision.action, reason=decision.reason,
+                    recommended_action=recommended_action)
+            return self._reject(gate, "m7_policy_fail_closed:" + decision.reason)
         if gate.post_resume_mode == "m6b2":
+            # Reaching all-rank readiness is the M6-B2 test harness's explicit
+            # logical fault request boundary. It is never inferred from a
+            # rank merely reporting COMMITTING.
+            gate.evidence["fault_requested"] = True
+            self._note_readiness(gate, readiness, codes, True)
             decision = self._b2_policy(gate, None, None)
             gate.evidence["recovery_policy_decision"] = dict(
                 action=decision.action, reason=decision.reason,
                 recommended_action=decision.action,
                 use_parity=decision.use_parity, evidence=decision.evidence,
-                rank_codes=codes)
+                rank_codes=codes, fault_requested=True)
             if decision.action != EC_RECOVERY or not all(code == 1 for code in codes):
                 recommended_action = decision.action
                 if decision.action != FAIL_CLOSED:
@@ -519,6 +598,10 @@ class PostResumeRecovery:
             slot_generations=list(self.mapping.slot_generations),
             new_lease_created=True, new_lease_released=True, old_lease_reused=False,
             all_rank_validate_vote=True, all_rank_resume_vote=True,
+            fault_requested=bool(gate.evidence.get("fault_requested", False)),
+            checkpoint_state=getattr(gate.shadow.worker, "state", None),
+            readiness_trace=self.readiness_trace,
+            recovery_policy_decision=gate.evidence.get("recovery_policy_decision"),
             fault_injected=rank_recovery["fault_injected"],
             parity_used=rank_recovery["parity_used"], kv_written=rank_recovery["kv_written"],
             byte_exact=rank_recovery["byte_exact"], four_rank_vote=rank_recovery["four_rank_vote"],
