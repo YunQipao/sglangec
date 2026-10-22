@@ -20,6 +20,9 @@ from .rank_snapshot import validate_payload
 from .gpu_scratch_restore import restore_rank_to_gpu
 from .parity_manager import COMMITTED, fetch_parity, submit_once
 from .snapshot import digest
+from .recovery_policy import (
+    EC_RECOVERY, FAIL_CLOSED, PREFILL_RETRY, RecoveryDecision, decide_recovery,
+)
 
 from .scheduler_recovery_guard import read_scheduler_mapping
 
@@ -85,11 +88,59 @@ class PostResumeRecovery:
             return 3, checkpoint, epoch
         if req.finished() or req.is_retracted or req.to_finish is not None:
             return 3, checkpoint, epoch
+        if worker is None or getattr(worker, "state", None) != "COMMITTED":
+            # A non-committed checkpoint is a *decision input*, not a silent
+            # defer: the four-rank policy vote decides EC vs Prefill retry.
+            return 2, checkpoint, epoch
         if not gate.evidence.get("decode_observed", False):
             return 0, checkpoint, epoch
-        if worker is None or getattr(worker, "state", None) != "COMMITTED":
-            return 0, checkpoint, epoch
         return 1, checkpoint, epoch
+
+    def _b2_policy(self, gate, mapping, current):
+        """Four-rank M7 policy vote before any parity or data collective."""
+        worker = gate.shadow.worker
+        req_cancelled = (gate.req is None or gate.req.rid != gate.target
+                         or gate.req.finished() or gate.req.is_retracted
+                         or gate.req.to_finish is not None)
+        worker_epoch = (str(worker.metadata.get("manager_epoch", ""))
+                        if worker is not None else "")
+        live_epoch = str(getattr(gate.shadow, "manager_epoch", ""))
+        epoch_matches = bool(live_epoch) and (
+            worker_epoch == self.epoch == live_epoch
+            if worker_epoch else self.epoch in ("", live_epoch))
+        decision = decide_recovery(
+            worker.state if worker is not None else "UNPROTECTED",
+            request_cancelled=req_cancelled,
+            fault_ranks=[getattr(gate.shadow, "lost_rank", 0)],
+            token_count=256,
+            # The pre-mapping policy vote runs before a fresh lease exists;
+            # mapping staleness is still enforced by the later lease/mapping
+            # binding checks, so absence here is not a staleness signal.
+            mapping_current=True,
+            mapping_matches_checkpoint=True,
+            manager_epoch_matches=epoch_matches,
+            rank_preparation_unanimous=True,
+            all_ranks_decode_observed=gate.evidence.get("decode_observed", False),
+            committed_parity_available=getattr(worker, "state", None) == "COMMITTED",
+        )
+        # All-gather the decision so every rank applies the SAME action even
+        # if its local view differed; divergence itself is a FAIL_CLOSED.
+        code = {EC_RECOVERY: 1, PREFILL_RETRY: 2, FAIL_CLOSED: 0}[decision.action]
+        gathered, identity_ok = self._collect(
+            gate, readiness=code, checkpoint_id=self.checkpoint_id,
+            checkpoint_epoch=self.epoch)
+        codes = [row[0] for row in gathered]
+        if not identity_ok or len(set(codes)) != 1:
+            return RecoveryDecision(FAIL_CLOSED, "four_rank_policy_divergence")
+        if codes[0] != code:
+            # Peer decided differently from this rank's local view. Adopt the
+            # most conservative action among {EC, RETRY, CLOSED}.
+            conservative = min(code, codes[0])
+            action = {1: EC_RECOVERY, 2: PREFILL_RETRY, 0: FAIL_CLOSED}[conservative]
+            return RecoveryDecision(action, "four_rank_policy_consensus",
+                                    use_parity=action == EC_RECOVERY,
+                                    evidence=dict(local=decision.action, remote_codes=codes))
+        return decision
 
     def _release_local(self, gate):
         if getattr(self, "rollback_failed", False):
@@ -115,7 +166,8 @@ class PostResumeRecovery:
         record = dict(
             state=FAILED, failure_reason=reason, transaction_id=self.txid,
             checkpoint_id=self.checkpoint_id, checkpoint_epoch=self.epoch,
-            parity_used=False, kv_written=False, trace=self.trace)
+            parity_used=False, kv_written=False, trace=self.trace,
+            policy=gate.evidence.get("recovery_policy_decision"))
         gate.evidence["post_resume_recovery"] = record
         self._write_record(gate, record)
         # A failed mapping/checkpoint proof must not allow this request to
@@ -296,8 +348,30 @@ class PostResumeRecovery:
             # A missing/cancelled/inconsistent request is a unanimous safe
             # refusal, not a rank-local branch into another collective.
             return self._reject(gate, "rank_identity_or_request_not_unanimous")
+        if gate.post_resume_mode != "m6b2" and not all(code == 1 for code in codes):
+            return False
+        if gate.post_resume_mode == "m6b2" and all(code == 0 for code in codes):
+            return False
         if not all(code == 1 for code in codes):
-            return False  # checkpoint not committed or decode not yet observed
+            # M7: a non-committed checkpoint never silently defers. Every
+            # rank joins one fixed-order policy vote; uncommitted parity is
+            # unusable, and a post-decode prefill retry cannot safely replay
+            # from this lifecycle boundary, so the outcome is fail-closed
+            # with the decision recorded as evidence.
+            decision = self._b2_policy(gate, None, None)
+            recommended_action = decision.action
+            if decision.action != FAIL_CLOSED:
+                # PREFILL_RETRY here is advisory for a pre-resume boundary;
+                # the post-resume tick cannot execute it safely.
+                decision = RecoveryDecision(
+                    FAIL_CLOSED, "prefill_retry_unsupported_after_decode_observed:"
+                    + decision.reason)
+            gate.evidence["recovery_policy_decision"] = dict(
+                action=decision.action, reason=decision.reason,
+                recommended_action=recommended_action,
+                use_parity=decision.use_parity, evidence=decision.evidence,
+                rank_codes=codes)
+            return self._reject(gate, "m7_policy_fail_closed:" + decision.reason)
 
         self._record(REQUESTED)
         b2_preparation_voted = False

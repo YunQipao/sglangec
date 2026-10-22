@@ -152,19 +152,25 @@ class PostResumeSchedulerTests(unittest.TestCase):
                     g.tick()
             g._fatal.assert_called_once()
 
-    def test_uncommitted_checkpoint_is_unanimously_deferred_before_transaction(self):
+    def test_uncommitted_checkpoint_fails_closed_with_policy_reason(self):
         from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
         with tempfile.TemporaryDirectory() as tmp:
             g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
             g.shadow.worker.state = "COMMITTING"
             g.post_resume_enabled = True
+            g.post_resume_mode = "m6b2"
             g.post_resume = PostResumeRecovery()
             with patch("experiments.kv_ec.post_resume_recovery.torch.distributed.all_gather",
                        side_effect=self.collective()):
-                self.assertFalse(g.tick())
-            self.assertEqual(g.post_resume.state, "RUNNING")
+                with self.assertRaises(PauseRejected):
+                    g.tick()
+            self.assertEqual(g.post_resume.state, "FAILED")
             self.assertEqual(g.scheduler.token_to_kv_pool_allocator.slot_lease_registry.active_lease_count, 0)
-            self.assertNotIn("post_resume_recovery", g.evidence)
+            policy = g.evidence["recovery_policy_decision"]
+            self.assertEqual(policy["action"], "FAIL_CLOSED")
+            self.assertFalse(policy["use_parity"])
+            record = g.evidence["post_resume_recovery"]
+            self.assertFalse(record["parity_used"] or record["kv_written"])
 
     def test_cuda_event_incomplete_fails_closed_and_releases_new_lease(self):
         from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
