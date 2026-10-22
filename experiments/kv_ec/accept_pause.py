@@ -557,7 +557,8 @@ def main():
     parser.add_argument("--output", type=Path, help="exclusive new evidence directory for this run")
     parser.add_argument("--capture-profile", action="store_true",
                         help="M5 capture tracing; perturbs foreground latency; default off")
-    parser.add_argument("--mode", choices=("baseline", "protection_only", "online_recovery", "prefill_retry"),
+    parser.add_argument("--mode", choices=("baseline", "protection_only", "online_recovery", "prefill_retry",
+                                          "async_protection_only"),
                         help="explicit independent A/B/C/D mode; omitted retains legacy pause/shadow behavior")
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument("--shadow", action="store_true",
@@ -568,12 +569,23 @@ def main():
     parser.add_argument("--recover-tokens", type=int, choices=(256, 512, 768), default=256)
     parser.add_argument("--shadow-evidence", type=Path,
                         help="previous completed shadow run required for --online-restore")
+    parser.add_argument("--async-commit-delay", type=float, default=0,
+                        help="E diagnostic smoke only: background delay to prove Decode overlap")
+    parser.add_argument("--require-async-overlap", action="store_true",
+                        help="E smoke must observe first Decode before commit on every rank")
     args = parser.parse_args()
     if args.mode and (args.shadow or args.online_restore):
         parser.error("--mode cannot be combined with legacy --shadow/--online-restore")
     if args.mode == "online_recovery":
         args.online_restore = True
-    special = args.mode in ("protection_only", "prefill_retry")
+    asynchronous = args.mode == "async_protection_only"
+    special = args.mode in ("protection_only", "prefill_retry", "async_protection_only")
+    if not 0 <= args.async_commit_delay < args.pause_timeout:
+        parser.error("async delay must be nonnegative and less than pause timeout")
+    if (args.async_commit_delay or args.require_async_overlap) and not asynchronous:
+        parser.error("async diagnostic flags require E mode")
+    if asynchronous and (args.recover_tokens != 256 or args.lost_rank != 0):
+        parser.error("initial E supports only rank0/chunk0/256 scope; no E fault injection")
     if args.mode == "prefill_retry" and args.recover_tokens != 256:
         parser.error("initial D supports only 256 lost tokens and a 768-token prompt")
     if args.online_restore and args.shadow_evidence is None:
@@ -604,7 +616,12 @@ def main():
                     raise ValueError("offline_requested_plan_mismatch")
                 checkpoints = json.loads((root / "checkpoints.json").read_text()) if (
                     root / "checkpoints.json").exists() else []
-                check_experiment_evidence(root / "ranks", identity, checkpoints, response, args.mode)
+                if asynchronous:
+                    from .m6_acceptance import check_async_evidence
+                    check_async_evidence(root / "ranks", identity, checkpoints, response,
+                                         require_overlap=args.require_async_overlap)
+                else:
+                    check_experiment_evidence(root / "ranks", identity, checkpoints, response, args.mode)
                 compare([root / "baseline-response.json", root / "pause-response.json"])
                 verdict.update(state="PASS", M1=False, mode=args.mode, EXPERIMENT_PASS=True,
                                reason="B/D rank-local saved evidence verified, not a new GPU run")
@@ -710,7 +727,9 @@ def main():
             "--stream-metrics", "--output", str(root / output)], log, env)
 
     verdict = {"state": "FAIL", "transaction_id": tx, "run": str(root), "M1": False,
-               "capture_profile": args.capture_profile}
+               "capture_profile": args.capture_profile,
+               "async_commit_delay_s": args.async_commit_delay,
+               "require_async_overlap": args.require_async_overlap}
     if args.mode:
         verdict.update(mode=args.mode, GPU_VALIDATED=False)
     if special:
@@ -721,6 +740,9 @@ def main():
         verdict.update(M3_PASS=False, lost_rank=args.lost_rank, recover_tokens=args.recover_tokens,
                        chunk_count=args.recover_tokens // 256)
     try:
+        if asynchronous:
+            from .study_validation import check_live_sources
+            check_live_sources()
         baseline_port, pause_port = resolve_ports(args.port, args.baseline_port, args.pause_port)
         verdict.update(baseline_port=baseline_port, pause_port=pause_port)
         baseline_url = f"http://127.0.0.1:{baseline_port}"
@@ -814,7 +836,9 @@ def main():
                              SGLANG_KV_EC_ONLINE_ADMISSION=json.dumps(admission),
                              SGLANG_KV_EC_LOST_RANK=str(args.lost_rank),
                              SGLANG_KV_EC_RECOVER_TOKENS=str(args.recover_tokens))
-        if args.shadow or args.online_restore or args.mode == "protection_only":
+        if asynchronous:
+            pause_env["SGLANG_KV_EC_ASYNC_COMMIT_DELAY_S"] = str(args.async_commit_delay)
+        if args.shadow or args.online_restore or args.mode == "protection_only" or asynchronous:
             from .parity_manager import manager_hello
             manager = spawn("experiments.kv_ec.parity_manager", [
                 "--socket", str(root / "parity.sock"), "--timeout", str(args.pause_timeout),
@@ -857,6 +881,14 @@ def main():
         control("authorize")
         if paused_client.wait(timeout=600) != 0:
             raise RuntimeError("pause request failed; inspect pause-client.log")
+        if asynchronous:
+            # Request timing has already ended at the client. Only acceptance
+            # drains off-path; no join or commit polling runs in Decode.
+            wait_for(lambda: all(
+                (root / "ranks" / f"async-rank-{r}.json").exists()
+                and (root / "ranks" / f"async-lifecycle-rank-{r}.json").exists()
+                for r in range(4)), args.pause_timeout, "async terminal evidence timeout",
+                [(paused_server, "pause server"), (manager, "parity manager")])
         wait_for(lambda: all((root / "ranks" / f"pause-rank-{r}.json").exists()
                             for r in range(4)), 10, "decode evidence timeout",
                  [(paused_server, "pause server"), (coordinator, "coordinator")])
@@ -873,14 +905,31 @@ def main():
             if audit["state"] != "PASS":
                 raise ValueError(f"experiment_pause_audit_failed:{audit['reason']}")
             checkpoints = []
-            if args.mode == "protection_only":
+            if args.mode == "protection_only" or asynchronous:
                 from .parity_manager import submit_once
                 checkpoints = [submit_once(root / "parity.sock", {
                     "kind": "status", "snapshot_id": tx + f"-chunk{i}"}, b"", timeout=2)
                     for i in range(args.recover_tokens // 256)]
                 (root / "checkpoints.json").write_text(json.dumps(checkpoints, indent=2) + "\n")
             response = json.loads((root / "pause-response.json").read_text())
-            records = check_experiment_evidence(root / "ranks", identity, checkpoints, response, args.mode)
+            if asynchronous:
+                from .m6_acceptance import check_async_evidence
+                from .parity_manager import fetch_parity
+                records = check_async_evidence(
+                    root / "ranks", identity, checkpoints, response,
+                    require_overlap=args.require_async_overlap)
+                exported, parity = fetch_parity(
+                    root / "parity.sock", records[0]["async_protection_only"]["metadata"], timeout=10)
+                from .async_protection import checkpoint_metadata
+                if checkpoint_metadata(exported) != checkpoint_metadata(checkpoints[0]):
+                    raise ValueError("async_export_checkpoint_changed")
+                (root / "parity-export-verification.json").write_text(json.dumps(dict(
+                    state="PASS", parity_bytes=int(parity.size),
+                    parity_sha256=exported["parity_sha256"],
+                    snapshot_id=exported["snapshot_id"]), indent=2) + "\n")
+                del parity
+            else:
+                records = check_experiment_evidence(root / "ranks", identity, checkpoints, response, args.mode)
             config = dict(
                 admission, lost_rank=args.lost_rank, recover_tokens=args.recover_tokens,
                 gpu_uuids=[gpu_ids[g] for g in gpus], tp=4, dtype="bf16", layout="nhd", page_size=1,
@@ -890,11 +939,18 @@ def main():
                 parity_test_oracle=False, experiment_source_sha256={
                     name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                     for name in MEASURED_SOURCES})
-            performance = experiment_performance_record(args.mode, response, records, config=config)
+            if asynchronous:
+                from .m6_acceptance import async_performance
+                config.update(async_queue_capacity=1, async_snapshot_budget_bytes=36 * 2 * 256 * 2 * 128 * 2,
+                              async_commit_delay_s=args.async_commit_delay,
+                              async_pending_policy="bounded_off_path_drain")
+                performance = async_performance(response, records, config=config)
+            else:
+                performance = experiment_performance_record(args.mode, response, records, config=config)
             (root / f"performance-{args.mode.replace('_', '-')}.json").write_text(
                 json.dumps(performance, indent=2) + "\n")
             verdict.update(mode=args.mode, EXPERIMENT_PASS=True, GPU_VALIDATED=True, M1=args.mode != "prefill_retry",
-                           output_ids_identical=True, reason="real B/D completed; strict rank proof and baseline token match")
+                           output_ids_identical=True, reason="real B/D/E completed; strict rank proof and baseline token match")
         if args.shadow:
             verdict["recovery_timing_ms_by_rank"] = check_shadow_evidence(root / "ranks", identity)
             from .parity_manager import submit_once

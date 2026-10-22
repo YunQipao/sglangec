@@ -59,7 +59,7 @@ class SchedulerPauseGate:
         args = scheduler.server_args
         online = os.environ.get("SGLANG_KV_EC_ONLINE_RESTORE", "0") == "1"
         mode = os.environ.get("SGLANG_KV_EC_EXPERIMENT_MODE", "")
-        if mode not in ("", "protection_only", "prefill_retry"):
+        if mode not in ("", "protection_only", "prefill_retry", "async_protection_only"):
             raise PauseRejected("unsupported_experiment_mode")
         if mode and (online or os.environ.get("SGLANG_KV_EC_SHADOW_RESTORE", "0") != "0"):
             raise PauseRejected("conflicting_experiment_modes")
@@ -85,7 +85,11 @@ class SchedulerPauseGate:
         gate.model_identity = source_identity(args.model_path)
         if mode and os.environ["SGLANG_KV_EC_ISOLATED_TX"] != gate.identity["transaction_id"]:
             raise PauseRejected("experiment_transaction_mismatch")
-        if mode == "prefill_retry":
+        if mode == "async_protection_only":
+            from .scheduler_async import SchedulerAsyncProtection
+            gate.shadow = SchedulerAsyncProtection()
+            gate.shadow.check_online_admission(gate)
+        elif mode == "prefill_retry":
             from .scheduler_retry import SchedulerPrefillRetry
             gate.shadow = SchedulerPrefillRetry.from_env()
             gate.shadow.check_admission(gate)
@@ -127,7 +131,7 @@ class SchedulerPauseGate:
                     or status.get("recover_tokens") != self.shadow.recover_tokens):
                 raise PauseRejected("pause_coordinator_recovery_plan_changed")
         if self.shadow is not None and getattr(self.shadow, "evidence_key", "") in (
-                "protection_only", "prefill_retry"):
+                "protection_only", "prefill_retry", "async_protection_only"):
             key = self.shadow.evidence_key
             if (status.get("experiment_mode") != key
                     or status.get("lost_rank") != self.shadow.lost_rank
@@ -173,6 +177,8 @@ class SchedulerPauseGate:
             self._fatal(PauseRejected("control_mutation_while_paused"))
 
     def after_result(self, batch):
+        if self.state == "RESUMED" and hasattr(self.shadow, "observe_request_end"):
+            self.shadow.observe_request_end(self)
         if (
             self.state == "RESUMED"
             and not self.evidence.get("decode_observed", False)
@@ -185,6 +191,7 @@ class SchedulerPauseGate:
             # real decode result has completed on this rank.
             self.evidence.update(
                 decode_observed=True,
+                decode_observed_monotonic=time.monotonic(),
                 decode_output_count=len(self.req.output_ids),
                 decode_forward_mode="decode",
                 online_kv_pool_modified=bool(self.shadow and getattr(self.shadow, "modified", False)),
@@ -217,6 +224,7 @@ class SchedulerPauseGate:
         if not targets:
             return
         self.deadline = time.monotonic() + self.timeout_s
+        self.evidence["prefill_completed_monotonic"] = self.deadline - self.timeout_s
         self.req = targets[0]
         self.state = "PREPARE"
         try:
@@ -485,6 +493,8 @@ class SchedulerPauseGate:
 
     def tick(self):
         """True skips selection/forward, identically on every TP rank."""
+        if self.state == "RESUMED" and hasattr(self.shadow, "observe_request_end"):
+            self.shadow.observe_request_end(self)
         if self.state in ("IDLE", "RESUMED"):
             return False
         try:
@@ -530,6 +540,8 @@ class SchedulerPauseGate:
             if not self._vote(True):
                 raise PauseRejected("resume_final_vote_failed")
             self.state = "RESUMED"
+            if hasattr(self.shadow, "start_background"):
+                self.shadow.start_background(self)
             self.evidence.update(
                 resume_authorized=True,
                 decode_observed=False,
@@ -538,6 +550,8 @@ class SchedulerPauseGate:
             # Authorization is not a successful resume. Wait for the next
             # real decode result before emitting the final evidence file.
             self._write_evidence(path=self.pending_path)
+            if hasattr(self.shadow, "mark_foreground_ready"):
+                self.shadow.mark_foreground_ready(self)
             return False
         except Exception as exc:
             self._fatal(exc)

@@ -35,11 +35,13 @@ class PauseCoordinator:
         self.validated = set()
         self.released = set()
         self.armed = set()
-        if experiment_mode not in ("", "protection_only", "prefill_retry"):
+        if experiment_mode not in ("", "protection_only", "prefill_retry", "async_protection_only"):
             raise ValueError("unsupported_experiment_mode")
         if experiment_mode and (require_shadow or require_online):
             raise ValueError("conflicting_experiment_modes")
         self.experiment_mode = experiment_mode
+        if experiment_mode == "async_protection_only" and (lost_rank != 0 or recover_tokens != 256):
+            raise ValueError("async_requires_chunk0_256")
         self.retry_ready, self.retry_released = {}, set()
         self.require_shadow = require_shadow or require_online or bool(experiment_mode)
         self.require_online = require_online
@@ -130,6 +132,23 @@ class PauseCoordinator:
                     raise ValueError("retry_rebuild_missing_proof")
                 if self.shadow and proof != next(iter(self.shadow.values())):
                     self.state, self.failure_reason = "FAILED", "retry_rebuild_consensus_changed"
+                self.shadow[rank] = proof
+            elif op == "shadow_verified" and self.experiment_mode == "async_protection_only":
+                rank, proof = message["tp_rank"], message["observation"]
+                if (self.state != "PAUSED" or type(rank) is not int or rank not in self.observations
+                        or any(proof.get(k) is not True for k in (
+                            "snapshot_ready", "copy_complete", "independent_cpu_bytes"))
+                        or any(proof.get(k) is not False for k in (
+                            "checkpoint_committed", "used_committed_parity",
+                            "online_kv_pool_modified", "fault_injected"))
+                        or proof.get("snapshot_id") != self.transaction_id + "-chunk0"
+                        or proof.get("checkpoint_version") != proof["snapshot_id"]
+                        or not proof.get("manager_epoch") or not proof.get("input_ids_sha256")
+                        or any(proof.get(k) != self.observations[rank][k]
+                               for k in ("request_hash", "request_version"))):
+                    raise ValueError("async_snapshot_missing_proof")
+                if self.shadow and proof != next(iter(self.shadow.values())):
+                    self.state, self.failure_reason = "FAILED", "async_snapshot_consensus_changed"
                 self.shadow[rank] = proof
             elif op == "shadow_verified":
                 rank, observation = message["tp_rank"], message["observation"]
@@ -296,7 +315,7 @@ def main():
     serve.add_argument("--identity-output", type=Path, required=True)
     serve.add_argument("--require-shadow", action="store_true")
     serve.add_argument("--require-online", action="store_true")
-    serve.add_argument("--experiment-mode", choices=("protection_only", "prefill_retry"), default="")
+    serve.add_argument("--experiment-mode", choices=("protection_only", "prefill_retry", "async_protection_only"), default="")
     serve.add_argument("--production-parity", action="store_true",
                        help="explicit new C measurement revision, without recovery-based parity test oracle")
     serve.add_argument("--lost-rank", type=int, choices=range(4), default=0)
