@@ -100,6 +100,29 @@ class PostResumeSchedulerTests(unittest.TestCase):
                 self.assertEqual(gate.scheduler.token_to_kv_pool_allocator.slot_lease_registry.active_lease_count, 0)
             self.assertTrue(all(g.post_resume.state == "RUNNING" for g in gates))
 
+    def test_post_resume_recapture_preserves_async_checkpoint_identity(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            g.post_resume_enabled = True
+            g.post_resume = PostResumeRecovery()
+            seen = {}
+            import experiments.kv_ec.post_resume_recovery as module
+            def pack(*args, **kwargs):
+                seen.update(kwargs)
+                return b"metadata-only", {
+                    "checkpoint_version": "tx-chunk0", "manager_epoch": "manager"
+                }
+            with patch.object(module.torch.distributed, "all_gather", side_effect=self.collective()), \
+                    patch.object(module.torch.cuda, "is_available", return_value=True), \
+                    patch.object(module.torch.cuda, "Event", CompletedEvent), \
+                    patch.object(module.torch.cuda, "current_stream", return_value=object()), \
+                    patch.object(module, "pack_chunk", side_effect=pack):
+                g.tick()
+            self.assertEqual(seen["lifetime"], "independent_immutable_cpu_snapshot")
+            self.assertEqual(seen["completion_dependency"],
+                             "producer_event_then_blocking_d2h_then_capture_event")
+
     def test_repeated_entry_does_not_create_a_second_lease(self):
         from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
         with tempfile.TemporaryDirectory() as tmp:

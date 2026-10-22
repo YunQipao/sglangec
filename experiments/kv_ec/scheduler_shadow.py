@@ -66,7 +66,9 @@ def _capture_slot_bounds(slots):
 
 @profile_capture
 def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch,
-               token_start=0, token_count=256):
+               token_start=0, token_count=256,
+               lifetime="paused_request_row_and_slot_lease",
+               completion_dependency="producer_event_then_forward_stream_blocking_d2h"):
     """Read exactly one 256-token chunk at an explicit prompt offset."""
     if type(token_start) is not int or type(token_count) is not int:
         raise ValueError("chunk_range_must_be_integer")
@@ -131,8 +133,8 @@ def pack_chunk(pool, mapping, req, identity, *, snapshot_id, manager_epoch,
         packed_byte_count=int(payload.size), sha256=payload_hash,
         k_sha256=hashes["k"].hexdigest(), v_sha256=hashes["v"].hexdigest(),
         source_unchanged=True, snapshot_completion_status="complete",
-        lifetime="paused_request_row_and_slot_lease",
-        completion_dependency="producer_event_then_forward_stream_blocking_d2h",
+        lifetime=lifetime,
+        completion_dependency=completion_dependency,
     )
     with stage("payload_validation"):
         # Segment and aggregate digests were produced during the capture scan.

@@ -182,7 +182,13 @@ class PostResumeRecovery:
             _, current = pack_chunk(
                 pool, self.mapping, req, gate.model_identity,
                 snapshot_id=self.checkpoint_id, manager_epoch=self.epoch,
-                token_start=0, token_count=256)
+                token_start=0, token_count=256,
+                # Re-capture the live bytes, but retain the identity of the
+                # committed M6-A asynchronous CPU snapshot. These fields are
+                # part of validate_checkpoint's binding, not presentation.
+                lifetime="independent_immutable_cpu_snapshot",
+                completion_dependency=(
+                    "producer_event_then_blocking_d2h_then_capture_event"))
             gate.shadow.worker.require_recoverable(current)
             self._record(LEASED)
             self._record(VALIDATED,
