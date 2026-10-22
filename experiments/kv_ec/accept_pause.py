@@ -27,6 +27,10 @@ from .study_validation import runtime_sources
 MEASURED_SOURCES = runtime_sources()
 
 
+class _ExpectedNegativeComplete(Exception):
+    """Internal control flow after the strict expected-rejection audit passes."""
+
+
 def experiment_performance_record(experiment_mode, response, records, *, config):
     """Keep client notes separate from the all-rank protection/retry clock."""
     metric_keys = {
@@ -83,6 +87,49 @@ def check_evidence(root, identity, *, online=False, retry=False):
             raise ValueError(f"rank{rank}: incomplete coordinator handshake")
     if list(root.glob("*.error.json")) or list(root.glob("*.pending.json")):
         raise ValueError("rank failure or incomplete decode evidence exists")
+
+
+def check_m7_fail_closed_evidence(root, identity, target_state):
+    """Accept only the expected unanimous policy rejection, never a crash/timeout."""
+    root = Path(root)
+    records, errors = [], []
+    for rank in range(4):
+        path = root / "ranks" / f"m6b2-rank-{rank}.json"
+        error_path = root / "ranks" / f"pause-rank-{rank}.error.json"
+        if not path.is_file() or not error_path.is_file():
+            raise ValueError("m7_negative_rank_evidence_missing")
+        record = json.loads(path.read_text())
+        error = json.loads(error_path.read_text())
+        policy = record.get("policy") or record.get("recovery_policy_decision")
+        boundary = record.get("fault_boundary") or {}
+        timeline = record.get("readiness_trace", [])
+        if (record.get("state") != "FAILED"
+                or record.get("transaction_id", "").split(":m6b1:")[0]
+                != identity["transaction_id"]
+                or record.get("fault_requested") is not True
+                or record.get("fault_injected") is not False
+                or record.get("parity_used") is not False
+                or record.get("kv_written") is not False
+                or boundary.get("local_checkpoint_state") != target_state
+                or boundary.get("rank_fault_intents") != [1, 1, 1, 1]
+                or policy is None
+                or policy.get("action") != "FAIL_CLOSED"
+                or policy.get("recommended_action") != "PREFILL_RETRY"
+                or policy.get("use_parity") is not False
+                or target_state not in ("UNPROTECTED", "SNAPSHOT_READY", "COMMITTING")
+                or not any(item.get("checkpoint_state") == target_state
+                           and item.get("fault_requested") is True for item in timeline)):
+            raise ValueError(f"m7_negative_rank{rank}_policy_proof_invalid")
+        if (error.get("state") != "ABORTED_FAIL_CLOSED"
+                or "m7_policy_fail_closed" not in str(error.get("failure", {}).get(
+                    "exception_message", ""))):
+            raise ValueError(f"m7_negative_rank{rank}_was_not_expected_policy_rejection")
+        records.append(record)
+        errors.append(error)
+    signatures = [(r.get("failure_reason"), r["policy"].get("reason")) for r in records]
+    if len(set(signatures)) != 1:
+        raise ValueError("m7_negative_rank_decisions_disagree")
+    return records, errors
 
 
 def check_experiment_evidence(root, identity, checkpoints, response, experiment_mode):
@@ -908,7 +955,23 @@ def main():
         with (root / "paused.json").open("x") as handle:
             json.dump(control("status"), handle, indent=2)
         control("authorize")
-        if paused_client.wait(timeout=600) != 0:
+        pause_client_rc = paused_client.wait(timeout=600)
+        if pause_client_rc != 0:
+            if args.m7_test_fault_state in ("UNPROTECTED", "SNAPSHOT_READY", "COMMITTING"):
+                negative, error_records = check_m7_fail_closed_evidence(
+                    root, identity, args.m7_test_fault_state)
+                verdict.update(
+                    state="EXPECTED_FAIL_CLOSED_PASS", GPU_VALIDATED=True,
+                    M7_NEGATIVE_PASS=True, EXPERIMENT_PASS=True,
+                    fault_state=args.m7_test_fault_state, fault_injected=False,
+                    fault_requested=True, parity_used=False, kv_written=False,
+                    byte_exact=False, four_rank_vote=True,
+                    policy_action="FAIL_CLOSED", recommended_action="PREFILL_RETRY",
+                    failure_category="expected_uncommitted_parity_fail_closed",
+                    rank_decisions=[r["policy"] for r in negative],
+                    rank_errors=[r["failure"]["exception_message"] for r in error_records],
+                    reason="uncommitted parity rejected unanimously; no KV write occurred")
+                raise _ExpectedNegativeComplete()
             raise RuntimeError("pause request failed; inspect pause-client.log")
         if asynchronous:
             # Request timing has already ended at the client. Only acceptance
@@ -963,8 +1026,38 @@ def main():
                     snapshot_id=exported["snapshot_id"]), indent=2) + "\n")
                 del parity
                 if args.m6b2_online_recovery:
-                    from .m6_acceptance import check_m6b2_evidence
-                    m6b2_records = check_m6b2_evidence(root / "ranks", identity, response)
+                    if args.m7_test_no_fault:
+                        m6b2_records = [json.loads(
+                            (root / "ranks" / f"m6b2-rank-{rank}.json").read_text())
+                            for rank in range(4)]
+                        if any(
+                            record.get("state") != "NO_FAULT_DECODE_CONTINUED"
+                            or record.get("fault_requested") is not False
+                            or record.get("fault_injected") is not False
+                            or record.get("parity_used") is not False
+                            or record.get("kv_written") is not False
+                            or record.get("output_ids_observed") is not True
+                            or record.get("rank_checkpoint_readiness") != [5, 5, 5, 5]
+                            for record in m6b2_records
+                        ):
+                            raise ValueError("m7_no_fault_rank_proof_incomplete")
+                    elif args.m7_test_fault_state:
+                        m7_records = [json.loads(
+                            (root / "ranks" / f"m6b2-rank-{rank}.json").read_text())
+                            for rank in range(4)]
+                        if any(record.get("state") == "TEST_NOT_REACHED"
+                               or record.get("target_state_reached") is not True
+                               for record in m7_records):
+                            raise ValueError("TEST_NOT_REACHED:" + args.m7_test_fault_state)
+                        if args.m7_test_fault_state == "COMMITTED":
+                            from .m6_acceptance import check_m6b2_evidence
+                            m6b2_records = check_m6b2_evidence(
+                                root / "ranks", identity, response)
+                        else:
+                            raise ValueError("m7_uncommitted_state_did_not_fail_closed")
+                    else:
+                        from .m6_acceptance import check_m6b2_evidence
+                        m6b2_records = check_m6b2_evidence(root / "ranks", identity, response)
             else:
                 records = check_experiment_evidence(root / "ranks", identity, checkpoints, response, args.mode)
             config = dict(
@@ -982,7 +1075,7 @@ def main():
                               async_commit_delay_s=args.async_commit_delay,
                               async_pending_policy="bounded_off_path_drain")
                 performance = async_performance(response, records, config=config)
-                if args.m6b2_online_recovery:
+                if args.m6b2_online_recovery and not args.m7_test_no_fault:
                     target_recovery = m6b2_records[0]["recovery"]
                     b2_timings = target_recovery["timings"]
                     fault_time = target_recovery["fault_monotonic"]
@@ -1010,7 +1103,15 @@ def main():
                 json.dumps(performance, indent=2) + "\n")
             verdict.update(mode=args.mode, EXPERIMENT_PASS=True, GPU_VALIDATED=True, M1=args.mode != "prefill_retry",
                            output_ids_identical=True, reason="real B/D/E completed; strict rank proof and baseline token match")
-            if args.m6b2_online_recovery:
+            if args.m6b2_online_recovery and args.m7_test_no_fault:
+                verdict.update(
+                    M7_NO_FAULT_PASS=True, fault_injected=False,
+                    parity_used=False, kv_written=False,
+                    output_ids_identical=True,
+                    rank_completion_vote=all(
+                        item.get("rank_checkpoint_readiness") == [5, 5, 5, 5]
+                        for item in m6b2_records))
+            elif args.m6b2_online_recovery:
                 target_recovery = m6b2_records[0]["recovery"]
                 verdict.update(fault_injected=target_recovery["fault_injected"],
                                parity_used=target_recovery["parity_used"],
@@ -1082,6 +1183,8 @@ def main():
                            writeback_byte_exact=True, decode_observed=True, output_ids_identical=True)
             if args.mode:
                 verdict["GPU_VALIDATED"] = True
+    except _ExpectedNegativeComplete:
+        pass
     except (Exception, KeyboardInterrupt) as exc:
         reason = exc.output.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         verdict.update(state="FAIL", reason=f"{type(exc).__name__}: {reason}")
@@ -1107,7 +1210,7 @@ def main():
     if args.online_restore:
         print(f"M3_PASS={str(verdict['M3_PASS']).lower()}\nlost_rank={args.lost_rank}\n"
               f"recover_tokens={args.recover_tokens}\nchunk_count={args.recover_tokens // 256}")
-    return 0 if verdict["state"] == "PASS" else 1
+    return 0 if verdict["state"] in ("PASS", "EXPECTED_FAIL_CLOSED_PASS") else 1
 
 
 if __name__ == "__main__":

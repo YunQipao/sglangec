@@ -90,6 +90,41 @@ class AsyncTests(unittest.TestCase):
             self.assertEqual([t["state"] for t in workers[lost].trace],
                              [SNAPSHOT_READY, COMMITTING, COMMITTED])
 
+    def test_m7_test_barriers_hold_real_worker_lifecycle_states(self):
+        _, _, frozen = snapshots()
+        for target in (SNAPSHOT_READY, COMMITTING, COMMITTED):
+            with self.subTest(target=target):
+                manager = ParityManager(manager_epoch="manager")
+                workers = [AsyncProtection(
+                    "/tmp/unused", transport=transport(manager), timeout_s=30,
+                    test_hold_state=target) for _ in range(4)]
+                for worker, snapshot in zip(workers, frozen):
+                    worker.stage(snapshot)
+                    worker.start()
+                try:
+                    for worker in workers:
+                        self.assertTrue(worker.test_state_reached.wait(5))
+                        self.assertEqual(worker.state, target)
+                        self.assertFalse(worker.finished.is_set())
+                finally:
+                    for worker in workers:
+                        worker.release_test_state()
+                for worker in workers:
+                    self.wait(worker)
+                    self.assertEqual(worker.state, COMMITTED, worker.reason)
+
+    def test_m7_test_state_barrier_timeout_fails_worker_closed(self):
+        _, _, frozen = snapshots()
+        worker = AsyncProtection(
+            "/tmp/unused", transport=transport(ParityManager(manager_epoch="manager")),
+            timeout_s=0.1, test_hold_state=SNAPSHOT_READY)
+        worker.stage(frozen[0])
+        worker.start()
+        self.assertTrue(worker.test_state_reached.wait(2))
+        self.wait(worker)
+        self.assertEqual(worker.state, FAILED)
+        self.assertIn("m7_test_state_barrier_timeout", worker.reason)
+
     def test_snapshot_is_independent_immutable_bytes_and_deep_metadata(self):
         blocks, meta, frozen = snapshots()
         original = frozen[0].payload

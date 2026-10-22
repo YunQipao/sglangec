@@ -28,7 +28,10 @@ class SchedulerAsyncProtection:
         self.lifecycle_written = False
         self.worker = AsyncProtection(
             self.socket, timeout_s=float(os.environ["SGLANG_KV_EC_PAUSE_TIMEOUT_S"]),
-            commit_delay_s=float(os.environ.get("SGLANG_KV_EC_ASYNC_COMMIT_DELAY_S", "0")))
+            commit_delay_s=float(os.environ.get("SGLANG_KV_EC_ASYNC_COMMIT_DELAY_S", "0")),
+            test_hold_state=(os.environ.get("SGLANG_KV_EC_M7_TEST_FAULT_STATE", "")
+                             if os.environ.get("SGLANG_KV_EC_M7_TEST_FAULT_STATE", "")
+                             != "UNPROTECTED" else ""))
 
     def check_online_admission(self, gate):
         SchedulerShadowRecovery.check_online_admission(self, gate)

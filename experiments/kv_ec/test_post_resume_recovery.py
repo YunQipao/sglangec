@@ -186,6 +186,73 @@ class PostResumeSchedulerTests(unittest.TestCase):
             self.assertFalse(g.evidence.get("fault_requested", False))
             self.assertFalse(g.evidence.get("post_resume_recovery", {}).get("parity_used", False))
 
+    def test_m7_no_fault_completed_request_records_unanimous_normal_completion(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        with tempfile.TemporaryDirectory() as tmp:
+            g, req = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            req.finished = Mock(return_value=True)
+            g.post_resume_enabled = True
+            g.post_resume_mode = "m6b2"
+            g.m7_test_no_fault = True
+            g.post_resume = PostResumeRecovery()
+            g.deadline = time.monotonic() + 3
+            with patch("experiments.kv_ec.post_resume_recovery.torch.distributed.all_gather",
+                       side_effect=self.collective()):
+                self.assertFalse(g.tick())
+            record = g.evidence["post_resume_recovery"]
+            self.assertEqual(record["state"], "NO_FAULT_DECODE_CONTINUED")
+            self.assertEqual(record["rank_checkpoint_readiness"], [5, 5, 5, 5])
+            self.assertFalse(record["fault_injected"] or record["parity_used"] or record["kv_written"])
+
+    def test_m7_target_state_not_reached_is_explicit_not_pass(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        with tempfile.TemporaryDirectory() as tmp:
+            g, req = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            req.finished = Mock(return_value=True)
+            g.post_resume_enabled = True
+            g.post_resume_mode = "m6b2"
+            g.m7_test_fault_state = "UNPROTECTED"
+            g.post_resume = PostResumeRecovery()
+            g.deadline = time.monotonic() + 3
+            with patch("experiments.kv_ec.post_resume_recovery.torch.distributed.all_gather",
+                       side_effect=self.collective()):
+                self.assertFalse(g.tick())
+            record = g.evidence["post_resume_recovery"]
+            self.assertEqual(record["state"], "TEST_NOT_REACHED")
+            self.assertFalse(record["target_state_reached"])
+            self.assertEqual(record["rank_checkpoint_readiness"], [5, 5, 5, 5])
+
+    def test_m7_negative_acceptance_rejects_missing_or_inconsistent_proof(self):
+        from experiments.kv_ec.accept_pause import check_m7_fail_closed_evidence
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity = {"transaction_id": "tx"}
+            for rank in range(4):
+                ranks = root / "ranks"
+                ranks.mkdir(exist_ok=True)
+                policy = dict(action="FAIL_CLOSED", recommended_action="PREFILL_RETRY",
+                              use_parity=False, reason="parity_not_committed")
+                record = dict(
+                    state="FAILED", transaction_id=f"tx:m6b1:chunk{rank}",
+                    fault_requested=True, fault_injected=False, parity_used=False,
+                    kv_written=False, policy=policy, failure_reason="expected",
+                    checkpoint_state="COMMITTING",
+                    fault_boundary=dict(local_checkpoint_state="COMMITTING",
+                                        rank_fault_intents=[1, 1, 1, 1]),
+                    readiness_trace=[dict(checkpoint_state="COMMITTING",
+                                          fault_requested=True)])
+                (ranks / f"m6b2-rank-{rank}.json").write_text(__import__("json").dumps(record))
+                error = dict(state="ABORTED_FAIL_CLOSED", failure=dict(
+                    exception_message="m7_policy_fail_closed:parity_not_committed"))
+                (ranks / f"pause-rank-{rank}.error.json").write_text(__import__("json").dumps(error))
+            records, _ = check_m7_fail_closed_evidence(root, identity, "COMMITTING")
+            self.assertEqual(len(records), 4)
+            bad = __import__("json").loads((root / "ranks/m6b2-rank-2.json").read_text())
+            bad["kv_written"] = True
+            (root / "ranks/m6b2-rank-2.json").write_text(__import__("json").dumps(bad))
+            with self.assertRaisesRegex(ValueError, "policy_proof_invalid"):
+                check_m7_fail_closed_evidence(root, identity, "COMMITTING")
+
     def test_explicit_fault_before_commit_fails_closed_without_parity(self):
         from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
         with tempfile.TemporaryDirectory() as tmp:

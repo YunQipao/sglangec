@@ -108,8 +108,15 @@ class PostResumeRecovery:
         epoch = str(metadata.get("manager_epoch", ""))
         if req is None or req.rid != gate.target:
             return 3, checkpoint, epoch
-        if req.finished() or req.is_retracted or req.to_finish is not None:
+        if req.is_retracted or req.to_finish is not None:
             return 3, checkpoint, epoch
+        if req.finished():
+            # A successful request ending is not cancellation. In the explicit
+            # no-fault control, keep the fixed readiness collective and report
+            # completion instead of treating it as a failed recovery request.
+            return (5 if (getattr(gate, "m7_test_no_fault", False)
+                          or getattr(gate, "m7_test_fault_state", "")) else 3,
+                    checkpoint, epoch)
         live_epoch = str(getattr(shadow, "manager_epoch", ""))
         if epoch and live_epoch and epoch != live_epoch:
             gate.evidence["readiness_failure"] = "manager_epoch_changed"
@@ -217,15 +224,21 @@ class PostResumeRecovery:
             self.row_protected = False
 
     def _reject(self, gate, reason):
+        worker = getattr(gate.shadow, "worker", None)
+        if worker is not None and hasattr(worker, "release_test_state"):
+            worker.release_test_state()
         self._record(FAILED, reason=reason)
         record = dict(
             state=FAILED, failure_reason=reason, transaction_id=self.txid,
             checkpoint_id=self.checkpoint_id, checkpoint_epoch=self.epoch,
             parity_used=False, kv_written=False, trace=self.trace,
+            fault_injected=False,
             policy=gate.evidence.get("recovery_policy_decision"),
             fault_requested=bool(gate.evidence.get("fault_requested", False)),
             checkpoint_state=getattr(getattr(gate.shadow, "worker", None), "state", None),
             fault_boundary=gate.evidence.get("m7_fault_boundary"),
+            worker_state_timeline=list(getattr(
+                getattr(gate.shadow, "worker", None), "trace", [])),
             recovery_policy_decision=gate.evidence.get("recovery_policy_decision"),
             readiness_trace=self.readiness_trace)
         gate.evidence["post_resume_recovery"] = record
@@ -422,6 +435,26 @@ class PostResumeRecovery:
             # A missing/cancelled/inconsistent request is a unanimous safe
             # refusal, not a rank-local branch into another collective.
             return self._reject(gate, "rank_identity_or_request_not_unanimous")
+        if (getattr(gate, "m7_test_no_fault", False) or test_fault_state) \
+                and all(code == 5 for code in codes):
+            not_reached = bool(test_fault_state and not any(intents))
+            record = dict(
+                state=("TEST_NOT_REACHED" if not_reached else "NO_FAULT_DECODE_CONTINUED"),
+                transaction_id=self.txid, checkpoint_id=checkpoint,
+                checkpoint_epoch=epoch, fault_requested=False,
+                requested_fault_state=test_fault_state or None,
+                target_state_reached=bool(test_fault_state and any(intents)),
+                local_state_timeline=list(getattr(worker, "trace", [])),
+                worker_state_timeline=list(getattr(worker, "trace", [])),
+                checkpoint_state=local_state, rank_checkpoint_readiness=codes,
+                rank_fault_intents=intents, parity_used=False, kv_written=False,
+                fault_injected=False, output_ids_observed=bool(
+                    gate.evidence.get("decode_observed", False)),
+                recovery_policy_decision=None)
+            gate.evidence["post_resume_recovery"] = record
+            self._write_record(gate, record)
+            self.completed = True
+            return False
         if len(set(intents)) != 1:
             return self._reject(gate, "rank_fault_state_intent_mismatch")
         if requested_fault:
@@ -564,6 +597,8 @@ class PostResumeRecovery:
                     recovery = None
                 else:
                     recovery = self._b2(gate, self.mapping, (current_bytes, current))
+                    if hasattr(gate.shadow.worker, "release_test_state"):
+                        gate.shadow.worker.release_test_state()
             else:
                 recovery = None
         except Exception as exc:
@@ -627,6 +662,11 @@ class PostResumeRecovery:
             fault_requested=bool(gate.evidence.get("fault_requested", False)),
             checkpoint_state=getattr(gate.shadow.worker, "state", None),
             fault_boundary=gate.evidence.get("m7_fault_boundary"),
+            target_state_reached=bool(
+                test_fault_state and all(intents)
+                and all(row[0] == 1 for row in gathered)),
+            requested_fault_state=test_fault_state or None,
+            worker_state_timeline=list(getattr(gate.shadow.worker, "trace", [])),
             readiness_trace=self.readiness_trace,
             recovery_policy_decision=gate.evidence.get("recovery_policy_decision"),
             fault_injected=rank_recovery["fault_injected"],

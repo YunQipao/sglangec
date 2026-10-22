@@ -82,12 +82,18 @@ class AsyncProtection:
     """
 
     def __init__(self, socket, *, timeout_s=30, max_bytes=RANK_BYTES,
-                 transport=submit_once, commit_delay_s=0):
+                 transport=submit_once, commit_delay_s=0,
+                 test_hold_state=""):
         if (not math.isfinite(timeout_s) or timeout_s <= 0 or max_bytes < 1
                 or not math.isfinite(commit_delay_s) or not 0 <= commit_delay_s < timeout_s):
             raise ValueError("invalid_async_budget")
         self.socket, self.timeout_s, self.max_bytes = socket, timeout_s, max_bytes
         self.transport, self.commit_delay_s = transport, commit_delay_s
+        if test_hold_state not in ("", SNAPSHOT_READY, COMMITTING, COMMITTED):
+            raise ValueError("unsupported_test_hold_state")
+        self.test_hold_state = test_hold_state
+        self.test_state_reached = threading.Event()
+        self.test_state_release = threading.Event()
         self.state = UNPROTECTED
         self._lock = threading.Lock()
         self._cancel = threading.Event()
@@ -133,12 +139,26 @@ class AsyncProtection:
             raise TimeoutError("async_commit_deadline")
         return remaining
 
+    def _hold_test_state(self, state):
+        if self.test_hold_state != state:
+            return
+        self.test_state_reached.set()
+        if not self.test_state_release.wait(timeout=self.timeout_s):
+            raise TimeoutError("m7_test_state_barrier_timeout:" + state)
+        self._check()
+
+    def release_test_state(self):
+        self.test_state_release.set()
+
     def _run(self, on_complete):
         try:
+            if self.test_hold_state == SNAPSHOT_READY:
+                self._hold_test_state(SNAPSHOT_READY)
             with self._lock:
                 self._check()
                 self._transition(COMMITTING)
                 snapshot = self.snapshot
+            self._hold_test_state(COMMITTING)
             if self._cancel.wait(self.commit_delay_s):
                 raise ValueError("request_cancelled")
             remaining = self._check()
@@ -156,6 +176,7 @@ class AsyncProtection:
                 self._check()
                 self.status = checkpoint_metadata(status)
                 self._transition(COMMITTED)
+            self._hold_test_state(COMMITTED)
         except Exception as exc:
             with self._lock:
                 self.reason = f"{type(exc).__name__}:{exc}"
@@ -173,6 +194,7 @@ class AsyncProtection:
 
     def cancel(self):
         self._cancel.set()
+        self.release_test_state()
         with self._lock:
             self.reason = "request_cancelled"
             self.status = None
