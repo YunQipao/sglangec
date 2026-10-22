@@ -142,3 +142,35 @@ def async_performance(response, records, *, config):
                     "unprotected window starts at completed Prefill, not request arrival",
         memory_note="CPU lifetime ru_maxrss and CUDA allocator high-water at snapshot, not full-request "
                     "GPU peak or NVML usage; snapshot budget excludes bounded IPC/manager copies")
+
+
+def check_m6b2_evidence(root, identity, response):
+    """Require transaction-derived per-rank evidence for one real B2 restore."""
+    root = Path(root)
+    records = [json.loads((root / f"m6b2-rank-{rank}.json").read_text())
+               for rank in range(4)]
+    targets = []
+    for rank, record in enumerate(records):
+        recovery = record.get("recovery", {})
+        if (record.get("state") != "RUNNING"
+                or record.get("checkpoint_id") != identity["transaction_id"] + "-chunk0"
+                or record.get("new_lease_created") is not True
+                or record.get("new_lease_released") is not True
+                or record.get("all_rank_validate_vote") is not True
+                or record.get("all_rank_resume_vote") is not True
+                or record.get("four_rank_vote") is not True
+                or record.get("byte_exact") is not True
+                or recovery.get("oracle_sha256") is None):
+            raise ValueError(f"m6b2_rank{rank}_transaction_proof_incomplete")
+        if record.get("fault_injected") or record.get("parity_used") or record.get("kv_written"):
+            targets.append(rank)
+    if targets != [0]:
+        raise ValueError("m6b2_rank0_must_be_the_only_fault_and_write_target")
+    recovery = records[0]["recovery"]
+    if (recovery.get("fault_injected") is not True
+            or recovery.get("parity_used") is not True
+            or recovery.get("kv_written") is not True
+            or recovery.get("byte_exact") is not True
+            or response.get("output_ids") is None):
+        raise ValueError("m6b2_real_restore_or_decode_proof_missing")
+    return records

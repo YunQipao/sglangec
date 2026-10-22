@@ -46,6 +46,7 @@ class SchedulerPauseGate:
         self.released = False
         self.shadow = None
         self.post_resume_enabled = False
+        self.post_resume_mode = ""
         self.post_resume = None
         self.rank = int(scheduler.model_worker.ps.tp_rank)
         self.owner = f"{identity['transaction_id']}:rank{self.rank}"
@@ -103,7 +104,13 @@ class SchedulerPauseGate:
         m6b1 = os.environ.get("SGLANG_KV_EC_M6B1_RECOVERY", "0")
         if m6b1 not in ("0", "1") or (m6b1 == "1" and mode != "async_protection_only"):
             raise PauseRejected("m6b1_requires_async_protection_mode")
-        gate.post_resume_enabled = m6b1 == "1"
+        m6b2 = os.environ.get("SGLANG_KV_EC_M6B2_RECOVERY", "0")
+        if m6b2 not in ("0", "1") or (m6b2 == "1" and mode != "async_protection_only"):
+            raise PauseRejected("m6b2_requires_async_protection_mode")
+        if m6b1 == "1" and m6b2 == "1":
+            raise PauseRejected("m6b1_m6b2_are_mutually_exclusive")
+        gate.post_resume_enabled = m6b1 == "1" or m6b2 == "1"
+        gate.post_resume_mode = "m6b2" if m6b2 == "1" else ("m6b1" if m6b1 == "1" else "")
         return gate
 
     @property

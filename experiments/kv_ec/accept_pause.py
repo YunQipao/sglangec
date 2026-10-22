@@ -575,6 +575,8 @@ def main():
                         help="E smoke must observe first Decode before commit on every rank")
     parser.add_argument("--m6b1-post-resume", action="store_true",
                         help="enable the no-write post-Resume four-rank lease transaction")
+    parser.add_argument("--m6b2-online-recovery", action="store_true",
+                        help="enable real asynchronous-checkpoint parity recovery after Resume")
     args = parser.parse_args()
     if args.mode and (args.shadow or args.online_restore):
         parser.error("--mode cannot be combined with legacy --shadow/--online-restore")
@@ -583,6 +585,10 @@ def main():
     asynchronous = args.mode == "async_protection_only"
     if args.m6b1_post_resume and not asynchronous:
         parser.error("--m6b1-post-resume requires --mode async_protection_only")
+    if args.m6b2_online_recovery and not asynchronous:
+        parser.error("--m6b2-online-recovery requires --mode async_protection_only")
+    if args.m6b1_post_resume and args.m6b2_online_recovery:
+        parser.error("M6-B1 and M6-B2 are mutually exclusive")
     special = args.mode in ("protection_only", "prefill_retry", "async_protection_only")
     if not 0 <= args.async_commit_delay < args.pause_timeout:
         parser.error("async delay must be nonnegative and less than pause timeout")
@@ -844,6 +850,8 @@ def main():
             pause_env["SGLANG_KV_EC_ASYNC_COMMIT_DELAY_S"] = str(args.async_commit_delay)
         if args.m6b1_post_resume:
             pause_env["SGLANG_KV_EC_M6B1_RECOVERY"] = "1"
+        if args.m6b2_online_recovery:
+            pause_env["SGLANG_KV_EC_M6B2_RECOVERY"] = "1"
         if args.shadow or args.online_restore or args.mode == "protection_only" or asynchronous:
             from .parity_manager import manager_hello
             manager = spawn("experiments.kv_ec.parity_manager", [
@@ -895,6 +903,11 @@ def main():
                 and (root / "ranks" / f"async-lifecycle-rank-{r}.json").exists()
                 for r in range(4)), args.pause_timeout, "async terminal evidence timeout",
                 [(paused_server, "pause server"), (manager, "parity manager")])
+        if args.m6b2_online_recovery:
+            wait_for(lambda: all((root / "ranks" / f"m6b2-rank-{r}.json").exists()
+                                 for r in range(4)), args.pause_timeout,
+                     "M6-B2 recovery evidence timeout",
+                     [(paused_server, "pause server"), (coordinator, "coordinator")])
         wait_for(lambda: all((root / "ranks" / f"pause-rank-{r}.json").exists()
                             for r in range(4)), 10, "decode evidence timeout",
                  [(paused_server, "pause server"), (coordinator, "coordinator")])
@@ -934,6 +947,9 @@ def main():
                     parity_sha256=exported["parity_sha256"],
                     snapshot_id=exported["snapshot_id"]), indent=2) + "\n")
                 del parity
+                if args.m6b2_online_recovery:
+                    from .m6_acceptance import check_m6b2_evidence
+                    m6b2_records = check_m6b2_evidence(root / "ranks", identity, response)
             else:
                 records = check_experiment_evidence(root / "ranks", identity, checkpoints, response, args.mode)
             config = dict(
@@ -957,6 +973,14 @@ def main():
                 json.dumps(performance, indent=2) + "\n")
             verdict.update(mode=args.mode, EXPERIMENT_PASS=True, GPU_VALIDATED=True, M1=args.mode != "prefill_retry",
                            output_ids_identical=True, reason="real B/D/E completed; strict rank proof and baseline token match")
+            if args.m6b2_online_recovery:
+                target_recovery = m6b2_records[0]["recovery"]
+                verdict.update(fault_injected=target_recovery["fault_injected"],
+                               parity_used=target_recovery["parity_used"],
+                               kv_written=target_recovery["kv_written"],
+                               byte_exact=target_recovery["byte_exact"],
+                               four_rank_vote=all(r["four_rank_vote"] for r in m6b2_records),
+                               output_ids_identical=True, M6B2_PASS=True)
         if args.shadow:
             verdict["recovery_timing_ms_by_rank"] = check_shadow_evidence(root / "ranks", identity)
             from .parity_manager import submit_once
