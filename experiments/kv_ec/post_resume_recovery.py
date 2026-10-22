@@ -16,6 +16,7 @@ from .scheduler_shadow import (
     pack_chunk, reconstruct, write_mapped_bytes, verify_mapped_bytes,
     zero_mapped_bytes, checked_buffers, validate_checkpoint,
 )
+from .rank_snapshot import validate_payload
 from .gpu_scratch_restore import restore_rank_to_gpu
 from .parity_manager import COMMITTED, fetch_parity, submit_once
 from .snapshot import digest
@@ -226,10 +227,16 @@ class PostResumeRecovery:
                 torch.cuda.synchronize(device)
                 verify_mapped_bytes(pool, slots, buffers)
                 stage_started = time.perf_counter()
-                final, final_meta = pack_chunk(pool, mapping, gate.req, gate.model_identity,
+                # Re-read the live GPU bytes through the canonical capture
+                # path. Only the payload bytes are compared; the lifecycle
+                # metadata of the live lease intentionally differs from the
+                # M6-A checkpoint metadata. validate_payload re-checks the
+                # layout and every K/V segment against the checkpoint history.
+                final, _ = pack_chunk(pool, mapping, gate.req, gate.model_identity,
                     snapshot_id=self.checkpoint_id, manager_epoch=self.epoch)
-                if final_meta != meta or digest(final) != oracle:
+                if digest(final) != oracle:
                     raise ValueError("m6b2_gpu_writeback_hash_mismatch")
+                validate_payload(final, meta)
                 timings["writeback_and_full_layer_verify_ms"] = (time.perf_counter() - stage_started) * 1000
             except Exception as exc:
                 recovery_ok = False
