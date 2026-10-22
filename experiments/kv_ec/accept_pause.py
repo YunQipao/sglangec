@@ -573,12 +573,16 @@ def main():
                         help="E diagnostic smoke only: background delay to prove Decode overlap")
     parser.add_argument("--require-async-overlap", action="store_true",
                         help="E smoke must observe first Decode before commit on every rank")
+    parser.add_argument("--m6b1-post-resume", action="store_true",
+                        help="enable the no-write post-Resume four-rank lease transaction")
     args = parser.parse_args()
     if args.mode and (args.shadow or args.online_restore):
         parser.error("--mode cannot be combined with legacy --shadow/--online-restore")
     if args.mode == "online_recovery":
         args.online_restore = True
     asynchronous = args.mode == "async_protection_only"
+    if args.m6b1_post_resume and not asynchronous:
+        parser.error("--m6b1-post-resume requires --mode async_protection_only")
     special = args.mode in ("protection_only", "prefill_retry", "async_protection_only")
     if not 0 <= args.async_commit_delay < args.pause_timeout:
         parser.error("async delay must be nonnegative and less than pause timeout")
@@ -838,6 +842,8 @@ def main():
                              SGLANG_KV_EC_RECOVER_TOKENS=str(args.recover_tokens))
         if asynchronous:
             pause_env["SGLANG_KV_EC_ASYNC_COMMIT_DELAY_S"] = str(args.async_commit_delay)
+        if args.m6b1_post_resume:
+            pause_env["SGLANG_KV_EC_M6B1_RECOVERY"] = "1"
         if args.shadow or args.online_restore or args.mode == "protection_only" or asynchronous:
             from .parity_manager import manager_hello
             manager = spawn("experiments.kv_ec.parity_manager", [

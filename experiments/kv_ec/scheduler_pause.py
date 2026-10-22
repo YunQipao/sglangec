@@ -45,6 +45,8 @@ class SchedulerPauseGate:
         self.evidence = {}
         self.released = False
         self.shadow = None
+        self.post_resume_enabled = False
+        self.post_resume = None
         self.rank = int(scheduler.model_worker.ps.tp_rank)
         self.owner = f"{identity['transaction_id']}:rank{self.rank}"
         self.output.mkdir(parents=True, exist_ok=True)
@@ -98,6 +100,10 @@ class SchedulerPauseGate:
             gate.shadow = SchedulerShadowRecovery.from_env()
             if online or mode:
                 gate.shadow.check_online_admission(gate)
+        m6b1 = os.environ.get("SGLANG_KV_EC_M6B1_RECOVERY", "0")
+        if m6b1 not in ("0", "1") or (m6b1 == "1" and mode != "async_protection_only"):
+            raise PauseRejected("m6b1_requires_async_protection_mode")
+        gate.post_resume_enabled = m6b1 == "1"
         return gate
 
     @property
@@ -495,6 +501,18 @@ class SchedulerPauseGate:
         """True skips selection/forward, identically on every TP rank."""
         if self.state == "RESUMED" and hasattr(self.shadow, "observe_request_end"):
             self.shadow.observe_request_end(self)
+        if self.state == "RESUMED" and self.post_resume_enabled:
+            # Every TP rank calls fixed-order collectives at this pre-forward
+            # scheduler boundary; local eligibility is communicated as data.
+            if self.post_resume is None:
+                from .post_resume_recovery import PostResumeRecovery
+                self.post_resume = PostResumeRecovery()
+            try:
+                return self.post_resume.tick(self)
+            except Exception as exc:
+                if self.state == "ABORTED_FAIL_CLOSED":
+                    raise
+                self._fatal(exc)
         if self.state in ("IDLE", "RESUMED"):
             return False
         try:
