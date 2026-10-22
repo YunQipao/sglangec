@@ -111,6 +111,18 @@ class SchedulerPauseGate:
             raise PauseRejected("m6b1_m6b2_are_mutually_exclusive")
         gate.post_resume_enabled = m6b1 == "1" or m6b2 == "1"
         gate.post_resume_mode = "m6b2" if m6b2 == "1" else ("m6b1" if m6b1 == "1" else "")
+        fault_state = os.environ.get("SGLANG_KV_EC_M7_TEST_FAULT_STATE", "")
+        if fault_state not in ("", "UNPROTECTED", "SNAPSHOT_READY", "COMMITTING", "COMMITTED"):
+            raise PauseRejected("invalid_m7_test_fault_state")
+        if fault_state and m6b2 != "1":
+            raise PauseRejected("m7_test_fault_state_requires_m6b2")
+        no_fault = os.environ.get("SGLANG_KV_EC_M7_TEST_NO_FAULT", "0")
+        if no_fault not in ("0", "1") or (no_fault == "1" and m6b2 != "1"):
+            raise PauseRejected("m7_test_no_fault_requires_m6b2")
+        if fault_state and no_fault == "1":
+            raise PauseRejected("m7_test_fault_and_no_fault_are_mutually_exclusive")
+        gate.m7_test_fault_state = fault_state
+        gate.m7_test_no_fault = no_fault == "1"
         return gate
 
     @property

@@ -89,11 +89,12 @@ class PostResumeRecovery:
         # Transaction identity is deterministic from the existing coordinator
         # admission; mismatched request/checkpoint/epoch prevents unanimous entry.
         fields = (gate.identity["transaction_id"], gate.target,
-                  checkpoint_id, checkpoint_epoch, bool(fault_requested))
-        local = torch.tensor([readiness, *(_word(x) for x in fields)],
+                  checkpoint_id, checkpoint_epoch)
+        local = torch.tensor([readiness, int(bool(fault_requested)),
+                              *(_word(x) for x in fields)],
                              dtype=torch.int64, device="cpu")
         gathered = self._all_gather(gate, local)
-        identities = [row[1:] for row in gathered]
+        identities = [row[2:] for row in gathered]
         unanimous_identity = all(value == identities[0] for value in identities)
         return gathered, unanimous_identity
 
@@ -224,6 +225,8 @@ class PostResumeRecovery:
             policy=gate.evidence.get("recovery_policy_decision"),
             fault_requested=bool(gate.evidence.get("fault_requested", False)),
             checkpoint_state=getattr(getattr(gate.shadow, "worker", None), "state", None),
+            fault_boundary=gate.evidence.get("m7_fault_boundary"),
+            recovery_policy_decision=gate.evidence.get("recovery_policy_decision"),
             readiness_trace=self.readiness_trace)
         gate.evidence["post_resume_recovery"] = record
         self._write_record(gate, record)
@@ -395,11 +398,23 @@ class PostResumeRecovery:
             return False
         gate.deadline = time.monotonic() + gate.timeout_s
         readiness, checkpoint, epoch = self._local_readiness(gate)
+        worker = getattr(gate.shadow, "worker", None)
+        local_state = getattr(worker, "state", "UNPROTECTED")
+        test_fault_state = getattr(gate, "m7_test_fault_state", "")
         requested_fault = bool(gate.evidence.get("fault_requested", False))
+        if test_fault_state:
+            requested_fault = local_state == test_fault_state
         gathered, identity_ok = self._collect(
             gate, readiness=readiness, checkpoint_id=checkpoint,
             checkpoint_epoch=epoch, fault_requested=requested_fault)
         codes = [row[0] for row in gathered]
+        intents = [row[1] for row in gathered]
+        gate.evidence["m7_fault_boundary"] = dict(
+            local_checkpoint_state=local_state,
+            requested_fault_state=test_fault_state or None,
+            local_fault_intent=requested_fault,
+            rank_fault_intents=intents,
+            rank_checkpoint_readiness=codes)
         self._note_readiness(gate, readiness, codes, requested_fault)
         self.txid = f"{gate.identity['transaction_id']}:m6b1:{checkpoint}"
         self.checkpoint_id, self.epoch = checkpoint, epoch
@@ -407,6 +422,10 @@ class PostResumeRecovery:
             # A missing/cancelled/inconsistent request is a unanimous safe
             # refusal, not a rank-local branch into another collective.
             return self._reject(gate, "rank_identity_or_request_not_unanimous")
+        if len(set(intents)) != 1:
+            return self._reject(gate, "rank_fault_state_intent_mismatch")
+        if requested_fault:
+            gate.evidence["fault_requested"] = True
         if gate.post_resume_mode != "m6b2" and not all(code == 1 for code in codes):
             return False
         if gate.post_resume_mode == "m6b2" and not all(code == 1 for code in codes):
@@ -427,11 +446,18 @@ class PostResumeRecovery:
                     recommended_action=recommended_action)
             return self._reject(gate, "m7_policy_fail_closed:" + decision.reason)
         if gate.post_resume_mode == "m6b2":
-            # Reaching all-rank readiness is the M6-B2 test harness's explicit
-            # logical fault request boundary. It is never inferred from a
-            # rank merely reporting COMMITTING.
-            gate.evidence["fault_requested"] = True
-            self._note_readiness(gate, readiness, codes, True)
+            if getattr(gate, "m7_test_no_fault", False):
+                return False
+            # Preserve M6-B2's default COMMITTED test, but permit an explicit
+            # test-only state trigger. A non-COMMITTED trigger is handled by
+            # policy and cannot enter the parity fetch/XOR path.
+            if not test_fault_state and all(code == 1 for code in codes):
+                requested_fault = True
+            if requested_fault:
+                gate.evidence["fault_requested"] = True
+            self._note_readiness(gate, readiness, codes, requested_fault)
+            if not requested_fault:
+                return False
             decision = self._b2_policy(gate, None, None)
             gate.evidence["recovery_policy_decision"] = dict(
                 action=decision.action, reason=decision.reason,
@@ -600,6 +626,7 @@ class PostResumeRecovery:
             all_rank_validate_vote=True, all_rank_resume_vote=True,
             fault_requested=bool(gate.evidence.get("fault_requested", False)),
             checkpoint_state=getattr(gate.shadow.worker, "state", None),
+            fault_boundary=gate.evidence.get("m7_fault_boundary"),
             readiness_trace=self.readiness_trace,
             recovery_policy_decision=gate.evidence.get("recovery_policy_decision"),
             fault_injected=rank_recovery["fault_injected"],

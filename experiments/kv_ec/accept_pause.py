@@ -577,6 +577,11 @@ def main():
                         help="enable the no-write post-Resume four-rank lease transaction")
     parser.add_argument("--m6b2-online-recovery", action="store_true",
                         help="enable real asynchronous-checkpoint parity recovery after Resume")
+    parser.add_argument("--m7-test-fault-state",
+                        choices=("UNPROTECTED", "SNAPSHOT_READY", "COMMITTING", "COMMITTED"),
+                        help="test-only logical fault request at a unanimous M6-B2 scheduler boundary")
+    parser.add_argument("--m7-test-no-fault", action="store_true",
+                        help="M7 control run: decode normally without M6-B2 fault injection")
     args = parser.parse_args()
     if args.mode and (args.shadow or args.online_restore):
         parser.error("--mode cannot be combined with legacy --shadow/--online-restore")
@@ -587,6 +592,12 @@ def main():
         parser.error("--m6b1-post-resume requires --mode async_protection_only")
     if args.m6b2_online_recovery and not asynchronous:
         parser.error("--m6b2-online-recovery requires --mode async_protection_only")
+    if args.m7_test_fault_state and not args.m6b2_online_recovery:
+        parser.error("--m7-test-fault-state requires --m6b2-online-recovery")
+    if args.m7_test_no_fault and not args.m6b2_online_recovery:
+        parser.error("--m7-test-no-fault requires --m6b2-online-recovery")
+    if args.m7_test_no_fault and args.m7_test_fault_state:
+        parser.error("--m7-test-no-fault and --m7-test-fault-state are mutually exclusive")
     if args.m6b1_post_resume and args.m6b2_online_recovery:
         parser.error("M6-B1 and M6-B2 are mutually exclusive")
     special = args.mode in ("protection_only", "prefill_retry", "async_protection_only")
@@ -852,6 +863,10 @@ def main():
             pause_env["SGLANG_KV_EC_M6B1_RECOVERY"] = "1"
         if args.m6b2_online_recovery:
             pause_env["SGLANG_KV_EC_M6B2_RECOVERY"] = "1"
+        if args.m7_test_fault_state:
+            pause_env["SGLANG_KV_EC_M7_TEST_FAULT_STATE"] = args.m7_test_fault_state
+        if args.m7_test_no_fault:
+            pause_env["SGLANG_KV_EC_M7_TEST_NO_FAULT"] = "1"
         if args.shadow or args.online_restore or args.mode == "protection_only" or asynchronous:
             from .parity_manager import manager_hello
             manager = spawn("experiments.kv_ec.parity_manager", [

@@ -171,6 +171,21 @@ class PostResumeSchedulerTests(unittest.TestCase):
             self.assertEqual(g.evidence["recovery_readiness"]["action"],
                              "WAIT_AND_CONTINUE_DECODE")
 
+    def test_m7_committed_no_fault_control_continues_decode(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            g.post_resume_enabled = True
+            g.post_resume_mode = "m6b2"
+            g.m7_test_no_fault = True
+            g.post_resume = PostResumeRecovery()
+            with patch("experiments.kv_ec.post_resume_recovery.torch.distributed.all_gather",
+                       side_effect=self.collective()):
+                self.assertFalse(g.tick())
+            self.assertEqual(g.post_resume.state, "RUNNING")
+            self.assertFalse(g.evidence.get("fault_requested", False))
+            self.assertFalse(g.evidence.get("post_resume_recovery", {}).get("parity_used", False))
+
     def test_explicit_fault_before_commit_fails_closed_without_parity(self):
         from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
         with tempfile.TemporaryDirectory() as tmp:
@@ -189,6 +204,58 @@ class PostResumeSchedulerTests(unittest.TestCase):
             self.assertEqual(policy["action"], "FAIL_CLOSED")
             self.assertEqual(policy["recommended_action"], "PREFILL_RETRY")
             self.assertFalse(policy["use_parity"])
+            self.assertFalse(g.evidence["post_resume_recovery"]["parity_used"])
+
+    def test_m7_controlled_uncommitted_fault_states_fail_closed_without_parity(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        import experiments.kv_ec.post_resume_recovery as module
+
+        for state in ("UNPROTECTED", "SNAPSHOT_READY", "COMMITTING"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+                g.shadow.worker.state = state
+                g.post_resume_enabled = True
+                g.post_resume_mode = "m6b2"
+                g.m7_test_fault_state = state
+                g.post_resume = PostResumeRecovery()
+                with patch.object(module.torch.distributed, "all_gather",
+                                  side_effect=self.collective()):
+                    with self.assertRaises(PauseRejected):
+                        g.tick()
+                boundary = g.evidence["m7_fault_boundary"]
+                self.assertTrue(boundary["local_fault_intent"])
+                self.assertEqual(boundary["rank_fault_intents"], [1, 1, 1, 1])
+                policy = g.evidence["recovery_policy_decision"]
+                self.assertEqual(policy["action"], "FAIL_CLOSED")
+                self.assertFalse(policy["use_parity"])
+                self.assertFalse(g.evidence["post_resume_recovery"]["parity_used"])
+                self.assertIn("prefill_retry_unsupported_after_decode_observed",
+                              g.evidence["post_resume_recovery"]["failure_reason"])
+
+    def test_m7_fault_intent_disagreement_fails_closed_before_policy_vote(self):
+        from experiments.kv_ec.post_resume_recovery import PostResumeRecovery
+        import experiments.kv_ec.post_resume_recovery as module
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            g.shadow.worker.state = "COMMITTING"
+            g.post_resume_enabled = True
+            g.post_resume_mode = "m6b2"
+            g.m7_test_fault_state = "COMMITTING"
+            g.post_resume = PostResumeRecovery()
+
+            def mixed_intent(output, local, group=None, async_op=False):
+                for index, item in enumerate(output):
+                    item.copy_(local)
+                    item[1] = 1 if index in (0, 2) else 0
+                return Work()
+
+            with patch.object(module.torch.distributed, "all_gather",
+                              side_effect=mixed_intent):
+                with self.assertRaises(PauseRejected):
+                    g.tick()
+            self.assertEqual(g.evidence["m7_fault_boundary"]["rank_fault_intents"],
+                             [1, 0, 1, 0])
+            self.assertNotIn("recovery_policy_decision", g.evidence)
             self.assertFalse(g.evidence["post_resume_recovery"]["parity_used"])
 
     def test_mixed_committing_and_committed_ranks_wait_without_recovery(self):
