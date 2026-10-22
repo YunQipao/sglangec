@@ -967,6 +967,28 @@ def main():
                               async_commit_delay_s=args.async_commit_delay,
                               async_pending_policy="bounded_off_path_drain")
                 performance = async_performance(response, records, config=config)
+                if args.m6b2_online_recovery:
+                    target_recovery = m6b2_records[0]["recovery"]
+                    b2_timings = target_recovery["timings"]
+                    fault_time = target_recovery["fault_monotonic"]
+                    decode_times = [json.loads((root / "ranks" / f"pause-rank-{r}.json").read_text())
+                                    ["decode_observed_monotonic"] for r in range(4)]
+                    performance.update(
+                        mode="m6b2_async_parity_recovery",
+                        fault_to_first_decode_ms=(max(decode_times) - fault_time) * 1000,
+                        xor_and_independent_hash_ms=b2_timings["xor_and_independent_hash_ms"],
+                        survivor_rank_data_collection_ms=b2_timings["survivor_gather_ms"],
+                        parity_fetch_ms=b2_timings["parity_fetch_ms"],
+                        h2d_ms=b2_timings["h2d_ms"],
+                        kv_writeback_and_full_layer_verify_ms=b2_timings[
+                            "writeback_and_full_layer_verify_ms"],
+                        four_rank_completion_coordination_ms=b2_timings[
+                            "completion_coordination_ms"],
+                        recovery_transaction_ms=b2_timings["recovery_transaction_ms"],
+                        m4_comparison="descriptive_only; M4 was synchronous prefill-time recovery; "
+                        "M6-B2 is post-Resume after asynchronous COMMITTED parity",
+                        hash_cost_note="xor_and_independent_hash_ms includes trusted historical-hash "
+                        "verification and is not pure XOR compute time")
             else:
                 performance = experiment_performance_record(args.mode, response, records, config=config)
             (root / f"performance-{args.mode.replace('_', '-')}.json").write_text(

@@ -91,6 +91,8 @@ class PostResumeRecovery:
         return 1, checkpoint, epoch
 
     def _release_local(self, gate):
+        if getattr(self, "rollback_failed", False):
+            raise RuntimeError("m6b2_rollback_unproven_keep_lease")
         if self.slot_leased:
             event = torch.cuda.Event()
             event.record(gate.scheduler.forward_stream)
@@ -291,6 +293,7 @@ class PostResumeRecovery:
             return False  # checkpoint not committed or decode not yet observed
 
         self._record(REQUESTED)
+        b2_preparation_voted = False
         try:
             # This call is before batch selection/forward. The normal scheduler
             # is non-overlap; require all prior producers to be fenced below.
@@ -361,14 +364,43 @@ class PostResumeRecovery:
                              json.dumps(self.mapping.physical_slots).encode()).hexdigest(),
                          slot_generations=list(self.mapping.slot_generations),
                          cuda_event_complete=True, old_lease_reused=False)
-            recovery = self._b2(gate, self.mapping, (current_bytes, current)) if gate.post_resume_mode == "m6b2" else None
+            if gate.post_resume_mode == "m6b2":
+                # This vote is the fixed boundary between local preparation
+                # and B2's parity/data collectives. A rank that failed any
+                # mapping, event, lease, or checkpoint step joins this same
+                # vote from the exception path below.
+                prepared, same_identity = self._collect(
+                    gate, readiness=1, checkpoint_id=self.checkpoint_id,
+                    checkpoint_epoch=self.epoch)
+                b2_preparation_voted = True
+                if not same_identity or any(row[0] != 1 for row in prepared):
+                    local_ok = False
+                    reason = "m6b2_rank_preparation_vote_rejected"
+                    recovery = None
+                else:
+                    recovery = self._b2(gate, self.mapping, (current_bytes, current))
+            else:
+                recovery = None
         except Exception as exc:
             local_ok = False
             reason = type(exc).__name__ + ":" + str(exc)
             if gate.post_resume_mode == "m6b2":
+                # Match the successful rank's preparation vote before any
+                # rank is allowed to enter _b2's gather sequence.
+                if not b2_preparation_voted:
+                    try:
+                        prepared, same_identity = self._collect(
+                            gate, readiness=0, checkpoint_id=self.checkpoint_id,
+                            checkpoint_epoch=self.epoch)
+                        b2_preparation_voted = True
+                        if not same_identity or any(row[0] != 1 for row in prepared):
+                            reason += ";rank_preparation_vote_rejected"
+                    except Exception as vote_exc:
+                        reason += ";rank_preparation_vote=" + type(vote_exc).__name__
                 try:
                     self._rollback_b2()
                 except Exception as rollback_exc:
+                    self.rollback_failed = True
                     reason += ";rollback=" + type(rollback_exc).__name__ + ":" + str(rollback_exc)
         else:
             local_ok, reason = True, ""
