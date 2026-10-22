@@ -1,6 +1,7 @@
 """Scheduler-path CPU tests for the no-write M6-B1 transaction."""
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -143,7 +144,7 @@ class PostResumeSchedulerTests(unittest.TestCase):
             g, req = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
             req.to_finish = "cancelled"
             g.post_resume_enabled = True
-            g.deadline = 10**20
+            g.deadline = time.monotonic() + 3
             g.timeout_s = 3
             import experiments.kv_ec.post_resume_recovery as module
             with patch.object(module.torch.distributed, "all_gather", side_effect=self.collective()), \
@@ -171,6 +172,25 @@ class PostResumeSchedulerTests(unittest.TestCase):
             self.assertFalse(policy["use_parity"])
             record = g.evidence["post_resume_recovery"]
             self.assertFalse(record["parity_used"] or record["kv_written"])
+
+    def test_committed_state_records_unanimous_ec_policy(self):
+        from experiments.kv_ec.post_resume_recovery import (
+            EC_RECOVERY, PostResumeRecovery,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            g, _ = self.setup_rank(Path(tmp), PauseCoordinator("tx"), 0)
+            g.post_resume_mode = "m6b2"
+            g.deadline = time.monotonic() + 3
+            g.shadow.lost_rank = 0
+            recovery = PostResumeRecovery()
+            recovery.checkpoint_id = "tx-chunk0"
+            recovery.epoch = "manager"
+            import experiments.kv_ec.post_resume_recovery as module
+            with patch.object(module.torch.distributed, "all_gather",
+                              side_effect=self.collective()):
+                decision = recovery._b2_policy(g, None, None)
+            self.assertEqual(decision.action, EC_RECOVERY)
+            self.assertTrue(decision.use_parity)
 
     def test_cuda_event_incomplete_fails_closed_and_releases_new_lease(self):
         from experiments.kv_ec.post_resume_recovery import PostResumeRecovery

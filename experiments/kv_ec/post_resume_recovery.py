@@ -352,26 +352,25 @@ class PostResumeRecovery:
             return False
         if gate.post_resume_mode == "m6b2" and all(code == 0 for code in codes):
             return False
-        if not all(code == 1 for code in codes):
-            # M7: a non-committed checkpoint never silently defers. Every
-            # rank joins one fixed-order policy vote; uncommitted parity is
-            # unusable, and a post-decode prefill retry cannot safely replay
-            # from this lifecycle boundary, so the outcome is fail-closed
-            # with the decision recorded as evidence.
+        if gate.post_resume_mode == "m6b2":
             decision = self._b2_policy(gate, None, None)
-            recommended_action = decision.action
-            if decision.action != FAIL_CLOSED:
-                # PREFILL_RETRY here is advisory for a pre-resume boundary;
-                # the post-resume tick cannot execute it safely.
-                decision = RecoveryDecision(
-                    FAIL_CLOSED, "prefill_retry_unsupported_after_decode_observed:"
-                    + decision.reason)
             gate.evidence["recovery_policy_decision"] = dict(
                 action=decision.action, reason=decision.reason,
-                recommended_action=recommended_action,
+                recommended_action=decision.action,
                 use_parity=decision.use_parity, evidence=decision.evidence,
                 rank_codes=codes)
-            return self._reject(gate, "m7_policy_fail_closed:" + decision.reason)
+            if decision.action != EC_RECOVERY or not all(code == 1 for code in codes):
+                recommended_action = decision.action
+                if decision.action != FAIL_CLOSED:
+                    decision = RecoveryDecision(
+                        FAIL_CLOSED,
+                        "prefill_retry_unsupported_after_decode_observed:" + decision.reason)
+                gate.evidence["recovery_policy_decision"].update(
+                    action=decision.action, reason=decision.reason,
+                    recommended_action=recommended_action)
+                return self._reject(gate, "m7_policy_fail_closed:" + decision.reason)
+        if not all(code == 1 for code in codes):
+            return False
 
         self._record(REQUESTED)
         b2_preparation_voted = False
