@@ -147,6 +147,12 @@ OUT=$(mktemp -d /tmp/kv-ec-m6-XXXXXX)
   --smoke-evidence "$OUT/smoke" --repeat 3 \
   --startup-timeout 600 --pause-timeout 120 --output "$OUT/three"
 
+# The M6 summarizer's specific historical two-argument comparison failure can
+# instead be audited without modifying the original trials.json:
+"$PY" -m experiments.kv_ec.m6_abe \
+  --verify-study /tmp/kv-ec-m6-9omD4p/smoke \
+  --output /tmp/kv-ec-m6-smoke-reverified.json
+
 # Read-only re-audit: starts no CPU tests, servers or GPU work.
 "$PY" -m experiments.kv_ec.m6_abe \
   --verify-study "$OUT/three" --output "$OUT/three-reverified.json"
@@ -155,6 +161,9 @@ OUT=$(mktemp -d /tmp/kv-ec-m6-XXXXXX)
 Run each command only after the preceding command succeeds. Do not compare smoke
 Request Total with the undelayed study. A dirty source or incompatible smoke is
 rejected before the first server starts. Source commit identities are preserved.
+An offline PASS is a separate report only; the original manifest retains its
+recorded state and is never promoted. The A/B/E summary compares A-B and A-E
+independently, retaining exact input, sampling, token and finish-reason checks.
 
 Standalone E-only minimal real-GPU acceptance (runs its own real A token oracle):
 

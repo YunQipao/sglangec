@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import statistics
 import sys
+import traceback
 
 from .accept_pause import MEASURED_SOURCES, verify_run
 from .m4_abcd import audit_mode, preflight_config
@@ -20,11 +21,14 @@ from .m4_analysis import load, require
 from .m4_trials import run_logged
 from .m6_acceptance import async_performance, check_async_evidence
 from .request_debug import compare
-from .study_audit import validate_cpu
-from .study_validation import check_live_sources, compatible_config, historical_sources
+from .study_audit import artifact_hashes, validate_cpu
+from .study_validation import (
+    Inconclusive, check_live_sources, compatible_config, historical_sources, runtime_sources, sha256_file,
+)
 
 
 MODES = ("baseline", "protection_only", "async_protection_only")
+RECOVERABLE_SUMMARY_REASON = "ValueError:too many values to unpack (expected 2)"
 ASYNC_CONFIG_KEYS = (
     "async_queue_capacity", "async_snapshot_budget_bytes", "async_commit_delay_s",
     "async_pending_policy",
@@ -33,6 +37,12 @@ ASYNC_CONFIG_KEYS = (
 
 def base_config(config):
     return {k: v for k, v in config.items() if k not in ASYNC_CONFIG_KEYS}
+
+def compare_abe(responses):
+    """Anchor both protected modes to A using the unchanged strict pair oracle."""
+    require(set(responses) == set(MODES), "M6_missing_response_mode")
+    for mode in MODES[1:]:
+        compare([responses["baseline"], responses[mode]])
 
 
 def synchronous_unprotected_window(root):
@@ -90,10 +100,13 @@ def audit_e(root, *, require_overlap):
     return perf, response
 
 
-def summarize(root, *, allow_running=False):
+def summarize(root, *, allow_running=False, reaudit_summary_failure=False):
     root = Path(root)
     manifest = load(root / "trials.json")
-    require(manifest["state"] == "PASS" or allow_running and manifest["state"] == "RUNNING",
+    recoverable = (reaudit_summary_failure and manifest["state"] == "FAIL"
+                   and manifest.get("reason") == RECOVERABLE_SUMMARY_REASON)
+    require(manifest["state"] == "PASS" or allow_running and manifest["state"] == "RUNNING"
+            or recoverable,
             "M6_manifest_not_PASS")
     require(manifest["repeat"] in (1, 3)
             and len(manifest["trials"]) == manifest["repeat"], "M6_missing_repeats")
@@ -114,7 +127,7 @@ def summarize(root, *, allow_running=False):
     for trial in manifest["trials"]:
         require(trial["state"] == "PASS" and trial["completed_modes"] == list(MODES),
                 "M6_trial_incomplete")
-        responses = []
+        responses = {}
         for mode in MODES:
             path = Path(trial["run"]) / mode
             perf, response = (audit_e(path, require_overlap=manifest["diagnostic_overlap_smoke"])
@@ -148,8 +161,8 @@ def summarize(root, *, allow_running=False):
                 require(perf["config"]["async_commit_delay_s"] == manifest["async_commit_delay_s"],
                         "M6_study_delay_drift")
             groups[mode].append(perf)
-            responses.append(path / ("baseline-response.json" if mode == "baseline" else "pause-response.json"))
-        compare(responses)
+            responses[mode] = path / ("baseline-response.json" if mode == "baseline" else "pause-response.json")
+        compare_abe(responses)
         a, b, e = [groups[mode][-1] for mode in MODES]
         raw.append(dict(
             repeat=trial["repeat"], B_minus_A_request_ms=b["request_total_ms"] - a["request_total_ms"],
@@ -177,6 +190,43 @@ def summarize(root, *, allow_running=False):
         note="Delayed correctness smoke latencies must not be compared with undelayed performance. "
              "Commit observation bounds the unprotected window conservatively; n=3 is a pilot.")
 
+def reaudit_study(root):
+    """Independent metadata-only report; never repairs a historical manifest."""
+    root = Path(root).resolve()
+    report = dict(
+        state="FAIL", study=str(root), original_manifest_state=None, original_manifest_reason=None,
+        cpu_validation=None, gpu_trial_validation=None, source_equivalence_proof=None,
+        reconstructed_summary=None, original_artifact_hashes=None, reason=None,
+        auditor_source_sha256={n: sha256_file(Path(__file__).with_name(n)) for n in runtime_sources()})
+    before = None
+    try:
+        before = artifact_hashes(root)
+        report["original_artifact_hashes"] = before
+        manifest = load(root / "trials.json")
+        report.update(original_manifest_state=manifest.get("state"),
+                      original_manifest_reason=manifest.get("reason"))
+        result = summarize(root, reaudit_summary_failure=True)
+        report.update(
+            cpu_validation=result["cpu_validation"], reconstructed_summary=result,
+            source_equivalence_proof=result["source_proof"],
+            gpu_trial_validation=dict(
+                state="PASS", repeat=result["repeat"], modes=list(MODES),
+                diagnostic_overlap_smoke=result["diagnostic_overlap_smoke"],
+                checks="reexecuted A/B/E acceptance, leases/events, parity, rank timelines, exact A-B/A-E oracle"))
+        report["state"] = "PASS"
+    except (Exception, KeyboardInterrupt) as exc:
+        report.update(state="INCONCLUSIVE" if isinstance(exc, Inconclusive) else "FAIL",
+                      reason=f"{type(exc).__name__}:{exc}", traceback=traceback.format_exc())
+    finally:
+        if before is not None:
+            try:
+                report["original_artifacts_unchanged"] = before == artifact_hashes(root)
+                if not report["original_artifacts_unchanged"]:
+                    report.update(state="FAIL", reason="original_artifacts_changed_during_reaudit")
+            except Exception as exc:
+                report.update(state="FAIL", reason=f"artifact_recheck_failed:{exc}")
+    return report
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -195,11 +245,13 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.verify_study:
-        result = summarize(args.verify_study)
+        require(not args.output.resolve().is_relative_to(args.verify_study.resolve()),
+                "offline_report_must_be_outside_original_study")
+        result = reaudit_study(args.verify_study)
         with args.output.open("x") as stream:
             json.dump(result, stream, indent=2)
         print(f"M6_OFFLINE={result['state']} report={args.output}")
-        return 0
+        return 0 if result["state"] == "PASS" else 1
     if not args.gpus or not args.shadow_evidence:
         parser.error("live studies require --gpus and --shadow-evidence")
     if args.diagnostic_overlap_smoke:
@@ -280,7 +332,8 @@ def main():
         (root / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
         manifest["state"] = "PASS"
     except (Exception, KeyboardInterrupt) as exc:
-        manifest.update(state="FAIL", reason=f"{type(exc).__name__}:{exc}")
+        manifest.update(state="FAIL", reason=f"{type(exc).__name__}:{exc}",
+                        traceback=traceback.format_exc())
     finally:
         save()
     print(f"M6_ABE_PASS={manifest['state'] == 'PASS'} Evidence: {root}", flush=True)
