@@ -104,6 +104,27 @@ def rank_fixture(rank, tp, layers=(0,), count=4, heads=2):
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_shared_gpu_mode_is_opt_in_and_reaches_launcher_budget_check(self):
+        from experiments.kv_ec import launch_debug
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(sys, "argv", [
+                    "launch_debug", "--mode", "baseline", "--tp", "4", "--gpus", "0,1,2,3",
+                    "--output", directory, "--snapshot-id", "shared", "--layers", "all",
+                    "--allow-shared-gpu-debug", "--mem-fraction-static", ".3",
+                    "--context-length", "1024"]), \
+                patch.dict(os.environ, {}, clear=True), \
+                patch("experiments.kv_ec.launch_debug.check_port", return_value="available"), \
+                patch("experiments.kv_ec.gpu_memory_budget.check_shared_gpu_budget",
+                      return_value=[{"gpu_index": str(i)} for i in range(4)]) as budget, \
+                patch("experiments.kv_ec.launch_debug.os.execv") as execute:
+            launch_debug.main()
+            budget.assert_called_once_with(["0", "1", "2", "3"],
+                                           "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+                                           4, 1024, .3)
+            argv = execute.call_args.args[1]
+            self.assertEqual(argv[argv.index("--mem-fraction-static") + 1], "0.3")
+            self.assertEqual(argv[argv.index("--context-length") + 1], "1024")
+
     def test_tp2_launcher_parity_modes_and_baseline(self):
         from experiments.kv_ec import launch_debug
 
@@ -112,7 +133,8 @@ class LifetimeTests(unittest.TestCase):
             with self.subTest(mode=mode, protection=protection), tempfile.TemporaryDirectory() as directory:
                 argv = ["launch_debug", "--mode", mode, "--protection-mode", protection,
                         "--tp", "2", "--gpus", "1,2", "--output", directory,
-                        "--snapshot-id", "tp2", "--parity-socket", "/tmp/test-parity.sock"]
+                        "--snapshot-id", "tp2", "--parity-socket", "/tmp/test-parity.sock",
+                        "--mem-fraction-static", ".24", "--context-length", "1024"]
                 with patch.object(sys, "argv", argv), patch.dict(os.environ, {}, clear=True), \
                      patch("experiments.kv_ec.launch_debug.socket.socket"), \
                      patch("experiments.kv_ec.parity_manager.manager_hello", return_value="test-epoch"), \
@@ -128,6 +150,8 @@ class LifetimeTests(unittest.TestCase):
                         self.assertNotIn("SGLANG_KV_EC_PARITY_SOCKET", os.environ)
                     args = execute.call_args.args[1]
                     self.assertEqual(args[args.index("--tp-size") + 1], "2")
+                    self.assertEqual(args[args.index("--mem-fraction-static") + 1], "0.24")
+                    self.assertEqual(args[args.index("--context-length") + 1], "1024")
 
     def test_supported_guard(self):
         validate_lifetime(*lifetime_fixture())

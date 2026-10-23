@@ -13,7 +13,9 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from experiments.kv_ec.accept_pause import check_evidence, main, resolve_ports, verify_run
+from experiments.kv_ec.accept_pause import (
+    check_evidence, classify_runtime_failure, main, resolve_ports, verify_run,
+)
 from experiments.kv_ec.launch_debug import check_port
 
 
@@ -59,6 +61,18 @@ def completed_run(root):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_runtime_failure_categories(self):
+        cases = {
+            "GPU_BUSY selected GPUs have active compute tasks": "GPU_BUSY",
+            "INSUFFICIENT_GPU_MEMORY GPU index=2": "INSUFFICIENT_GPU_MEMORY",
+            "torch.OutOfMemoryError: CUDA out of memory": "CUDA_OOM",
+            "MemoryError: cannot allocate memory": "HOST_OOM",
+            "TimeoutError: pause server health timeout": "SERVER_STARTUP_TIMEOUT",
+        }
+        for message, category in cases.items():
+            with self.subTest(message=message):
+                self.assertEqual(classify_runtime_failure(message), category)
+
     def test_distinct_ports_defaults_alias_and_explicit_values(self):
         self.assertEqual(resolve_ports(), (30359, 30360))
         self.assertEqual(resolve_ports(30400), (30400, 30401))
@@ -165,12 +179,15 @@ class AcceptanceTests(unittest.TestCase):
             opener = MagicMock()
             opener.open.return_value = response
             with patch("sys.argv", ["accept_pause", "--gpus", "0,1,2,3", "--port", "31000",
-                                     "--pause-port", "32000"]), patch(
+                                     "--pause-port", "32000", "--mem-fraction-static", ".22",
+                                     "--context-length", "1024", "--allow-shared-gpu-debug"]), patch(
                     "experiments.kv_ec.accept_pause.tempfile.mkdtemp", return_value=tmp), patch(
                     "experiments.kv_ec.accept_pause.subprocess.check_output", side_effect=[
                         "0, GPU-0\n1, GPU-1\n2, GPU-2\n3, GPU-3\n", ""]), patch(
                     "torch.cuda.is_available", return_value=True), patch(
                     "experiments.kv_ec.accept_pause.check_port", return_value="available"), patch(
+                    "experiments.kv_ec.gpu_memory_budget.check_shared_gpu_budget",
+                    return_value=[dict(gpu_uuid=f"GPU-{i}", other_tasks=[]) for i in range(4)]), patch(
                     "experiments.kv_ec.accept_pause.subprocess.Popen", side_effect=spawn), patch(
                     "experiments.kv_ec.accept_pause.stop_owned") as stop, patch(
                     "experiments.kv_ec.accept_pause.urllib.request.build_opener", return_value=opener), patch(
@@ -182,6 +199,10 @@ class AcceptanceTests(unittest.TestCase):
             servers = [argv for argv in commands if "experiments.kv_ec.launch_debug" in argv]
             clients = [argv for argv in commands if "experiments.kv_ec.request_debug" in argv]
             self.assertEqual([argv[argv.index("--port") + 1] for argv in servers], ["31000", "32000"])
+            self.assertTrue(all(argv[argv.index("--mem-fraction-static") + 1] == "0.22"
+                                and argv[argv.index("--context-length") + 1] == "1024"
+                                for argv in servers))
+            self.assertTrue(all("--allow-shared-gpu-debug" in argv for argv in servers))
             self.assertEqual([argv[argv.index("--url") + 1] for argv in clients],
                              ["http://127.0.0.1:31000", "http://127.0.0.1:32000"])
             self.assertEqual([c.args[0] for c in opener.open.call_args_list], [

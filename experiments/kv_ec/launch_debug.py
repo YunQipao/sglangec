@@ -75,6 +75,10 @@ def main():
     p.add_argument("--profile-detail", action="store_true", help="per-layer wall/thread CPU timings (perturbs latency)")
     p.add_argument("--cuda-events", action="store_true", help="diagnostic CUDA stream elapsed times, not additive CPU costs")
     p.add_argument("--cpu-profile", action="store_true", help="cProfile capture only; diagnostic run, not latency benchmark")
+    p.add_argument("--mem-fraction-static", type=float, default=0.60)
+    p.add_argument("--context-length", type=int, default=4096)
+    p.add_argument("--allow-shared-gpu-debug", action="store_true",
+                   help="explicit debug-only mode; read-only per-GPU memory admission")
     p.add_argument("--ec-warmups", type=int, default=0)
     p.add_argument("--ec-repeat", type=int, default=1, help="explicit bounded capture plan, total warmups+repeat <=16")
     args = p.parse_args()
@@ -93,6 +97,19 @@ def main():
         p.error("select exactly TP distinct physical GPU indices")
     if not args.output.is_absolute():
         p.error("output must be absolute")
+    if not 0.05 <= args.mem_fraction_static <= 0.95:
+        p.error("--mem-fraction-static must be in [0.05, 0.95]")
+    if not 784 <= args.context_length <= 131072:
+        p.error("--context-length must be in [784, 131072] for the 768+16-token request")
+    if args.allow_shared_gpu_debug:
+        from experiments.kv_ec.gpu_memory_budget import check_shared_gpu_budget
+        try:
+            admission = check_shared_gpu_budget(
+                gpus, args.model, args.tp, args.context_length,
+                args.mem_fraction_static)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            p.error(str(exc))
+        print("Shared GPU debug memory admission:", json.dumps(admission), flush=True)
     chunk_plan = {}
     for request, snapshot in plan.items():
         if args.chunk_size is None:
@@ -160,12 +177,14 @@ def main():
     # validation/transport work differs. FAST_PARITY remains experimental.
     argv = [sys.executable, "-m", "sglang.launch_server", "--model-path", args.model,
             "--host", "127.0.0.1", "--port", str(args.port), "--tp-size", str(args.tp),
-            "--mem-fraction-static", "0.60", "--context-length", "4096", "--dtype", "bfloat16",
+            "--mem-fraction-static", str(args.mem_fraction_static),
+            "--context-length", str(args.context_length), "--dtype", "bfloat16",
             "--kv-cache-dtype", "auto", "--page-size", "1", "--attention-backend", "triton",
             "--disable-radix-cache", "--chunked-prefill-size", "-1", "--disable-overlap-schedule",
             "--max-running-requests", "1", "--skip-server-warmup", "--random-seed", "42",
             "--cuda-graph-config", '{"decode":{"backend":"disabled"},"prefill":{"backend":"disabled"}}']
-    print("Starting isolated", args.mode, "server; no existing processes will be stopped.", flush=True)
+    print("Starting isolated", args.mode, "server; shared_gpu_debug=",
+          args.allow_shared_gpu_debug, "no existing workers will be stopped or modified.", flush=True)
     os.execv(sys.executable, argv)
 
 

@@ -132,6 +132,23 @@ def check_m7_fail_closed_evidence(root, identity, target_state):
     return records, errors
 
 
+def classify_runtime_failure(message):
+    text = str(message).lower()
+    if "insufficient_gpu_memory" in text:
+        return "INSUFFICIENT_GPU_MEMORY"
+    if "gpu_busy" in text or "active compute tasks" in text:
+        return "GPU_BUSY"
+    if "health timeout" in text or "startup timeout" in text:
+        return "SERVER_STARTUP_TIMEOUT"
+    if any(token in text for token in ("cuda out of memory", "cuda_error_out_of_memory",
+                                        "cuda oom", "cublas_status_alloc_failed")):
+        return "CUDA_OOM"
+    if any(token in text for token in ("cannot allocate memory", "memoryerror",
+                                        "oom-kill", "host out of memory")):
+        return "HOST_OOM"
+    return "OTHER_FAILURE"
+
+
 def check_experiment_evidence(root, identity, checkpoints, response, experiment_mode):
     """Strict B/D audit, separate from the immutable legacy M1/M3 contract."""
     import math
@@ -601,6 +618,10 @@ def main():
     parser.add_argument("--pause-port", type=int, help="pause TCP port (default: baseline+1)")
     parser.add_argument("--startup-timeout", type=float, default=600)
     parser.add_argument("--pause-timeout", type=float, default=60)
+    parser.add_argument("--mem-fraction-static", type=float, default=0.60)
+    parser.add_argument("--context-length", type=int, default=4096)
+    parser.add_argument("--allow-shared-gpu-debug", action="store_true",
+                        help="debug-only shared GPU admission; never manages other processes")
     parser.add_argument("--output", type=Path, help="exclusive new evidence directory for this run")
     parser.add_argument("--capture-profile", action="store_true",
                         help="M5 capture tracing; perturbs foreground latency; default off")
@@ -645,6 +666,10 @@ def main():
         parser.error("--m7-test-no-fault requires --m6b2-online-recovery")
     if args.m7_test_no_fault and args.m7_test_fault_state:
         parser.error("--m7-test-no-fault and --m7-test-fault-state are mutually exclusive")
+    if not 0.05 <= args.mem_fraction_static <= 0.95:
+        parser.error("--mem-fraction-static must be in [0.05, 0.95]")
+    if not 784 <= args.context_length <= 131072:
+        parser.error("--context-length must be in [784, 131072] for the 768+16-token request")
     if args.m6b1_post_resume and args.m6b2_online_recovery:
         parser.error("M6-B1 and M6-B2 are mutually exclusive")
     special = args.mode in ("protection_only", "prefill_retry", "async_protection_only")
@@ -797,7 +822,11 @@ def main():
     verdict = {"state": "FAIL", "transaction_id": tx, "run": str(root), "M1": False,
                "capture_profile": args.capture_profile,
                "async_commit_delay_s": args.async_commit_delay,
-               "require_async_overlap": args.require_async_overlap}
+               "require_async_overlap": args.require_async_overlap,
+               "mem_fraction_static": args.mem_fraction_static,
+               "context_length": args.context_length,
+               "allow_shared_gpu_debug": args.allow_shared_gpu_debug,
+               "performance_comparison_eligible": not args.allow_shared_gpu_debug}
     if args.mode:
         verdict.update(mode=args.mode, GPU_VALIDATED=False)
     if special:
@@ -826,11 +855,20 @@ def main():
             text=True, stderr=subprocess.STDOUT)
         gpu_ids = dict(line.strip().split(", ") for line in listing.splitlines())
         selected = {gpu_ids[g] for g in gpus}
-        tasks = subprocess.check_output(
-            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader"],
-            text=True, stderr=subprocess.STDOUT)
-        if any(line.split(",")[0].strip() in selected for line in tasks.splitlines()):
-            raise RuntimeError("selected GPUs have active compute tasks; no processes were stopped")
+        if args.allow_shared_gpu_debug:
+            from .gpu_memory_budget import check_shared_gpu_budget
+            verdict["gpu_memory_admission"] = check_shared_gpu_budget(
+                gpus, args.model, 4, args.context_length, args.mem_fraction_static)
+            verdict["gpu_tasks_observed"] = {
+                item["gpu_uuid"]: item["other_tasks"]
+                for item in verdict["gpu_memory_admission"]}
+            verdict["debug_only_shared_gpu"] = True
+        else:
+            tasks = subprocess.check_output(
+                ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader"],
+                text=True, stderr=subprocess.STDOUT)
+            if any(line.split(",")[0].strip() in selected for line in tasks.splitlines()):
+                raise RuntimeError("GPU_BUSY selected GPUs have active compute tasks; no processes were stopped")
         import torch
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA unavailable; GPU validation NOT performed")
@@ -845,6 +883,9 @@ def main():
             process = spawn("experiments.kv_ec.launch_debug", [
                 "--mode", "baseline", "--tp", "4", "--gpus", args.gpus,
                 "--port", str(port), "--model", args.model,
+                "--mem-fraction-static", str(args.mem_fraction_static),
+                "--context-length", str(args.context_length),
+                *( ["--allow-shared-gpu-debug"] if args.allow_shared_gpu_debug else [] ),
                 "--output", str(root / "evidence"), "--snapshot-id", tx + "-" + label,
                 "--request-id", "kv-ec-pause-request", "--token-count", "256",
                 "--layers", "all"], label + "-server.log", server_env)
@@ -1187,7 +1228,14 @@ def main():
         pass
     except (Exception, KeyboardInterrupt) as exc:
         reason = exc.output.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
-        verdict.update(state="FAIL", reason=f"{type(exc).__name__}: {reason}")
+        diagnostic = reason
+        for log_path in process_logs.values():
+            try:
+                diagnostic += "\n" + log_path.read_text(errors="replace")[-12000:]
+            except OSError:
+                pass
+        verdict.update(state="FAIL", reason=f"{type(exc).__name__}: {reason}",
+                       failure_category=classify_runtime_failure(diagnostic))
         if args.mode:
             verdict["GPU_VALIDATED"] = False
         if special:
