@@ -1,0 +1,28 @@
+{
+  "transaction_id": "pause-88f66c7ea74b454c9dea045cd9cd2ead",
+  "epoch": "735e84cb-c84c-49b7-9757-39db5336782e",
+  "state": "PAUSED",
+  "failure_reason": null,
+  "paused_ranks": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "validated_ranks": [],
+  "released_ranks": [],
+  "armed_ranks": [],
+  "require_shadow": true,
+  "shadow_ranks": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "require_online": false,
+  "lost_rank": 0,
+  "recover_tokens": 256,
+  "experiment_mode": "async_protection_only",
+  "retry_ready_ranks": [],
+  "retry_released_ranks": []
+}

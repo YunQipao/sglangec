@@ -16,13 +16,15 @@ from experiments.kv_ec.parity_manager import (
     ParityManagerServer, submit_once,
 )
 from experiments.kv_ec.test_debug_capture import rank_fixture
-from experiments.kv_ec.checkpoint_protocol import recv_message, send_message
+from experiments.kv_ec.checkpoint_protocol import (
+    encode_header, recv_message, send_message,
+)
 
 
-def metadata_and_blocks():
+def metadata_and_blocks(tp=4, layers=(0,), count=4):
     blocks, metadata = [], []
-    for rank in range(4):
-        payload, meta = rank_fixture(rank, 4, layers=(0,), count=4)
+    for rank in range(tp):
+        payload, meta = rank_fixture(rank, tp, layers=layers, count=count, heads=8 // tp)
         meta.update(snapshot_id="checkpoint", model_identifier="fixture-model",
                     model_sha256="fixture", source_commit="fixture",
                     core_diff_sha256="fixture", request_id="request",
@@ -37,6 +39,153 @@ def metadata_and_blocks():
 
 
 class ManagerTests(unittest.TestCase):
+    def test_live_request_epoch_is_bound_to_manager_process(self):
+        blocks, metadata = metadata_and_blocks(tp=4, count=128)
+        manager = ParityManager(test_oracle=True)
+        for meta in metadata:
+            meta["provenance"] = "sglang_request"
+            meta["manager_epoch"] = manager.manager_epoch
+        stale = deepcopy(metadata[0])
+        stale["snapshot_id"] = "stale-epoch"
+        stale["manager_epoch"] = "old-manager-epoch"
+        self.assertEqual(
+            manager.submit(stale, blocks[0])["state"], FAILED
+        )
+        for index, (meta, block) in enumerate(zip(metadata, blocks)):
+            meta["snapshot_id"] = "current-epoch"
+            result = manager.submit(meta, block)
+        self.assertEqual(result["state"], COMMITTED)
+        self.assertEqual(result["manager_epoch"], manager.manager_epoch)
+        self.assertEqual(len(result["oracle_checks"]), 4)
+
+    def test_deferred_fast_checksum_is_derived_and_committed(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        for meta in metadata:
+            meta.pop("k_sha256", None)
+            meta.pop("v_sha256", None)
+            for record in meta["layer_records"]:
+                record.pop("k_sha256", None)
+                record.pop("v_sha256", None)
+            meta["checksum_deferred"] = True
+        manager = ParityManager(test_oracle=True)
+        self.assertEqual(manager.submit(metadata[0], blocks[0])["state"], PENDING)
+        status = manager.submit(metadata[1], blocks[1])
+        self.assertEqual(status["state"], COMMITTED)
+        self.assertEqual(status["parity_bytes"], blocks[0].size)
+        self.assertEqual(len(status["oracle_checks"]), 2)
+        self.assertEqual(set(status["rank_hashes"]), {"0", "1"})
+
+    def test_deferred_fast_checksum_corruption_fails_closed(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        for meta in metadata:
+            meta.pop("k_sha256", None)
+            meta.pop("v_sha256", None)
+            for record in meta["layer_records"]:
+                record.pop("k_sha256", None)
+                record.pop("v_sha256", None)
+            meta["checksum_deferred"] = True
+        blocks[1][0] ^= 1
+        manager = ParityManager()
+        manager.submit(metadata[0], blocks[0])
+        self.assertEqual(manager.submit(metadata[1], blocks[1])["state"], FAILED)
+    def test_tp2_commit_and_each_erasure_releases_sources(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        originals = [block.copy() for block in blocks]
+        manager = ParityManager(test_oracle=True)
+        self.assertEqual(manager.submit(metadata[0], blocks[0])["ranks"], [0])
+        status = manager.submit(metadata[1], blocks[1])
+        self.assertEqual(status["state"], COMMITTED)
+        self.assertEqual(status["oracle_checks"], [
+            {"lost_rank": rank, "byte_exact": True} for rank in range(2)])
+        checkpoint = manager._checkpoints["checkpoint"]
+        self.assertEqual(checkpoint.ranks, {})
+        self.assertIsNone(checkpoint.oracle)
+        self.assertEqual(checkpoint.parity.nbytes, blocks[0].nbytes)
+        self.assertEqual(set(status["rank_hashes"]), {"0", "1"})
+        for actual, original in zip(blocks, originals):
+            np.testing.assert_array_equal(actual, original)
+        # Retained sources are allowed ONLY for the explicit test API.
+        oracle = ParityManager(retain_oracle=True)
+        for meta, block in zip(metadata, blocks):
+            oracle.submit(meta, block)
+        for lost in range(2):
+            np.testing.assert_array_equal(oracle.recover_for_test("checkpoint", lost), originals[lost])
+        with self.assertRaises(ValueError):
+            oracle.recover_for_test("checkpoint", 2)
+        self.assertEqual(ParityManager().status("checkpoint")["state"], "UNKNOWN")
+        manager.release("checkpoint")
+        self.assertEqual(manager.status("checkpoint")["state"], "UNKNOWN")
+
+    def test_tp2_missing_rank_expires(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        manager = ParityManager(timeout=0.01)
+        self.assertEqual(manager.submit(metadata[0], blocks[0])["state"], PENDING)
+        with patch("experiments.kv_ec.parity_manager.time.monotonic",
+                   return_value=manager._checkpoints["checkpoint"].deadline + 1):
+            self.assertEqual(manager.status("checkpoint")["state"], EXPIRED)
+        self.assertFalse(manager._checkpoints["checkpoint"].ranks)
+
+    def test_tp2_duplicates_corruption_and_identity_mismatches(self):
+        blocks, metadata = metadata_and_blocks(tp=2)
+        manager = ParityManager()
+        manager.submit(metadata[0], blocks[0])
+        self.assertEqual(manager.submit(metadata[0], blocks[0])["reason"], "DUPLICATE_RANK")
+        changes = {"request_id": "other", "model_sha256": "other", "format": "v2",
+                   "token_start": 1, "layers": [1], "dtype": "torch.float16"}
+        for key, value in changes.items():
+            with self.subTest(key=key):
+                manager = ParityManager()
+                manager.submit(metadata[0], blocks[0])
+                bad = deepcopy(metadata[1]); bad[key] = value
+                self.assertEqual(manager.submit(bad, blocks[1])["state"], FAILED)
+                self.assertFalse(manager._checkpoints["checkpoint"].ranks)
+        manager = ParityManager()
+        manager.submit(metadata[0], blocks[0])
+        bad = blocks[1].copy(); bad[0] ^= 1
+        self.assertEqual(manager.submit(metadata[1], bad)["state"], FAILED)
+
+    def test_tp2_tp4_cannot_mix_in_either_order(self):
+        for first_tp, second_tp in ((2, 4), (4, 2)):
+            with self.subTest(first_tp=first_tp):
+                blocks, metadata = metadata_and_blocks(first_tp)
+                other_blocks, other_metadata = metadata_and_blocks(second_tp)
+                manager = ParityManager()
+                manager.submit(metadata[0], blocks[0])
+                self.assertEqual(manager.submit(other_metadata[1], other_blocks[1])["reason"],
+                                 "METADATA_MISMATCH")
+                self.assertEqual(manager.status("checkpoint")["state"], FAILED)
+
+    def test_tp2_invalid_rank_or_version_never_commits(self):
+        blocks, metadata = metadata_and_blocks(2)
+        for key, value in (("tp_rank", 2), ("tp_rank", -1), ("tp_size", 3), ("format", "v2")):
+            with self.subTest(key=key, value=value):
+                bad = deepcopy(metadata[0]); bad[key] = value
+                manager = ParityManager()
+                self.assertEqual(manager.submit(bad, blocks[0])["state"], FAILED)
+
+    def test_tp2_tp4_all_layer_sizes_and_all_erasures(self):
+        # CPU-generated fixtures exercise the online shape validator, not GPU provenance.
+        for tp in (2, 4):
+            for count in (128, 256, 512):
+                with self.subTest(tp=tp, count=count):
+                    blocks, metadata = metadata_and_blocks(tp, tuple(range(36)), count)
+                    expected = 36 * count * (8 // tp) * 128 * 2 * 2
+                    manager = ParityManager(test_oracle=True)
+                    for meta, block in zip(metadata, blocks):
+                        self.assertEqual(block.nbytes, expected)
+                        meta["provenance"] = "sglang_request"
+                        meta["manager_epoch"] = manager.manager_epoch
+                        status = manager.submit(meta, block)
+                    self.assertEqual(status["state"], COMMITTED)
+                    self.assertEqual(status["parity_bytes"], expected)
+                    self.assertEqual(len(status["oracle_checks"]), tp)
+                    self.assertIsNone(manager._checkpoints["checkpoint"].oracle)
+
+    def test_tp2_wrong_runtime_shape_is_rejected(self):
+        payload, meta = rank_fixture(0, 2, count=128, heads=2)
+        meta["provenance"] = "sglang_request"
+        self.assertEqual(ParityManager().submit(meta, payload)["state"], FAILED)
+
     def test_four_rank_commit_releases_inputs_and_keeps_only_parity(self):
         blocks, metadata = metadata_and_blocks()
         manager = ParityManager(timeout=1, max_pending=1)
@@ -137,8 +286,30 @@ class ManagerTests(unittest.TestCase):
 
 
 class IpcTests(unittest.TestCase):
+    def test_submit_once_normalizes_numpy_and_reuses_owned_bytes(self):
+        block = np.arange(16, dtype=np.uint8)
+        owned = block.tobytes()
+        for payload in (block, owned):
+            with self.subTest(payload_type=type(payload).__name__):
+                with patch("experiments.kv_ec.parity_manager.socket.socket"), \
+                     patch("experiments.kv_ec.parity_manager.send_message") as send, \
+                     patch("experiments.kv_ec.parity_manager.recv_message",
+                           return_value=({"state": PENDING}, b"")):
+                    response = submit_once("/unused", {}, payload)
+                sent = send.call_args.args[2]
+                self.assertIsInstance(sent, bytes)
+                self.assertEqual(sent, owned)
+                if payload is owned:
+                    self.assertIs(sent, owned)
+                self.assertEqual(response["state"], PENDING)
+
     def test_unix_socket_service_commits_without_files(self):
-        blocks, metadata = metadata_and_blocks()
+        for tp in (2, 4):
+            with self.subTest(tp=tp):
+                self._socket_service_commits_without_files(tp)
+
+    def _socket_service_commits_without_files(self, tp):
+        blocks, metadata = metadata_and_blocks(tp)
         with tempfile.TemporaryDirectory() as directory:
             socket_path = Path(directory) / "parity.sock"
             import socket
@@ -193,7 +364,6 @@ class IpcTests(unittest.TestCase):
         self.assertEqual(queued_metadata["layers"], [0])
 
     def test_protocol_roundtrip_with_partial_reads(self):
-        from experiments.kv_ec.checkpoint_protocol import encode_header
         raw = encode_header({"payload_bytes": 4}) + b"abcd"
         class Reader:
             def gettimeout(self):
@@ -205,6 +375,126 @@ class IpcTests(unittest.TestCase):
         metadata, payload = recv_message(Reader())
         self.assertEqual(payload, b"abcd")
         self.assertEqual(metadata["payload_bytes"], 4)
+
+    def test_empty_payload_sends_header_only(self):
+        class RecordingSocket:
+            def __init__(self):
+                self.sent = []
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+        sock = RecordingSocket()
+        send_message(sock, {"kind": "hello"}, b"")
+        self.assertEqual(len(sock.sent), 1)
+        metadata, payload = recv_message(_BytesReader(sock.sent[0]))
+        self.assertEqual(metadata["kind"], "hello")
+        self.assertEqual(metadata["payload_bytes"], 0)
+        self.assertEqual(payload, b"")
+
+    def test_nonempty_payload_still_sends_header_and_payload(self):
+        class RecordingSocket:
+            def __init__(self):
+                self.sent = []
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+        sock = RecordingSocket()
+        send_message(sock, {"kind": "payload"}, b"abcd")
+        self.assertEqual(len(sock.sent), 2)
+        self.assertEqual(sock.sent[1], b"abcd")
+
+    def test_real_socket_empty_request_fast_response_and_close(self):
+        try:
+            client, server = socket.socketpair()
+        except PermissionError:
+            self.skipTest("sandbox disallows socketpair")
+        failures = []
+
+        def responder():
+            try:
+                request, payload = recv_message(server)
+                self.assertEqual(request["payload_bytes"], 0)
+                self.assertEqual(payload, b"")
+                send_message(server, {"state": "READY"}, b"")
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                server.close()
+
+        thread = threading.Thread(target=responder)
+        thread.start()
+        try:
+            try:
+                send_message(client, {"kind": "hello"}, b"")
+            except PermissionError:
+                self.skipTest("sandbox disallows socketpair writes")
+            response, payload = recv_message(client)
+            self.assertEqual(response["state"], "READY")
+            self.assertEqual(response["payload_bytes"], 0)
+            self.assertEqual(payload, b"")
+        finally:
+            client.close()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+
+    def test_real_socket_partial_reads_and_early_disconnect(self):
+        try:
+            reader, writer = socket.socketpair()
+        except PermissionError:
+            self.skipTest("sandbox disallows socketpair")
+        raw = encode_header({"payload_bytes": 4}) + b"data"
+
+        class PartialReader:
+            def gettimeout(self):
+                return reader.gettimeout()
+
+            def settimeout(self, timeout):
+                reader.settimeout(timeout)
+
+            def recv(self, size):
+                return reader.recv(min(size, 2))
+
+        try:
+            try:
+                writer.sendall(raw)
+            except PermissionError:
+                self.skipTest("sandbox disallows socketpair writes")
+            metadata, payload = recv_message(PartialReader())
+            self.assertEqual(metadata["payload_bytes"], 4)
+            self.assertEqual(payload, b"data")
+        finally:
+            reader.close()
+            writer.close()
+
+        try:
+            reader, writer = socket.socketpair()
+        except PermissionError:
+            self.skipTest("sandbox disallows socketpair")
+        try:
+            try:
+                writer.sendall(encode_header({"payload_bytes": 4})[:6])
+            except PermissionError:
+                self.skipTest("sandbox disallows socketpair writes")
+            writer.close()
+            with self.assertRaises(ConnectionError):
+                recv_message(reader)
+        finally:
+            reader.close()
+
+
+class _BytesReader:
+    def __init__(self, raw):
+        self.raw = raw
+
+    def gettimeout(self):
+        return None
+
+    def recv(self, size):
+        result, self.raw = self.raw[:size], self.raw[size:]
+        return result
 
 
 if __name__ == "__main__":

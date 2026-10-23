@@ -1,7 +1,7 @@
 """CPU DRAM parity-only checkpoint manager and Unix-socket service.
 
 The manager owns only pending rank buffers while a checkpoint is incomplete.
-After four valid TP=4 ranks arrive, it replaces them with one XOR parity block
+After all valid TP=2/4 ranks arrive, it replaces them with one XOR parity block
 and immutable metadata. It never writes rank files and never touches SGLang.
 """
 
@@ -18,6 +18,7 @@ import resource
 import socket
 import threading
 import time
+import uuid
 
 import numpy as np
 
@@ -37,10 +38,11 @@ PENDING, COMMITTED, FAILED, EXPIRED = "PENDING", "COMMITTED", "FAILED", "EXPIRED
 
 
 def _identity(metadata):
-    keys = ("snapshot_id", "request_id", "model_identifier", "model_sha256", "provenance",
+    keys = ("format", "snapshot_id", "request_id", "model_identifier", "model_sha256", "provenance",
             "source_commit", "core_diff_sha256", "tp_size", "layers",
             "token_start", "token_count", "token_ids_sha256", "dtype",
             "packed_byte_count", "pool_class", "lifetime", "completion_dependency")
+    keys += ("request_version", "checkpoint_version", "manager_epoch", "input_ids_sha256")
     return tuple((key, json.dumps(metadata.get(key), sort_keys=True)) for key in keys)
 
 
@@ -66,15 +68,17 @@ class Checkpoint:
 
 
 class ParityManager:
-    """Thread-safe TP=4 manager; no cross-rank blocking or collectives."""
+    """Thread-safe TP=2/4 manager; no cross-rank blocking or collectives."""
 
-    def __init__(self, *, timeout=30.0, max_pending=1, retain_oracle=False, test_oracle=False):
+    def __init__(self, *, timeout=30.0, max_pending=1, retain_oracle=False,
+                 test_oracle=False, manager_epoch=None):
         if timeout <= 0 or max_pending < 1:
             raise ValueError("timeout and max_pending must be positive")
         self.timeout = float(timeout)
         self.max_pending = int(max_pending)
         self.retain_oracle = bool(retain_oracle)
         self.test_oracle = test_oracle
+        self.manager_epoch = manager_epoch or str(uuid.uuid4())
         self._checkpoints = OrderedDict()
         self._lock = threading.Lock()
 
@@ -128,16 +132,18 @@ class ParityManager:
                 if self.retain_oracle:
                     checkpoint.oracle = checkpoint.oracle or {}
                     checkpoint.oracle[rank] = checkpoint.ranks[rank][0].copy()
-                if len(checkpoint.ranks) < 4:
+                tp = metadata["tp_size"]
+                expected_ranks = set(range(tp))
+                if set(checkpoint.ranks) != expected_ranks:
                     return {"state": PENDING, "ranks": sorted(checkpoint.ranks)}
-                blocks = [checkpoint.ranks[i][0] for i in range(4)]
+                blocks = [checkpoint.ranks[i][0] for i in range(tp)]
                 xor_started = time.perf_counter()
                 checkpoint.parity = encode(blocks)
                 xor_ms = (time.perf_counter() - xor_started) * 1000
                 oracle_checks = []
                 oracle_started = time.perf_counter()
                 if self.test_oracle:
-                    for lost in range(4):
+                    for lost in range(tp):
                         restored = recover([None if i == lost else b for i, b in enumerate(blocks)], checkpoint.parity)
                         if not np.array_equal(restored, blocks[lost]):
                             raise ValueError("oracle recovery mismatch")
@@ -154,7 +160,7 @@ class ParityManager:
                                           steady_parity_bytes=int(checkpoint.parity.nbytes))
                 checkpoint.metadata["rank_hashes"] = {
                     str(i): {key: checkpoint.ranks[i][1][key] for key in ("sha256", "k_sha256", "v_sha256")}
-                    for i in range(4)
+                    for i in range(tp)
                 }
                 checkpoint.state = COMMITTED
                 # Input rank buffers are never retained after commit unless the
@@ -182,12 +188,16 @@ class ParityManager:
         for key in ("request_id", "model_identifier", "model_sha256", "source_commit", "core_diff_sha256", "token_ids_sha256"):
             if not isinstance(metadata.get(key), str) or not metadata[key]:
                 raise ValueError("checkpoint identity incomplete")
-        if metadata.get("tp_size") != 4 or not 0 <= metadata.get("tp_rank", -1) < 4:
-            raise ValueError("TP=4 required")
+        tp, rank = metadata.get("tp_size"), metadata.get("tp_rank")
+        if type(tp) is not int or tp not in (2, 4) or type(rank) is not int or not 0 <= rank < tp:
+            raise ValueError("TP=2/4 and a rank in the complete TP set required")
         if metadata.get("dtype") != "torch.bfloat16":
             raise ValueError("BF16 required")
         if metadata.get("provenance") not in ("sglang_request", "synthetic_fixture"):
             raise ValueError("explicit request provenance required")
+        if (metadata.get("provenance") == "sglang_request"
+                and metadata.get("manager_epoch") != self.manager_epoch):
+            raise ValueError("manager_epoch_mismatch")
         if metadata.get("snapshot_completion_status") != "complete":
             raise ValueError("incomplete snapshot")
         if metadata.get("provenance") == "sglang_request":
@@ -195,8 +205,10 @@ class ParityManager:
             if not isinstance(count, int) or count not in (128, 256, 512):
                 raise ValueError("prototype supports 128/256/512 tokens")
             for record in metadata.get("layer_records", []):
-                if any(record["packed_shape"][kind] != [count, 2, 128] for kind in ("k", "v")):
-                    raise ValueError("Qwen3 TP4 shape required")
+                if (not 0 <= record["layer_id"] < 36 or
+                        any(record["packed_shape"][kind] != [count, 8 // tp, 128]
+                            for kind in ("k", "v"))):
+                    raise ValueError("Qwen3 TP-sharded shape required")
         payload = np.asarray(payload)
         if payload.dtype != np.uint8 or payload.ndim != 1:
             raise ValueError("flat uint8 payload required")
@@ -204,11 +216,22 @@ class ParityManager:
             raise ValueError("payload length mismatch")
         if payload.size > 64 * 1024**2:
             raise ValueError("checkpoint byte budget exceeded")
-        if hashlib.sha256(payload).hexdigest() != metadata.get("sha256"):
-            raise ValueError("payload checksum mismatch")
-        # Full layer/K/V checksums and shape metadata are validated before the
-        # manager takes ownership of the bytes.
-        validate_payload(payload, metadata)
+        deferred = metadata.get("checksum_deferred") is True
+        # FAST_PARITY may defer checksum calculation, but only explicitly. The
+        # manager validates the complete CPU-owned payload before taking the
+        # rank into the checkpoint, then writes the derived digests into the
+        # metadata used for COMMITTED rank identity and future recovery checks.
+        derived = validate_payload(payload, metadata, verify_checksums=not deferred)
+        if deferred:
+            if derived["sha256"] != metadata.get("sha256"):
+                raise ValueError("payload checksum mismatch")
+            metadata["sha256"] = derived["sha256"]
+            metadata["k_sha256"] = derived["k_sha256"]
+            metadata["v_sha256"] = derived["v_sha256"]
+            for record in metadata["layer_records"]:
+                for kind in ("k", "v"):
+                    record[kind + "_sha256"] = derived["layer_sha256"][(record["layer_id"], kind)]
+            metadata["checksum_deferred"] = False
 
     def _expire_locked(self, now):
         for checkpoint in self._checkpoints.values():
@@ -238,6 +261,23 @@ class ParityManager:
         with self._lock:
             self._checkpoints.pop(snapshot_id, None)
 
+    def export_parity(self, snapshot_id, expected):
+        """Export only a committed parity block, bound to the caller's version.
+
+        Survivor bytes stay in the paused workers, not in a second manager
+        state machine. The returned copy cannot mutate the checkpoint.
+        """
+        with self._lock:
+            checkpoint = self._checkpoints.get(snapshot_id)
+            if checkpoint is None or checkpoint.state != COMMITTED:
+                raise ValueError("parity_checkpoint_not_committed")
+            metadata = checkpoint.metadata
+            if (expected.get("manager_epoch") != self.manager_epoch
+                    or _identity(expected) != _identity(metadata)
+                    or _layout_identity(expected) != _layout_identity(metadata)):
+                raise ValueError("parity_checkpoint_identity_mismatch")
+            return self._status_locked(checkpoint), checkpoint.parity.tobytes()
+
     def recover_for_test(self, snapshot_id, lost_rank):
         """Explicit test oracle; production manager does not retain originals."""
         if not self.retain_oracle:
@@ -246,7 +286,10 @@ class ParityManager:
             checkpoint = self._checkpoints[snapshot_id]
             if checkpoint.state != COMMITTED or checkpoint.oracle is None:
                 raise RuntimeError("checkpoint is not committed")
-            blocks = [checkpoint.oracle[i] for i in range(4)]
+            tp = checkpoint.metadata["tp_size"]
+            if type(lost_rank) is not int or not 0 <= lost_rank < tp:
+                raise ValueError("invalid lost rank")
+            blocks = [checkpoint.oracle[i] for i in range(tp)]
             return recover([None if i == lost_rank else block for i, block in enumerate(blocks)], checkpoint.parity)
 
 
@@ -280,7 +323,9 @@ class ParityManagerServer:
                     if self._stop.is_set():
                         break
                     raise
-                self._handle(conn)
+                threading.Thread(
+                    target=self._handle, args=(conn,), daemon=True
+                ).start()
         self.path.unlink(missing_ok=True)
 
     def _handle(self, conn):
@@ -288,14 +333,23 @@ class ParityManagerServer:
             conn.settimeout(2)
             try:
                 metadata, payload = recv_message(conn)
-                if metadata.get("kind") == "status":
+                response_payload = b""
+                if metadata.get("kind") == "hello":
+                    response = {"state": "READY", "manager_epoch": self.manager.manager_epoch}
+                elif metadata.get("kind") == "status":
                     response = self.manager.status(metadata.get("snapshot_id"))
+                elif metadata.get("kind") == "parity":
+                    if payload:
+                        raise ValueError("parity_export_requires_empty_payload")
+                    response, response_payload = self.manager.export_parity(
+                        metadata.get("snapshot_id"), metadata.get("expected", {}))
                 else:
                     response = self.manager.submit(metadata, np.frombuffer(payload, dtype=np.uint8))
             except Exception as exc:
                 response = {"state": FAILED, "reason": type(exc).__name__}
+                response_payload = b""
             try:
-                send_message(conn, {"kind": "response", **response}, b"")
+                send_message(conn, {"kind": "response", **response}, response_payload)
             except OSError:
                 pass
 
@@ -328,12 +382,33 @@ class AsyncParityClient:
 
     def submit(self, metadata, payload):
         started = time.perf_counter_ns()
+        copied = 0
+        copies = 0
+        detail = {}
         try:
+            # Numpy payloads require one immutable queue-ownership copy.
+            # Existing bytes are reused by submit_once and send_message;
+            # kernel/socket buffering is separate from Python payload copies.
+            copy_started = time.perf_counter_ns()
+            copies = int(not isinstance(payload, bytes))
             payload = bytes(payload)
-            self.queue.put_nowait((deepcopy(metadata), payload))
-            return {"accepted": True, "enqueue_ms": (time.perf_counter_ns() - started) / 1e6}
+            copied = len(payload) if copies else 0
+            detail["payload_copy_ms"] = (time.perf_counter_ns() - copy_started) / 1e6
+            metadata_started = time.perf_counter_ns()
+            owned_metadata = deepcopy(metadata)
+            detail["metadata_deepcopy_ms"] = (time.perf_counter_ns() - metadata_started) / 1e6
+            put_started = time.perf_counter_ns()
+            try:
+                self.queue.put_nowait((owned_metadata, payload))
+            finally:
+                detail["queue_put_ms"] = (time.perf_counter_ns() - put_started) / 1e6
+            result = {"accepted": True}
         except queue.Full:
-            return {"accepted": False, "reason": "QUEUE_FULL", "enqueue_ms": (time.perf_counter_ns() - started) / 1e6}
+            result = {"accepted": False, "reason": "QUEUE_FULL"}
+        elapsed = (time.perf_counter_ns() - started) / 1e6
+        # Count attempted copies even when queue.put_nowait subsequently fails.
+        return dict(result, enqueue_ms=elapsed, copy_bytes=copied, copy_count=copies,
+                    unaccounted_ms=max(0.0, elapsed - sum(detail.values())), **detail)
 
     def _run(self):
         while not self._stop.is_set() or not self.queue.empty():
@@ -346,6 +421,9 @@ class AsyncParityClient:
                 logger.info("KV_EC parity IPC snapshot=%s rank=%s state=%s ipc_ms=%.3f",
                             metadata.get("snapshot_id"), metadata.get("tp_rank"),
                             response.get("state"), response.get("ipc_ms", -1.0))
+                logger.info("KV_EC IPC background phases snapshot=%s rank=%s phases=%s",
+                            metadata.get("snapshot_id"), metadata.get("tp_rank"),
+                            json.dumps(response.get("transport_ms", {}), sort_keys=True))
             except Exception as exc:
                 logger.warning("KV_EC parity IPC failed snapshot=%s rank=%s (%s)",
                                metadata.get("snapshot_id"), metadata.get("tp_rank"),
@@ -364,14 +442,46 @@ class AsyncParityClient:
 
 
 def submit_once(path, metadata, payload, timeout=0.25):
+    # Direct callers may submit a numpy rank block; the wire protocol accepts
+    # only bytes-like values. For the background client's already-owned bytes,
+    # bytes(payload) returns the same object (no additional payload copy).
+    payload = bytes(payload)
     started = time.perf_counter_ns()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(timeout)
+        connect_started = time.perf_counter_ns()
         client.connect(str(path))
-        send_message(client, metadata, bytes(payload))
+        connect_ms = (time.perf_counter_ns() - connect_started) / 1e6
+        transport = send_message(client, metadata, payload)
+        response_started = time.perf_counter_ns()
         response, _ = recv_message(client)
+        response_ms = (time.perf_counter_ns() - response_started) / 1e6
     response["ipc_ms"] = (time.perf_counter_ns() - started) / 1e6
+    response["transport_ms"] = {"connect_ms": connect_ms, "response_wait_ms": response_ms,
+                                **(transport if isinstance(transport, dict) else {})}
     return response
+
+
+def manager_hello(path, timeout=2.0):
+    response = submit_once(path, {"kind": "hello"}, b"", timeout=timeout)
+    if response.get("state") != "READY" or not response.get("manager_epoch"):
+        raise RuntimeError("parity manager did not provide a live epoch")
+    return response["manager_epoch"]
+
+
+def fetch_parity(path, expected, timeout=2.0):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout)
+        client.connect(str(path))
+        send_message(client, {"kind": "parity", "snapshot_id": expected["snapshot_id"],
+                              "expected": expected}, b"")
+        metadata, raw = recv_message(client)
+    if metadata.get("state") != COMMITTED:
+        raise ValueError(f"parity_export_failed:{metadata.get('reason')}")
+    if (len(raw) != expected["packed_byte_count"]
+            or hashlib.sha256(raw).hexdigest() != metadata.get("parity_sha256")):
+        raise ValueError("parity_export_byte_mismatch")
+    return metadata, np.frombuffer(raw, dtype=np.uint8).copy()
 
 
 def main():

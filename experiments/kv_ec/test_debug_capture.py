@@ -74,16 +74,16 @@ def lifetime_fixture():
     return scheduler, batch, req, config
 
 
-def rank_fixture(rank, tp, layers=(0,), count=4):
+def rank_fixture(rank, tp, layers=(0,), count=4, heads=2):
     chunks, records = [], []
     offset = 0
     kh, vh = hashlib.sha256(), hashlib.sha256()
     for layer in layers:
         rng = np.random.default_rng(1000 + rank * 100 + layer)
-        k, v = [rng.integers(0, 256, count * 2 * 128 * 2, dtype=np.uint8) for _ in range(2)]
-        shape = [count, 2, 128]
-        records.append(dict(layer_id=layer, dtype="torch.bfloat16", original_shape={"k": [64, 2, 128], "v": [64, 2, 128]},
-                            source_stride={"k": [256, 128, 1], "v": [256, 128, 1]}, packed_shape={"k": shape, "v": shape},
+        k, v = [rng.integers(0, 256, count * heads * 128 * 2, dtype=np.uint8) for _ in range(2)]
+        shape = [count, heads, 128]
+        records.append(dict(layer_id=layer, dtype="torch.bfloat16", original_shape={"k": [max(64, count), heads, 128], "v": [max(64, count), heads, 128]},
+                            source_stride={"k": [heads * 128, 128, 1], "v": [heads * 128, 128, 1]}, packed_shape={"k": shape, "v": shape},
                             device="cpu", k_offset=offset, k_nbytes=k.size, k_sha256=digest(k),
                             v_offset=offset+k.size, v_nbytes=v.size, v_sha256=digest(v)))
         offset += k.size + v.size
@@ -104,6 +104,31 @@ def rank_fixture(rank, tp, layers=(0,), count=4):
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_tp2_launcher_parity_modes_and_baseline(self):
+        from experiments.kv_ec import launch_debug
+
+        for mode, protection in (("parity", "FAST_PARITY"), ("parity", "DEBUG_SAFE"),
+                                 ("baseline", "FAST_PARITY")):
+            with self.subTest(mode=mode, protection=protection), tempfile.TemporaryDirectory() as directory:
+                argv = ["launch_debug", "--mode", mode, "--protection-mode", protection,
+                        "--tp", "2", "--gpus", "1,2", "--output", directory,
+                        "--snapshot-id", "tp2", "--parity-socket", "/tmp/test-parity.sock"]
+                with patch.object(sys, "argv", argv), patch.dict(os.environ, {}, clear=True), \
+                     patch("experiments.kv_ec.launch_debug.socket.socket"), \
+                     patch("experiments.kv_ec.parity_manager.manager_hello", return_value="test-epoch"), \
+                     patch.object(debug_capture, "source_identity", return_value={}), \
+                     patch("experiments.kv_ec.launch_debug.os.execv") as execute:
+                    launch_debug.main()
+                    self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "1,2")
+                    self.assertEqual(os.environ["SGLANG_KV_EC_DEBUG"], "0" if mode == "baseline" else "1")
+                    if mode == "parity":
+                        self.assertEqual(os.environ["SGLANG_KV_EC_PROTECTION_MODE"], protection)
+                        self.assertEqual(os.environ["SGLANG_KV_EC_PARITY_SOCKET"], "/tmp/test-parity.sock")
+                    else:
+                        self.assertNotIn("SGLANG_KV_EC_PARITY_SOCKET", os.environ)
+                    args = execute.call_args.args[1]
+                    self.assertEqual(args[args.index("--tp-size") + 1], "2")
+
     def test_supported_guard(self):
         validate_lifetime(*lifetime_fixture())
 
@@ -198,6 +223,25 @@ class RealCallPathTests(unittest.TestCase):
         capture_mock.assert_called_once()
         self.assertIs(capture_mock.call_args.args[0], s)
         self.assertEqual(capture_mock.call_args.args[3].snapshot_id, "regression")
+
+    def test_chunk_plan_captures_contiguous_independent_snapshots(self):
+        s, b, r, _, _ = frozen_processor()
+        os.environ["SGLANG_KV_EC_TOKEN_COUNT"] = "256"
+        os.environ["SGLANG_KV_EC_CHUNK_PLAN"] = json.dumps(
+            {"artificial": ["prefill-chunk-1", "prefill-chunk-2", "prefill-chunk-3"]}
+        )
+        with patch.object(debug_capture, "capture", return_value={}) as capture_mock:
+            maybe_capture(s, b, r)
+        self.assertEqual(capture_mock.call_count, 3)
+        configs = [call.args[3] for call in capture_mock.call_args_list]
+        self.assertEqual(
+            [(config.snapshot_id, config.token_start, config.token_count) for config in configs],
+            [
+                ("prefill-chunk-1", 0, 256),
+                ("prefill-chunk-2", 256, 256),
+                ("prefill-chunk-3", 512, 256),
+            ],
+        )
 
     def test_default_disabled_and_non_target_never_capture(self):
         s, b, r, _, _ = frozen_processor()

@@ -1,0 +1,680 @@
+"""M6-B1/B2: post-Resume four-rank lease and parity recovery transactions.
+
+Every enabled TP rank executes the same CPU-group all-gather at each scheduler
+boundary. B1 proves a fresh mapping/lease; B2 reuses M3's committed-parity
+XOR and GPU writeback path while retaining the same fail-closed boundary.
+"""
+
+from datetime import timedelta
+import hashlib
+import json
+import time
+
+import torch
+
+from .scheduler_shadow import (
+    pack_chunk, reconstruct, write_mapped_bytes, verify_mapped_bytes,
+    zero_mapped_bytes, checked_buffers, validate_checkpoint,
+)
+from .rank_snapshot import validate_payload
+from .gpu_scratch_restore import restore_rank_to_gpu
+from .parity_manager import COMMITTED, fetch_parity, submit_once
+from .snapshot import digest
+from .recovery_policy import (
+    EC_RECOVERY, FAIL_CLOSED, PREFILL_RETRY, RecoveryDecision, decide_recovery,
+)
+
+from .scheduler_recovery_guard import read_scheduler_mapping
+
+
+RUNNING, REQUESTED, PAUSED, LEASED, VALIDATED, RESUMING, FAILED = (
+    "RUNNING", "RECOVERY_REQUESTED", "RECOVERY_PAUSED", "LEASE_ACQUIRED",
+    "VALIDATED", "RESUMING", "FAILED")
+
+
+def _word(value):
+    raw = hashlib.sha256(str(value).encode()).digest()[:8]
+    return int.from_bytes(raw, "little") & ((1 << 63) - 1)
+
+
+class PostResumeRecovery:
+    """One-shot transaction called only from the Scheduler's pre-forward tick."""
+
+    def __init__(self):
+        self.state = RUNNING
+        self.completed = False
+        self.trace = []
+        self.owner = None
+        self.row_protected = False
+        self.slot_leased = False
+        self.readiness_trace = []
+        self._last_readiness_signature = None
+
+    def _record(self, state, **fields):
+        self.state = state
+        self.trace.append(dict(state=state, monotonic=time.monotonic(), **fields))
+
+    def _note_readiness(self, gate, local_code, rank_codes, fault_requested):
+        worker = getattr(gate.shadow, "worker", None)
+        state = getattr(worker, "state", "UNPROTECTED")
+        entry = dict(
+            checkpoint_state=state, local_readiness=local_code,
+            rank_readiness=list(rank_codes), fault_requested=bool(fault_requested),
+            action=("WAIT_AND_CONTINUE_DECODE" if not fault_requested
+                    and not all(code == 1 for code in rank_codes) else "RECOVERY_GATE"),
+            monotonic=time.monotonic())
+        signature = tuple(entry[key] for key in (
+            "checkpoint_state", "local_readiness", "rank_readiness",
+            "fault_requested", "action"))
+        if signature != self._last_readiness_signature:
+            self.readiness_trace.append(entry)
+            self._last_readiness_signature = signature
+        gate.evidence["recovery_readiness"] = {
+            key: value for key, value in entry.items()}
+
+    def _all_gather(self, gate, local):
+        """One fixed-order collective; local eligibility never gates its call."""
+        remaining = gate.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("m6b1_collective_deadline")
+        values = [torch.empty_like(local) for _ in range(4)]
+        work = torch.distributed.all_gather(
+            values, local, group=gate.scheduler.tp_cpu_group, async_op=True)
+        if work.wait(timeout=timedelta(seconds=remaining)) is False:
+            raise TimeoutError("m6b1_collective_timeout")
+        return [tuple(int(x) for x in item.tolist()) for item in values]
+
+    def _collect(self, gate, *, readiness, checkpoint_id, checkpoint_epoch,
+                 fault_requested=False):
+        # Transaction identity is deterministic from the existing coordinator
+        # admission; mismatched request/checkpoint/epoch prevents unanimous entry.
+        fields = (gate.identity["transaction_id"], gate.target,
+                  checkpoint_id, checkpoint_epoch)
+        local = torch.tensor([readiness, int(bool(fault_requested)),
+                              *(_word(x) for x in fields)],
+                             dtype=torch.int64, device="cpu")
+        gathered = self._all_gather(gate, local)
+        identities = [row[2:] for row in gathered]
+        unanimous_identity = all(value == identities[0] for value in identities)
+        return gathered, unanimous_identity
+
+    @staticmethod
+    def _local_readiness(gate):
+        req = gate.req
+        shadow = gate.shadow
+        worker = getattr(shadow, "worker", None)
+        metadata = getattr(worker, "metadata", {}) or {}
+        checkpoint = str(metadata.get("checkpoint_version", ""))
+        epoch = str(metadata.get("manager_epoch", ""))
+        if req is None or req.rid != gate.target:
+            return 3, checkpoint, epoch
+        if req.is_retracted or req.to_finish is not None:
+            return 3, checkpoint, epoch
+        if req.finished():
+            # A successful request ending is not cancellation. In the explicit
+            # no-fault control, keep the fixed readiness collective and report
+            # completion instead of treating it as a failed recovery request.
+            return (5 if (getattr(gate, "m7_test_no_fault", False)
+                          or getattr(gate, "m7_test_fault_state", "")) else 3,
+                    checkpoint, epoch)
+        live_epoch = str(getattr(shadow, "manager_epoch", ""))
+        if epoch and live_epoch and epoch != live_epoch:
+            gate.evidence["readiness_failure"] = "manager_epoch_changed"
+            return 4, checkpoint, epoch
+        binding_keys = ("req_pool_idx", "req_generation", "request_version",
+                        "physical_slots", "slot_generation")
+        present = [key for key in binding_keys if key in metadata]
+        if present:
+            if len(present) != len(binding_keys):
+                gate.evidence["readiness_failure"] = "checkpoint_mapping_binding_incomplete"
+                return 4, checkpoint, epoch
+            try:
+                mapping = read_scheduler_mapping(
+                    gate.scheduler, req, token_start=0, token_count=256)
+                matches = (
+                    mapping.req_pool_idx == metadata["req_pool_idx"]
+                    and mapping.req_generation == metadata["req_generation"]
+                    and mapping.request_version == metadata["request_version"]
+                    and list(mapping.physical_slots) == metadata["physical_slots"]
+                    and list(mapping.slot_generations) == metadata["slot_generation"]
+                    and mapping.slot_generation_available
+                )
+            except Exception as exc:
+                gate.evidence["readiness_failure"] = (
+                    "mapping_validation:" + type(exc).__name__)
+                return 4, checkpoint, epoch
+            if not matches:
+                gate.evidence["readiness_failure"] = "row_slot_generation_changed"
+                return 4, checkpoint, epoch
+        state = getattr(worker, "state", None) if worker is not None else "UNPROTECTED"
+        if state in ("UNPROTECTED", "SNAPSHOT_READY", "COMMITTING"):
+            # Protection readiness is not a fault signal. The request continues
+            # normal scheduling while the background commit is pending.
+            return 2, checkpoint, epoch
+        if state == "FAILED" or state not in ("COMMITTED",):
+            return 4, checkpoint, epoch
+        if not gate.evidence.get("decode_observed", False):
+            return 0, checkpoint, epoch
+        return 1, checkpoint, epoch
+
+    def _b2_policy(self, gate, mapping, current):
+        """Four-rank M7 policy vote before any parity or data collective."""
+        worker = gate.shadow.worker
+        req_cancelled = (gate.req is None or gate.req.rid != gate.target
+                         or gate.req.finished() or gate.req.is_retracted
+                         or gate.req.to_finish is not None)
+        worker_epoch = (str(worker.metadata.get("manager_epoch", ""))
+                        if worker is not None else "")
+        live_epoch = str(getattr(gate.shadow, "manager_epoch", ""))
+        epoch_matches = bool(live_epoch) and (
+            worker_epoch == self.epoch == live_epoch
+            if worker_epoch else self.epoch in ("", live_epoch))
+        decision = decide_recovery(
+            worker.state if worker is not None else "UNPROTECTED",
+            request_cancelled=req_cancelled,
+            fault_ranks=[getattr(gate.shadow, "lost_rank", 0)],
+            token_count=256,
+            # The pre-mapping policy vote runs before a fresh lease exists;
+            # mapping staleness is still enforced by the later lease/mapping
+            # binding checks, so absence here is not a staleness signal.
+            mapping_current=True,
+            mapping_matches_checkpoint=True,
+            manager_epoch_matches=epoch_matches,
+            rank_preparation_unanimous=True,
+            all_ranks_decode_observed=gate.evidence.get("decode_observed", False),
+            committed_parity_available=getattr(worker, "state", None) == "COMMITTED",
+        )
+        # All-gather the decision so every rank applies the SAME action even
+        # if its local view differed; divergence itself is a FAIL_CLOSED.
+        code = {EC_RECOVERY: 1, PREFILL_RETRY: 2, FAIL_CLOSED: 0}[decision.action]
+        gathered, identity_ok = self._collect(
+            gate, readiness=code, checkpoint_id=self.checkpoint_id,
+            checkpoint_epoch=self.epoch,
+            fault_requested=bool(gate.evidence.get("fault_requested", False)))
+        codes = [row[0] for row in gathered]
+        if not identity_ok or len(set(codes)) != 1:
+            return RecoveryDecision(FAIL_CLOSED, "four_rank_policy_divergence")
+        if codes[0] != code:
+            # Peer decided differently from this rank's local view. Adopt the
+            # most conservative action among {EC, RETRY, CLOSED}.
+            conservative = min(code, codes[0])
+            action = {1: EC_RECOVERY, 2: PREFILL_RETRY, 0: FAIL_CLOSED}[conservative]
+            return RecoveryDecision(action, "four_rank_policy_consensus",
+                                    use_parity=action == EC_RECOVERY,
+                                    evidence=dict(local=decision.action, remote_codes=codes))
+        return decision
+
+    def _release_local(self, gate):
+        if getattr(self, "rollback_failed", False):
+            raise RuntimeError("m6b2_rollback_unproven_keep_lease")
+        if self.slot_leased:
+            event = torch.cuda.Event()
+            event.record(gate.scheduler.forward_stream)
+            event.synchronize()
+            if not event.query():
+                raise ValueError("m6b2_cuda_work_incomplete_before_lease_release")
+            gate.scheduler.token_to_kv_pool_allocator.attach_slot_lease_cuda_event(
+                self.owner, event)
+            gate.scheduler.token_to_kv_pool_allocator.release_slot_lease(
+                self.owner, manager_epoch=self.epoch)
+            self.slot_leased = False
+        if self.row_protected:
+            gate.scheduler.req_to_token_pool.release_kv_ec_row(
+                self.mapping.req_pool_idx, self.mapping.req_generation, self.owner)
+            self.row_protected = False
+
+    def _reject(self, gate, reason):
+        worker = getattr(gate.shadow, "worker", None)
+        if worker is not None and hasattr(worker, "release_test_state"):
+            worker.release_test_state()
+        self._record(FAILED, reason=reason)
+        record = dict(
+            state=FAILED, failure_reason=reason, transaction_id=self.txid,
+            checkpoint_id=self.checkpoint_id, checkpoint_epoch=self.epoch,
+            parity_used=False, kv_written=False, trace=self.trace,
+            fault_injected=False,
+            policy=gate.evidence.get("recovery_policy_decision"),
+            fault_requested=bool(gate.evidence.get("fault_requested", False)),
+            checkpoint_state=getattr(getattr(gate.shadow, "worker", None), "state", None),
+            fault_boundary=gate.evidence.get("m7_fault_boundary"),
+            worker_state_timeline=list(getattr(
+                getattr(gate.shadow, "worker", None), "trace", [])),
+            recovery_policy_decision=gate.evidence.get("recovery_policy_decision"),
+            readiness_trace=self.readiness_trace)
+        gate.evidence["post_resume_recovery"] = record
+        self._write_record(gate, record)
+        # A failed mapping/checkpoint proof must not allow this request to
+        # decode against a mapping we could not bind to its checkpoint.
+        gate._fatal(RuntimeError("m6b1_fail_closed:" + reason))
+
+    def _write_record(self, gate, record):
+        suffix = "m6b2" if gate.post_resume_mode == "m6b2" else "m6b1"
+        path = gate.output / f"{suffix}-rank-{gate.rank}.json"
+        with path.open("x") as stream:
+            json.dump(record, stream, indent=2)
+
+    def _b2(self, gate, mapping, current):
+        """Execute the single-chunk M3 data path under the fresh B1 lease."""
+        transaction_started = time.perf_counter()
+        shadow, rank = gate.shadow, gate.rank
+        meta = current[1]
+        committed = None
+        pool = device = slots = source = None
+        try:
+            if (meta.get("snapshot_id") != self.checkpoint_id
+                    or meta.get("checkpoint_version") != self.checkpoint_id
+                    or meta.get("manager_epoch") != self.epoch
+                    or meta.get("token_start") != 0 or meta.get("token_count") != 256
+                    or meta.get("tp_size") != 4 or meta.get("tp_rank") != rank):
+                raise ValueError("m6b2_checkpoint_binding_mismatch")
+            committed = submit_once(shadow.socket, {
+                "kind": "status", "snapshot_id": self.checkpoint_id}, b"",
+                timeout=gate.timeout_s)
+            validate_checkpoint(committed, meta, require_oracles=False)
+            if committed.get("manager_epoch") != self.epoch:
+                raise ValueError("m6b2_manager_epoch_changed")
+            pool = gate.scheduler.model_worker.model_runner.token_to_kv_pool
+            self._assert_mapping(gate, mapping)
+            device = pool.k_buffer[0].device
+            slots = torch.tensor(mapping.physical_slots[:256], dtype=torch.int64, device=device)
+            source = current[0]
+            preflight_ok, preflight_reason = True, ""
+        except Exception as exc:
+            preflight_ok = False
+            preflight_reason = type(exc).__name__ + ":" + str(exc)
+        preflight, identity_ok = self._collect(
+            gate, readiness=int(preflight_ok), checkpoint_id=self.checkpoint_id,
+            checkpoint_epoch=self.epoch)
+        if (not identity_ok or not all(row[0] == 1 for row in preflight)):
+            raise ValueError(preflight_reason or "m6b2_prefault_vote_rejected")
+
+        # Keep the target copy only as a rollback image. It is never passed to
+        # reconstruct or used to synthesize the expected restored bytes.
+        rollback = None
+        fault_ok, fault_reason = True, ""
+        if rank == shadow.lost_rank:
+            try:
+                rollback = [tuple(t.detach().view(torch.uint8).index_select(0, slots).contiguous()
+                                  for t in checked_buffers(pool, layer, slots))
+                            for layer in range(36)]
+                self._b2_rollback = (gate, mapping, pool, slots, rollback)
+                self.fault_monotonic = time.monotonic()
+                zero_mapped_bytes(pool, slots)
+                torch.cuda.synchronize(device)
+                changed = any(not torch.equal(before.reshape(-1), live.view(torch.uint8).index_select(0, slots).reshape(-1))
+                              for layer, pair in enumerate(rollback)
+                              for live, before in zip(checked_buffers(pool, layer, slots), pair))
+                if not changed:
+                    raise ValueError("m6b2_fault_injection_did_not_change_bytes")
+            except Exception as exc:
+                fault_ok = False
+                fault_reason = type(exc).__name__ + ":" + str(exc)
+
+        contribution = torch.zeros(meta["packed_byte_count"], dtype=torch.uint8) if rank == shadow.lost_rank else torch.from_numpy(source.copy())
+        gathered = [torch.empty_like(contribution) for _ in range(4)] if rank == shadow.lost_rank else None
+        gather_started = time.perf_counter()
+        work = torch.distributed.gather(contribution, gather_list=gathered,
+                                        dst=shadow.lost_rank, group=gate.scheduler.tp_cpu_group,
+                                        async_op=True)
+        if work.wait(timeout=timedelta(seconds=gate.timeout_s)) is False:
+            raise TimeoutError("m6b2_survivor_gather_timeout")
+
+        timings = {"survivor_gather_ms": (time.perf_counter() - gather_started) * 1000}
+        recovery_ok, recovery_reason = fault_ok, fault_reason
+        if rank == shadow.lost_rank:
+            try:
+                if not recovery_ok:
+                    raise ValueError(recovery_reason)
+                stage_started = time.perf_counter()
+                exported, parity = fetch_parity(shadow.socket, meta, timeout=gate.timeout_s)
+                validate_checkpoint(exported, meta, require_oracles=False)
+                if exported.get("state") != COMMITTED or exported.get("parity_sha256") != committed.get("parity_sha256"):
+                    raise ValueError("m6b2_parity_not_committed_or_changed")
+                timings["parity_fetch_ms"] = (time.perf_counter() - stage_started) * 1000
+                stage_started = time.perf_counter()
+                restored = reconstruct(parity, [value.numpy() for i, value in enumerate(gathered)
+                                                if i != shadow.lost_rank], exported, meta,
+                                      lost_rank=shadow.lost_rank, require_oracles=False)
+                oracle = meta["sha256"]
+                if digest(restored) != oracle:
+                    raise ValueError("m6b2_independent_checkpoint_hash_mismatch")
+                timings["xor_and_independent_hash_ms"] = (time.perf_counter() - stage_started) * 1000
+                tensors, h2d_ms, gpu_verify_ms = restore_rank_to_gpu(restored, meta, device)
+                timings["h2d_ms"] = h2d_ms
+                timings["restored_gpu_hash_verify_ms"] = gpu_verify_ms
+                buffers = [tuple(t.view(torch.uint8) for t in pair) for pair in tensors]
+                self._assert_mapping(gate, mapping)
+                gate.scheduler.token_to_kv_pool_allocator.validate_slot_lease(
+                    self.owner, manager_epoch=self.epoch, request_id=gate.req.rid,
+                    request_version=mapping.request_version,
+                    slots=list(mapping.physical_slots[:256]))
+                write_mapped_bytes(pool, slots, buffers)
+                torch.cuda.synchronize(device)
+                verify_mapped_bytes(pool, slots, buffers)
+                stage_started = time.perf_counter()
+                # Re-read the live GPU bytes through the canonical capture
+                # path. Only the payload bytes are compared; the lifecycle
+                # metadata of the live lease intentionally differs from the
+                # M6-A checkpoint metadata. validate_payload re-checks the
+                # layout and every K/V segment against the checkpoint history.
+                final, _ = pack_chunk(pool, mapping, gate.req, gate.model_identity,
+                    snapshot_id=self.checkpoint_id, manager_epoch=self.epoch)
+                if digest(final) != oracle:
+                    raise ValueError("m6b2_gpu_writeback_hash_mismatch")
+                validate_payload(final, meta)
+                timings["writeback_and_full_layer_verify_ms"] = (time.perf_counter() - stage_started) * 1000
+            except Exception as exc:
+                recovery_ok = False
+                recovery_reason = type(exc).__name__ + ":" + str(exc)
+
+        coordination_started = time.perf_counter()
+        complete = torch.tensor([int(recovery_ok)], dtype=torch.int64, device="cpu")
+        results = self._all_gather(gate, complete)
+        if any(row[0] != 1 for row in results):
+            raise ValueError(recovery_reason or "m6b2_completion_vote_rejected")
+        timings["completion_coordination_ms"] = (time.perf_counter() - coordination_started) * 1000
+        timings["recovery_transaction_ms"] = (time.perf_counter() - transaction_started) * 1000
+        return dict(fault_injected=rank == shadow.lost_rank, parity_used=rank == shadow.lost_rank,
+                    kv_written=rank == shadow.lost_rank, byte_exact=True,
+                    four_rank_vote=True, oracle_sha256=meta["sha256"],
+                    fault_monotonic=getattr(self, "fault_monotonic", None), timings=timings)
+
+    @staticmethod
+    def _assert_mapping(gate, mapping):
+        current = read_scheduler_mapping(gate.scheduler, gate.req,
+                                         token_start=0, token_count=256)
+        if current != mapping:
+            raise ValueError("m6b2_row_slot_generation_changed")
+
+    def _rollback_b2(self):
+        saved = getattr(self, "_b2_rollback", None)
+        if saved is None:
+            return None
+        gate, mapping, pool, slots, rollback = saved
+        self._assert_mapping(gate, mapping)
+        gate.scheduler.token_to_kv_pool_allocator.validate_slot_lease(
+            self.owner, manager_epoch=self.epoch, request_id=gate.req.rid,
+            request_version=mapping.request_version,
+            slots=list(mapping.physical_slots[:256]))
+        for layer, pair in enumerate(rollback):
+            for live, before in zip(checked_buffers(pool, layer, slots), pair):
+                live.view(torch.uint8).index_copy_(0, slots, before)
+        torch.cuda.synchronize(slots.device)
+        for layer, pair in enumerate(rollback):
+            for live, before in zip(checked_buffers(pool, layer, slots), pair):
+                if not torch.equal(live.view(torch.uint8).index_select(0, slots), before):
+                    raise RuntimeError(f"m6b2_rollback_byte_mismatch_layer_{layer}")
+        return True
+
+    def tick(self, gate):
+        if self.state != RUNNING or self.completed:
+            return False
+        gate.deadline = time.monotonic() + gate.timeout_s
+        readiness, checkpoint, epoch = self._local_readiness(gate)
+        worker = getattr(gate.shadow, "worker", None)
+        local_state = getattr(worker, "state", "UNPROTECTED")
+        test_fault_state = getattr(gate, "m7_test_fault_state", "")
+        requested_fault = bool(gate.evidence.get("fault_requested", False))
+        if test_fault_state:
+            requested_fault = local_state == test_fault_state
+        gathered, identity_ok = self._collect(
+            gate, readiness=readiness, checkpoint_id=checkpoint,
+            checkpoint_epoch=epoch, fault_requested=requested_fault)
+        codes = [row[0] for row in gathered]
+        intents = [row[1] for row in gathered]
+        gate.evidence["m7_fault_boundary"] = dict(
+            local_checkpoint_state=local_state,
+            requested_fault_state=test_fault_state or None,
+            local_fault_intent=requested_fault,
+            rank_fault_intents=intents,
+            rank_checkpoint_readiness=codes)
+        self._note_readiness(gate, readiness, codes, requested_fault)
+        self.txid = f"{gate.identity['transaction_id']}:m6b1:{checkpoint}"
+        self.checkpoint_id, self.epoch = checkpoint, epoch
+        if not identity_ok or any(code in (3, 4) for code in codes):
+            # A missing/cancelled/inconsistent request is a unanimous safe
+            # refusal, not a rank-local branch into another collective.
+            return self._reject(gate, "rank_identity_or_request_not_unanimous")
+        if (getattr(gate, "m7_test_no_fault", False) or test_fault_state) \
+                and all(code == 5 for code in codes):
+            not_reached = bool(test_fault_state and not any(intents))
+            record = dict(
+                state=("TEST_NOT_REACHED" if not_reached else "NO_FAULT_DECODE_CONTINUED"),
+                transaction_id=self.txid, checkpoint_id=checkpoint,
+                checkpoint_epoch=epoch, fault_requested=False,
+                requested_fault_state=test_fault_state or None,
+                target_state_reached=bool(test_fault_state and any(intents)),
+                local_state_timeline=list(getattr(worker, "trace", [])),
+                worker_state_timeline=list(getattr(worker, "trace", [])),
+                checkpoint_state=local_state, rank_checkpoint_readiness=codes,
+                rank_fault_intents=intents, parity_used=False, kv_written=False,
+                fault_injected=False, output_ids_observed=bool(
+                    gate.evidence.get("decode_observed", False)),
+                recovery_policy_decision=None)
+            gate.evidence["post_resume_recovery"] = record
+            self._write_record(gate, record)
+            self.completed = True
+            return False
+        if len(set(intents)) != 1:
+            return self._reject(gate, "rank_fault_state_intent_mismatch")
+        if requested_fault:
+            gate.evidence["fault_requested"] = True
+        if gate.post_resume_mode != "m6b2" and not all(code == 1 for code in codes):
+            return False
+        if gate.post_resume_mode == "m6b2" and not all(code == 1 for code in codes):
+            if not requested_fault:
+                return False
+            decision = self._b2_policy(gate, None, None)
+            gate.evidence["recovery_policy_decision"] = dict(
+                action=decision.action, reason=decision.reason,
+                recommended_action=decision.action, use_parity=decision.use_parity,
+                evidence=decision.evidence, rank_codes=codes, fault_requested=True)
+            if decision.action != FAIL_CLOSED:
+                recommended_action = decision.action
+                decision = RecoveryDecision(
+                    FAIL_CLOSED,
+                    "prefill_retry_unsupported_after_decode_observed:" + decision.reason)
+                gate.evidence["recovery_policy_decision"].update(
+                    action=decision.action, reason=decision.reason,
+                    recommended_action=recommended_action)
+            return self._reject(gate, "m7_policy_fail_closed:" + decision.reason)
+        if gate.post_resume_mode == "m6b2":
+            if getattr(gate, "m7_test_no_fault", False):
+                return False
+            # Preserve M6-B2's default COMMITTED test, but permit an explicit
+            # test-only state trigger. A non-COMMITTED trigger is handled by
+            # policy and cannot enter the parity fetch/XOR path.
+            if not test_fault_state and all(code == 1 for code in codes):
+                requested_fault = True
+            if requested_fault:
+                gate.evidence["fault_requested"] = True
+            self._note_readiness(gate, readiness, codes, requested_fault)
+            if not requested_fault:
+                return False
+            decision = self._b2_policy(gate, None, None)
+            gate.evidence["recovery_policy_decision"] = dict(
+                action=decision.action, reason=decision.reason,
+                recommended_action=decision.action,
+                use_parity=decision.use_parity, evidence=decision.evidence,
+                rank_codes=codes, fault_requested=True)
+            if decision.action != EC_RECOVERY or not all(code == 1 for code in codes):
+                recommended_action = decision.action
+                if decision.action != FAIL_CLOSED:
+                    decision = RecoveryDecision(
+                        FAIL_CLOSED,
+                        "prefill_retry_unsupported_after_decode_observed:" + decision.reason)
+                gate.evidence["recovery_policy_decision"].update(
+                    action=decision.action, reason=decision.reason,
+                    recommended_action=recommended_action)
+                return self._reject(gate, "m7_policy_fail_closed:" + decision.reason)
+        if not all(code == 1 for code in codes):
+            return False
+
+        self._record(REQUESTED)
+        b2_preparation_voted = False
+        try:
+            # This call is before batch selection/forward. The normal scheduler
+            # is non-overlap; require all prior producers to be fenced below.
+            self._record(PAUSED)
+            req = gate.req
+            pool = gate.scheduler.model_worker.model_runner.token_to_kv_pool
+            self.mapping = read_scheduler_mapping(
+                gate.scheduler, req, token_start=0, token_count=256)
+            if (self.mapping.tp_size != 4 or self.mapping.tp_rank != gate.rank
+                    or not self.mapping.slot_generation_available):
+                raise ValueError("m6b1_live_mapping_or_generation_unsupported")
+
+            # Fence preceding producer work before acquiring a fresh lease.
+            if not torch.cuda.is_available() or pool.k_buffer[0].device.type != "cuda":
+                raise RuntimeError("m6b1_requires_real_cuda")
+            producer = torch.cuda.Event()
+            producer.record(torch.cuda.current_stream())
+            gate.scheduler.forward_stream.wait_event(producer)
+
+            allocator = gate.scheduler.token_to_kv_pool_allocator
+            registry = allocator.slot_lease_registry
+            old_owner = getattr(gate, "owner", None)
+            if not gate.released or (old_owner and old_owner in registry._leases):
+                raise ValueError("m6b1_old_pause_lease_not_released")
+            self.owner = f"{self.txid}:rank{gate.rank}"
+            self.epoch = str(gate.shadow.manager_epoch)
+            allocator.enable_slot_leases(
+                timeout_s=gate.timeout_s,
+                active_slots=self.mapping.physical_slots)
+            gate.scheduler.req_to_token_pool.protect_kv_ec_row(
+                self.mapping.req_pool_idx, self.mapping.req_generation, self.owner)
+            self.row_protected = True
+            allocator.begin_slot_lease(
+                self.owner, manager_epoch=self.epoch, request_id=req.rid,
+                request_version=self.mapping.request_version,
+                slots=list(self.mapping.physical_slots))
+            self.slot_leased = True
+            event = allocator.record_slot_lease_cuda_event(
+                self.owner, stream=gate.scheduler.forward_stream)
+            event.synchronize()
+            if not event.query():
+                raise ValueError("m6b1_cuda_event_incomplete")
+            allocator.validate_slot_lease(
+                self.owner, manager_epoch=self.epoch, request_id=req.rid,
+                request_version=self.mapping.request_version,
+                slots=list(self.mapping.physical_slots))
+
+            # Capture metadata only, under the fresh lease. Strict binding
+            # comparison proves that this current logical chunk is the one
+            # committed by M6-A; a remapped slot/generation is rejected.
+            current_bytes, current = pack_chunk(
+                pool, self.mapping, req, gate.model_identity,
+                snapshot_id=self.checkpoint_id, manager_epoch=self.epoch,
+                token_start=0, token_count=256,
+                # Re-capture the live bytes, but retain the identity of the
+                # committed M6-A asynchronous CPU snapshot. These fields are
+                # part of validate_checkpoint's binding, not presentation.
+                lifetime="independent_immutable_cpu_snapshot",
+                completion_dependency=(
+                    "producer_event_then_blocking_d2h_then_capture_event"))
+            gate.shadow.worker.require_recoverable(current)
+            self._record(LEASED)
+            self._record(VALIDATED,
+                         row=self.mapping.req_pool_idx,
+                         row_generation=self.mapping.req_generation,
+                         request_version=self.mapping.request_version,
+                         physical_slots_sha256=hashlib.sha256(
+                             json.dumps(self.mapping.physical_slots).encode()).hexdigest(),
+                         slot_generations=list(self.mapping.slot_generations),
+                         cuda_event_complete=True, old_lease_reused=False)
+            if gate.post_resume_mode == "m6b2":
+                # This vote is the fixed boundary between local preparation
+                # and B2's parity/data collectives. A rank that failed any
+                # mapping, event, lease, or checkpoint step joins this same
+                # vote from the exception path below.
+                prepared, same_identity = self._collect(
+                    gate, readiness=1, checkpoint_id=self.checkpoint_id,
+                    checkpoint_epoch=self.epoch)
+                b2_preparation_voted = True
+                if not same_identity or any(row[0] != 1 for row in prepared):
+                    local_ok = False
+                    reason = "m6b2_rank_preparation_vote_rejected"
+                    recovery = None
+                else:
+                    recovery = self._b2(gate, self.mapping, (current_bytes, current))
+                    if hasattr(gate.shadow.worker, "release_test_state"):
+                        gate.shadow.worker.release_test_state()
+            else:
+                recovery = None
+        except Exception as exc:
+            local_ok = False
+            reason = type(exc).__name__ + ":" + str(exc)
+            if gate.post_resume_mode == "m6b2":
+                # Match the successful rank's preparation vote before any
+                # rank is allowed to enter _b2's gather sequence.
+                if not b2_preparation_voted:
+                    try:
+                        prepared, same_identity = self._collect(
+                            gate, readiness=0, checkpoint_id=self.checkpoint_id,
+                            checkpoint_epoch=self.epoch)
+                        b2_preparation_voted = True
+                        if not same_identity or any(row[0] != 1 for row in prepared):
+                            reason += ";rank_preparation_vote_rejected"
+                    except Exception as vote_exc:
+                        reason += ";rank_preparation_vote=" + type(vote_exc).__name__
+                try:
+                    self._rollback_b2()
+                except Exception as rollback_exc:
+                    self.rollback_failed = True
+                    reason += ";rollback=" + type(rollback_exc).__name__ + ":" + str(rollback_exc)
+        else:
+            local_ok, reason = True, ""
+
+        # Every rank votes in this same position, even after a local exception.
+        gathered, identity_ok = self._collect(
+            gate, readiness=int(local_ok), checkpoint_id=self.checkpoint_id,
+            checkpoint_epoch=self.epoch)
+        unanimous = identity_ok and all(row[0] == 1 for row in gathered)
+        cleanup_error = None
+        try:
+            self._release_local(gate)
+        except Exception as exc:
+            cleanup_error = exc
+        released = cleanup_error is None
+        gathered_release, _ = self._collect(
+            gate, readiness=int(released), checkpoint_id=self.checkpoint_id,
+            checkpoint_epoch=self.epoch)
+        if not all(row[0] == 1 for row in gathered_release):
+            # A resource that cannot be safely released must never be followed
+            # by Decode. Existing gate fatal path closes allocator admission.
+            gate._fatal(cleanup_error or RuntimeError("m6b1_peer_cleanup_failed"))
+        if not unanimous:
+            return self._reject(gate, reason or "peer_mapping_lease_validation_failed")
+
+        self._record(RESUMING)
+        rank_recovery = recovery or dict(fault_injected=False, parity_used=False,
+                                         kv_written=False, byte_exact=False,
+                                         four_rank_vote=False, timings={})
+        record = dict(
+            state="RUNNING", transaction_id=self.txid,
+            checkpoint_id=self.checkpoint_id, checkpoint_epoch=self.epoch,
+            row=self.mapping.req_pool_idx, row_generation=self.mapping.req_generation,
+            request_version=self.mapping.request_version,
+            physical_slots=list(self.mapping.physical_slots),
+            slot_generations=list(self.mapping.slot_generations),
+            new_lease_created=True, new_lease_released=True, old_lease_reused=False,
+            all_rank_validate_vote=True, all_rank_resume_vote=True,
+            fault_requested=bool(gate.evidence.get("fault_requested", False)),
+            checkpoint_state=getattr(gate.shadow.worker, "state", None),
+            fault_boundary=gate.evidence.get("m7_fault_boundary"),
+            target_state_reached=bool(
+                test_fault_state and all(intents)
+                and all(row[0] == 1 for row in gathered)),
+            requested_fault_state=test_fault_state or None,
+            worker_state_timeline=list(getattr(gate.shadow.worker, "trace", [])),
+            readiness_trace=self.readiness_trace,
+            recovery_policy_decision=gate.evidence.get("recovery_policy_decision"),
+            fault_injected=rank_recovery["fault_injected"],
+            parity_used=rank_recovery["parity_used"], kv_written=rank_recovery["kv_written"],
+            byte_exact=rank_recovery["byte_exact"], four_rank_vote=rank_recovery["four_rank_vote"],
+            recovery=rank_recovery, trace=self.trace)
+        gate.evidence["post_resume_recovery"] = record
+        self._write_record(gate, record)
+        self._record(RUNNING)
+        self.completed = True
+        return False

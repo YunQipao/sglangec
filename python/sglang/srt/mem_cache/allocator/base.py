@@ -67,7 +67,12 @@ class BaseTokenToKVPoolAllocator(abc.ABC):
     def free_group_end(self):
         self.is_not_in_free_group = True
         if self.free_group:
-            self.free(torch.cat(self.free_group))
+            # Clear the deferred ownership before dispatching the actual free.
+            # A guarded allocator may reject the batch; retaining it would
+            # leave stale indices queued for a later, unrelated free group.
+            pending = self.free_group
+            self.free_group = []
+            self.free(torch.cat(pending))
 
     @staticmethod
     def _copy_for_free_group(free_index: torch.Tensor) -> torch.Tensor:

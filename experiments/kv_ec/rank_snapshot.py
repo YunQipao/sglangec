@@ -46,7 +46,9 @@ def write_rank_files(directory, payload, metadata):
         performance["disk_write_ms"] = (time.perf_counter_ns() - disk_started) / 1e6
 
 
-def validate_payload(payload, meta):
+def _validate_payload(payload, meta, *, verify_checksums, compute_checksums):
+    if meta.get("checksum_deferred") is True:
+        verify_checksums = False
     if meta["format"] != FORMAT or meta["snapshot_completion_status"] != "complete":
         raise ValueError("incomplete or unsupported rank snapshot")
     if meta["provenance"] not in ("sglang_request", "synthetic_fixture"):
@@ -55,7 +57,8 @@ def validate_payload(payload, meta):
         raise ValueError("unsupported dtype or missing read-only verification")
     if payload.dtype != np.uint8 or payload.ndim != 1 or payload.size != meta["packed_byte_count"]:
         raise ValueError("rank payload length/type mismatch")
-    if digest(payload) != meta["sha256"]:
+    payload_sha256 = digest(payload) if compute_checksums else None
+    if verify_checksums and payload_sha256 != meta["sha256"]:
         raise ValueError("rank payload checksum mismatch")
     if len(meta["physical_slots"]) != meta["token_count"] or meta["req_pool_idx"] <= 0 or meta["req_generation"] <= 0:
         raise ValueError("invalid request/slot metadata")
@@ -67,7 +70,8 @@ def validate_payload(payload, meta):
     if not records or [r["layer_id"] for r in records] != meta["layers"] or meta["layers"] != sorted(set(meta["layers"])):
         raise ValueError("layer order mismatch")
     offset = 0
-    hashes = {"k": hashlib.sha256(), "v": hashlib.sha256()}
+    hashes = {"k": hashlib.sha256(), "v": hashlib.sha256()} if compute_checksums else None
+    layer_hashes = {}
     dtype = getattr(torch, meta["dtype"].removeprefix("torch."))
     for record in records:
         if record["dtype"] != meta["dtype"]:
@@ -81,19 +85,53 @@ def validate_payload(payload, meta):
             if record[kind + "_offset"] != offset or offset + nbytes > payload.size:
                 raise ValueError("noncanonical offsets or truncated data")
             segment = payload[offset:offset + nbytes]
-            if digest(segment) != record[kind + "_sha256"]:
+            segment_sha256 = digest(segment) if compute_checksums else None
+            if verify_checksums and segment_sha256 != record[kind + "_sha256"]:
                 raise ValueError("layer K/V checksum mismatch")
-            # Metadata can reconstruct the exact tensor view without float casts.
-            restored_view = torch.from_numpy(segment).view(dtype).reshape(shape)
+            if compute_checksums:
+                layer_hashes[(record["layer_id"], kind)] = segment_sha256
+            # Metadata can reconstruct the exact tensor view without float
+            # casts. ``np.frombuffer(bytes)`` may be read-only; make an
+            # independent writable view before handing it to PyTorch so its
+            # documented storage contract is satisfied even if a downstream
+            # validator mutates the temporary tensor.
+            restored_view = torch.from_numpy(segment.copy()).view(dtype).reshape(shape)
             if list(restored_view.shape) != shape or str(restored_view.dtype) != meta["dtype"]:
                 raise ValueError("tensor metadata roundtrip failed")
-            hashes[kind].update(segment)
+            if compute_checksums:
+                hashes[kind].update(segment)
             offset += nbytes
     if offset != payload.size:
         raise ValueError("unaccounted bytes")
-    for kind, hasher in hashes.items():
-        if hasher.hexdigest() != meta[kind + "_sha256"]:
-            raise ValueError("aggregate K/V checksum mismatch")
+    if compute_checksums:
+        for kind, hasher in hashes.items():
+            aggregate_sha256 = hasher.hexdigest()
+            if verify_checksums and aggregate_sha256 != meta[kind + "_sha256"]:
+                raise ValueError("aggregate K/V checksum mismatch")
+    # Deferred FAST_PARITY submissions use this derived record to move all
+    # checksum work to the manager after it owns an immutable CPU copy.
+    if compute_checksums and not verify_checksums:
+        return {
+            "sha256": payload_sha256,
+            "k_sha256": hashes["k"].hexdigest(),
+            "v_sha256": hashes["v"].hexdigest(),
+            "layer_sha256": layer_hashes,
+        }
+
+
+def validate_payload(payload, meta, *, verify_checksums=True):
+    return _validate_payload(
+        payload, meta, verify_checksums=verify_checksums, compute_checksums=True
+    )
+
+
+def validate_payload_structure(payload, meta):
+    """Validate layout after the capture scan already hashed every byte.
+
+    The parity manager independently calls validate_payload() on every
+    received rank, so this helper does not replace the integrity boundary.
+    """
+    _validate_payload(payload, meta, verify_checksums=False, compute_checksums=False)
 
 
 def assemble(directory):
@@ -105,7 +143,9 @@ def assemble(directory):
     if tp not in (1, 2, 4):
         raise ValueError("TP must be 1, 2 or 4")
     expected = {f"rank_{r}.json" for r in range(tp)}
-    if {p.name for p in directory.glob("rank_*.json") if not p.name.endswith(".timing.json")} != expected:
+    diagnostic = {f"rank_{r}.{suffix}.json" for r in range(tp)
+                  for suffix in ("timing", "diagnostic")}
+    if {p.name for p in directory.glob("rank_*.json")} - diagnostic != expected:
         raise ValueError("missing, duplicate or unexpected rank sidecars")
     if {p.name for p in directory.glob("rank_*.bin")} != {f"rank_{r}.bin" for r in range(tp)}:
         raise ValueError("missing or unexpected rank binaries")
@@ -117,6 +157,8 @@ def assemble(directory):
         if [r["packed_shape"] for r in meta["layer_records"]] != [r["packed_shape"] for r in first["layer_records"]]:
             raise ValueError("unequal shard shapes; no padding supported")
         payload = np.fromfile(directory / f"rank_{rank}.bin", dtype=np.uint8)
+        if meta.get("checksum_deferred"):
+            raise ValueError("offline snapshots require recorded, non-deferred checksums")
         validate_payload(payload, meta)
         entries.append(meta)
         blocks.append(payload)

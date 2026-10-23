@@ -1156,6 +1156,11 @@ class Scheduler(
         self.session_controller = SessionController(self.tree_cache)
         self.forward_sleep_time = None
         self._engine_paused = False
+        self._kv_ec_pause_gate = None
+        if os.environ.get("SGLANG_KV_EC_PAUSE_RESUME") == "1":
+            from sglang.srt.debug_utils.kv_ec import create_pause_gate
+
+            self._kv_ec_pause_gate = create_pause_gate(self)
 
     def init_chunked_prefill(self):
         self.chunked_prefill_size = get_schedule().chunked_prefill_size
@@ -1724,7 +1729,14 @@ class Scheduler(
 
             # Receive requests
             recv_reqs = self.request_receiver.recv_requests()
+            if self._kv_ec_pause_gate is not None:
+                # Abort requests may mark to_finish; all other mutations are
+                # forbidden during this isolated experiment's ownership window.
+                self._kv_ec_pause_gate.check_inputs(recv_reqs)
             self.process_input_requests(recv_reqs)
+            if self._kv_ec_pause_gate is not None:
+                if self._kv_ec_pause_gate.tick():
+                    continue
             if self._engine_paused:
                 continue
 
@@ -1747,6 +1759,8 @@ class Scheduler(
 
             # Update last_batch
             self.last_batch = batch
+            if self._kv_ec_pause_gate is not None:
+                self._kv_ec_pause_gate.after_result(batch)
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.invariant_checker.self_check_during_busy()
 
@@ -4691,6 +4705,7 @@ class Scheduler(
         ):
             self.disagg_decode_prealloc_queue.enqueue_held_rebootstrap()
         self._engine_paused = False
+
 
     def handle_scale_elastic_ep(
         self, recv_req: ScaleElasticEPReqInput

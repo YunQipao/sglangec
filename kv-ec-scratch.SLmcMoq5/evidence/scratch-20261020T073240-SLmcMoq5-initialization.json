@@ -1,0 +1,9 @@
+{
+  "identity": {
+    "model_identifier": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+    "model_sha256": "7b9847a1e1530259c3b60505e32f1c8aa99ca20bd26c8de4ac5ede00262cc347",
+    "source_commit": "a8c5525bd006afc101d43799cf21c61e655b1d26",
+    "core_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "model_fingerprint_initialization_ms": 36307.564676972106
+}

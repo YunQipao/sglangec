@@ -1,0 +1,8 @@
+{
+  "snapshot_id": "pinned-20261019T070820-mlKqxL-ecwarmup-2",
+  "tp_rank": 2,
+  "diagnostic_write_ms": 1.285284,
+  "info_log_ms": 0.166378,
+  "scheduler_through_diagnostics_ms": 98.081719,
+  "tail_record_own_write_included": false
+}

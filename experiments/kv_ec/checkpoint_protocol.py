@@ -63,7 +63,17 @@ def recv_message(sock):
 def send_message(sock, metadata, payload):
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         raise TypeError("checkpoint payload must be bytes-like")
+    # Reuses existing immutable bytes; copies mutable bytes-like inputs.
+    started = time.perf_counter_ns()
     payload = bytes(payload)
     metadata = dict(metadata, payload_bytes=len(payload))
-    sock.sendall(encode_header(metadata))
-    sock.sendall(payload)
+    header = encode_header(metadata)
+    encode_ms = (time.perf_counter_ns() - started) / 1e6
+    started = time.perf_counter_ns()
+    sock.sendall(header)
+    header_send_ms = (time.perf_counter_ns() - started) / 1e6
+    started = time.perf_counter_ns()
+    if payload:
+        sock.sendall(payload)
+    return {"header_json_encode_ms": encode_ms, "header_send_ms": header_send_ms,
+            "payload_send_ms": (time.perf_counter_ns() - started) / 1e6}

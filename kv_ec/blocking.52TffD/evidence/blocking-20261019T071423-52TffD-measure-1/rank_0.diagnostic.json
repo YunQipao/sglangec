@@ -1,0 +1,8 @@
+{
+  "snapshot_id": "blocking-20261019T071423-52TffD-measure-1",
+  "tp_rank": 0,
+  "diagnostic_write_ms": 1.284799,
+  "info_log_ms": 0.110982,
+  "scheduler_through_diagnostics_ms": 80.245932,
+  "tail_record_own_write_included": false
+}

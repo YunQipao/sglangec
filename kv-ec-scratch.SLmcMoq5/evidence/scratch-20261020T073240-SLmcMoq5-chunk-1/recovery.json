@@ -1,0 +1,46 @@
+{
+  "snapshot_id": "scratch-20261020T073240-SLmcMoq5-chunk-1",
+  "tp": 4,
+  "provenance": "sglang_request",
+  "packed_byte_count": 9437184,
+  "xor_performed": true,
+  "source_unchanged_recorded": true,
+  "node_failure_test": false,
+  "checks": [
+    {
+      "lost_rank": 0,
+      "byte_exact": true,
+      "sha256_equal": true,
+      "all_K_V_checksums_equal": true,
+      "dtype_shape_valid": true,
+      "recovery_ms": 7.813869
+    },
+    {
+      "lost_rank": 1,
+      "byte_exact": true,
+      "sha256_equal": true,
+      "all_K_V_checksums_equal": true,
+      "dtype_shape_valid": true,
+      "recovery_ms": 4.906631
+    },
+    {
+      "lost_rank": 2,
+      "byte_exact": true,
+      "sha256_equal": true,
+      "all_K_V_checksums_equal": true,
+      "dtype_shape_valid": true,
+      "recovery_ms": 4.968306
+    },
+    {
+      "lost_rank": 3,
+      "byte_exact": true,
+      "sha256_equal": true,
+      "all_K_V_checksums_equal": true,
+      "dtype_shape_valid": true,
+      "recovery_ms": 4.627316
+    }
+  ],
+  "xor_ms": 8.416517,
+  "parity_sha256": "74f148c0867f232f1272abcacc1737637fb2f74b6b27f49e9f48749a3ac0444f",
+  "status": "verified"
+}

@@ -1,0 +1,20 @@
+{
+  "mode": "baseline",
+  "request_total_ms": 893.3964499738067,
+  "ttft_ms": 211.73839387483895,
+  "tpot_ms": 45.44387040659785,
+  "note": "client streaming TTFT and amortized TPOT, includes HTTP/SSE overhead",
+  "model_identifier": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+  "gpu_uuids": [
+    "GPU-264e0c1d-84a1-6c4b-1dc9-2642b67bd1e6",
+    "GPU-ef4e2292-6328-13af-3198-a1ed9198d3c4",
+    "GPU-a6984ac4-fa44-c087-7069-734b7e0482a0",
+    "GPU-dc33e507-c67b-85a8-4ed9-37c7e92f7c14"
+  ],
+  "input_ids_sha256": "c7d0884c059a295b8b3352d41ef73584361c1906f46c08e0e3a81c614b90bb0f",
+  "sampling": {
+    "temperature": 0,
+    "max_new_tokens": 16,
+    "ignore_eos": true
+  }
+}

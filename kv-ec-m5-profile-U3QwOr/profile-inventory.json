@@ -1,0 +1,3062 @@
+{
+  "state": "AUDITED_SAVED_GPU_EVIDENCE",
+  "root": "/tmp/kv-ec-m5-profile-U3QwOr/smoke",
+  "manifest_sha256": "559fe878a700e27f5dc4f3ed891a6713247f04402df18cf135c62bc708aa03c8",
+  "measured_sources": {
+    "scheduler_shadow.py": "7734918dc10140590391fb0c4ea4f357928e8cca4749972bbb4e68cdb25dd444",
+    "scheduler_pause.py": "cf1a243299d2f28fb9e8fc9b2f049cf3140162b7eca323bce5801ed80a810383",
+    "scheduler_retry.py": "de23bf4d78597b246b7308adebddabfbdd9c2413edd577ae2f9b7f95ad7adc3e",
+    "pause_control.py": "81bb3737109e7aefc7707d2d74d5d4df7313e79b71709f2c8443f385e2438b6b",
+    "m3_recovery.py": "7e03364c5029ab969aeccb6404106a7b3346542cc4c9fe4ad279156bbe9716dd",
+    "m3_performance.py": "c0fa3e80e9acfe14c672c79ccce9d633e3dd79640f87b17e3d1bbe730753301b",
+    "accept_pause.py": "507d544b70fef36d8d39cb3e4c8e2c31fabaa93428a32d369d9f38cfc3e74300",
+    "m5_capture_profile.py": "11994bff9e94184aa9cddbac5317925b6c496e1a989fd189ffeba7b5a62629b9",
+    "capture_timing.py": "3022c74eaccfeb3a2195042f3c7844375bfaffda6e317b561a727e3f5162a709"
+  },
+  "capture_profile": true,
+  "modes": {
+    "baseline": {
+      "request_total_ms": {
+        "n": 1,
+        "samples_ms": [
+          930.1201400812715
+        ],
+        "min_ms": 930.1201400812715,
+        "max_ms": 930.1201400812715,
+        "status": "single_observation"
+      },
+      "ttft_ms": {
+        "n": 1,
+        "samples_ms": [
+          211.80584793910384
+        ],
+        "min_ms": 211.80584793910384,
+        "max_ms": 211.80584793910384,
+        "status": "single_observation"
+      },
+      "tpot_ms": {
+        "n": 1,
+        "samples_ms": [
+          47.887619476144515
+        ],
+        "min_ms": 47.887619476144515,
+        "max_ms": 47.887619476144515,
+        "status": "single_observation"
+      }
+    },
+    "protection_only": {
+      "request_total_ms": {
+        "n": 1,
+        "samples_ms": [
+          2347.9290639515966
+        ],
+        "min_ms": 2347.9290639515966,
+        "max_ms": 2347.9290639515966,
+        "status": "single_observation"
+      },
+      "ttft_ms": {
+        "n": 1,
+        "samples_ms": [
+          211.7256778292358
+        ],
+        "min_ms": 211.7256778292358,
+        "max_ms": 211.7256778292358,
+        "status": "single_observation"
+      },
+      "tpot_ms": {
+        "n": 1,
+        "samples_ms": [
+          142.41355907482406
+        ],
+        "min_ms": 142.41355907482406,
+        "max_ms": 142.41355907482406,
+        "status": "single_observation"
+      },
+      "protection_blocking_ms": {
+        "n": 1,
+        "samples_ms": [
+          1225.520271109417
+        ],
+        "min_ms": 1225.520271109417,
+        "max_ms": 1225.520271109417,
+        "status": "single_observation"
+      },
+      "parity_commit_ms": {
+        "n": 1,
+        "samples_ms": [
+          66.02624896913767
+        ],
+        "min_ms": 66.02624896913767,
+        "max_ms": 66.02624896913767,
+        "status": "single_observation"
+      }
+    },
+    "online_recovery": {
+      "request_total_ms": {
+        "n": 1,
+        "samples_ms": [
+          3236.146335955709
+        ],
+        "min_ms": 3236.146335955709,
+        "max_ms": 3236.146335955709,
+        "status": "single_observation"
+      },
+      "ttft_ms": {
+        "n": 1,
+        "samples_ms": [
+          212.01246581040323
+        ],
+        "min_ms": 212.01246581040323,
+        "max_ms": 212.01246581040323,
+        "status": "single_observation"
+      },
+      "tpot_ms": {
+        "n": 1,
+        "samples_ms": [
+          201.60892467635372
+        ],
+        "min_ms": 201.60892467635372,
+        "max_ms": 201.60892467635372,
+        "status": "single_observation"
+      },
+      "protection_overhead_ms": {
+        "n": 1,
+        "samples_ms": [
+          590.4279409442097
+        ],
+        "min_ms": 590.4279409442097,
+        "max_ms": 590.4279409442097,
+        "status": "single_observation"
+      },
+      "parity_commit_ms": {
+        "n": 1,
+        "samples_ms": [
+          100.12194095179439
+        ],
+        "min_ms": 100.12194095179439,
+        "max_ms": 100.12194095179439,
+        "status": "single_observation"
+      },
+      "recovery_ms": {
+        "n": 1,
+        "samples_ms": [
+          630.3750539664179
+        ],
+        "min_ms": 630.3750539664179,
+        "max_ms": 630.3750539664179,
+        "status": "single_observation"
+      },
+      "cpu_xor_ms": {
+        "n": 1,
+        "samples_ms": [
+          149.35960504226387
+        ],
+        "min_ms": 149.35960504226387,
+        "max_ms": 149.35960504226387,
+        "status": "single_observation"
+      },
+      "gather_ms": {
+        "n": 1,
+        "samples_ms": [
+          73.68855201639235
+        ],
+        "min_ms": 73.68855201639235,
+        "max_ms": 73.68855201639235,
+        "status": "single_observation"
+      },
+      "h2d_ms": {
+        "n": 1,
+        "samples_ms": [
+          13.635800000000001
+        ],
+        "min_ms": 13.635800000000001,
+        "max_ms": 13.635800000000001,
+        "status": "single_observation"
+      },
+      "kv_writeback_ms": {
+        "n": 1,
+        "samples_ms": [
+          9.933355962857604
+        ],
+        "min_ms": 9.933355962857604,
+        "max_ms": 9.933355962857604,
+        "status": "single_observation"
+      },
+      "validation_ms": {
+        "n": 1,
+        "samples_ms": [
+          268.3869290024694
+        ],
+        "min_ms": 268.3869290024694,
+        "max_ms": 268.3869290024694,
+        "status": "single_observation"
+      },
+      "fault_to_decode_ms": {
+        "n": 1,
+        "samples_ms": [
+          994.1695481538773
+        ],
+        "min_ms": 994.1695481538773,
+        "max_ms": 994.1695481538773,
+        "status": "single_observation"
+      },
+      "fault_to_first_decode_ms": {
+        "n": 1,
+        "samples_ms": [
+          994.2621951922774
+        ],
+        "min_ms": 994.2621951922774,
+        "max_ms": 994.2621951922774,
+        "status": "single_observation"
+      }
+    },
+    "prefill_retry": {
+      "request_total_ms": {
+        "n": 1,
+        "samples_ms": [
+          3440.7941719982773
+        ],
+        "min_ms": 3440.7941719982773,
+        "max_ms": 3440.7941719982773,
+        "status": "single_observation"
+      },
+      "ttft_ms": {
+        "n": 1,
+        "samples_ms": [
+          216.65439778007567
+        ],
+        "min_ms": 216.65439778007567,
+        "max_ms": 216.65439778007567,
+        "status": "single_observation"
+      },
+      "tpot_ms": {
+        "n": 1,
+        "samples_ms": [
+          214.94265161454678
+        ],
+        "min_ms": 214.94265161454678,
+        "max_ms": 214.94265161454678,
+        "status": "single_observation"
+      },
+      "fault_to_rebuilt_state_ms": {
+        "n": 1,
+        "samples_ms": [
+          1319.9798369314522
+        ],
+        "min_ms": 1319.9798369314522,
+        "max_ms": 1319.9798369314522,
+        "status": "single_observation"
+      },
+      "fault_to_first_decode_ms": {
+        "n": 1,
+        "samples_ms": [
+          1659.468028927222
+        ],
+        "min_ms": 1659.468028927222,
+        "max_ms": 1659.468028927222,
+        "status": "single_observation"
+      },
+      "prefill_forward_ms": {
+        "n": 1,
+        "samples_ms": [
+          184.02972412109375
+        ],
+        "min_ms": 184.02972412109375,
+        "max_ms": 184.02972412109375,
+        "status": "single_observation"
+      }
+    }
+  },
+  "protection": [
+    {
+      "repeat": 1,
+      "mode": "protection_only",
+      "rank_metrics": [
+        {
+          "rank": 0,
+          "pause_blocking_ms": 1224.827228114009,
+          "capture_d2h_hash_host_ms": 432.4492688756436,
+          "submit_roundtrip_host_ms": 132.2514140047133,
+          "control_roundtrip_host_ms": 11.17038307711482,
+          "tp_cpu_vote_host_ms": 104.6739206649363,
+          "protection_timing": [
+            {
+              "capture_d2h_and_hash_ms": 432.4492688756436,
+              "checkpoint_submit_ms": 132.2514140047133,
+              "submit_transport_ms": {
+                "connect_ms": 0.025845,
+                "response_wait_ms": 115.538405,
+                "header_json_encode_ms": 0.410938,
+                "header_send_ms": 0.016687,
+                "payload_send_ms": 9.931382
+              },
+              "status_roundtrip_ms": 4.218184156343341,
+              "status_poll_count": 2,
+              "protection_total_ms": 644.7943330276757,
+              "parity_commit_ms": 66.02624896913767
+            }
+          ],
+          "capture_profile": true
+        },
+        {
+          "rank": 1,
+          "pause_blocking_ms": 1225.520271109417,
+          "capture_d2h_hash_host_ms": 427.75079095736146,
+          "submit_roundtrip_host_ms": 177.34228097833693,
+          "control_roundtrip_host_ms": 14.796701027080417,
+          "tp_cpu_vote_host_ms": 72.6347928866744,
+          "protection_timing": [
+            {
+              "capture_d2h_and_hash_ms": 427.75079095736146,
+              "checkpoint_submit_ms": 177.34228097833693,
+              "submit_transport_ms": {
+                "connect_ms": 0.018682,
+                "response_wait_ms": 162.156449,
+                "header_json_encode_ms": 0.405928,
+                "header_send_ms": 0.017151,
+                "payload_send_ms": 8.005549
+              },
+              "status_roundtrip_ms": 2.4442938156425953,
+              "status_poll_count": 1,
+              "protection_total_ms": 608.1572859548032,
+              "parity_commit_ms": 66.02624896913767
+            }
+          ],
+          "capture_profile": true
+        },
+        {
+          "rank": 2,
+          "pause_blocking_ms": 1225.507492898032,
+          "capture_d2h_hash_host_ms": 438.4795860387385,
+          "submit_roundtrip_host_ms": 133.00336385145783,
+          "control_roundtrip_host_ms": 15.430695144459605,
+          "tp_cpu_vote_host_ms": 66.73117238096893,
+          "protection_timing": [
+            {
+              "capture_d2h_and_hash_ms": 438.4795860387385,
+              "checkpoint_submit_ms": 133.00336385145783,
+              "submit_transport_ms": {
+                "connect_ms": 0.020419,
+                "response_wait_ms": 117.541778,
+                "header_json_encode_ms": 0.416164,
+                "header_send_ms": 0.015744,
+                "payload_send_ms": 8.499162
+              },
+              "status_roundtrip_ms": 48.558556009083986,
+              "status_poll_count": 1,
+              "protection_total_ms": 620.6772660370916,
+              "parity_commit_ms": 66.02624896913767
+            }
+          ],
+          "capture_profile": true
+        },
+        {
+          "rank": 3,
+          "pause_blocking_ms": 1214.8967070970684,
+          "capture_d2h_hash_host_ms": 423.7961929757148,
+          "submit_roundtrip_host_ms": 105.1961649209261,
+          "control_roundtrip_host_ms": 20.352834835648537,
+          "tp_cpu_vote_host_ms": 113.81385009735823,
+          "protection_timing": [
+            {
+              "capture_d2h_and_hash_ms": 423.7961929757148,
+              "checkpoint_submit_ms": 105.1961649209261,
+              "submit_transport_ms": {
+                "connect_ms": 0.024268,
+                "response_wait_ms": 90.394872,
+                "header_json_encode_ms": 0.421597,
+                "header_send_ms": 0.017224,
+                "payload_send_ms": 7.836623
+              },
+              "status_roundtrip_ms": 8.845692034810781,
+              "status_poll_count": 2,
+              "protection_total_ms": 635.4108168743551,
+              "parity_commit_ms": 66.02624896913767
+            }
+          ],
+          "capture_profile": true
+        }
+      ],
+      "manager_xor_cpu_wall_ms": [
+        7.472631987184286
+      ],
+      "manager_commit_enclosing_ms": [
+        66.02624896913767
+      ]
+    },
+    {
+      "repeat": 1,
+      "mode": "online_recovery",
+      "rank_metrics": [
+        {
+          "rank": 0,
+          "pause_blocking_ms": 2161.3550782203674,
+          "capture_d2h_hash_host_ms": 339.21034494414926,
+          "submit_roundtrip_host_ms": 125.9037060663104,
+          "control_roundtrip_host_ms": 12.31340947560966,
+          "tp_cpu_vote_host_ms": 299.34049234725535,
+          "protection_timing": [
+            {
+              "capture_d2h_and_hash_ms": 339.21034494414926,
+              "checkpoint_submit_ms": 125.9037060663104,
+              "submit_transport_ms": {
+                "connect_ms": 0.021092,
+                "response_wait_ms": 113.256132,
+                "header_json_encode_ms": 0.336693,
+                "header_send_ms": 0.019807,
+                "payload_send_ms": 7.258123
+              },
+              "status_roundtrip_ms": 5.915474845096469,
+              "status_poll_count": 2,
+              "protection_total_ms": 590.4279409442097,
+              "parity_commit_ms": 100.12194095179439
+            }
+          ],
+          "capture_profile": true
+        },
+        {
+          "rank": 1,
+          "pause_blocking_ms": 2162.2152829077095,
+          "capture_d2h_hash_host_ms": 367.29017505422235,
+          "submit_roundtrip_host_ms": 129.7614371869713,
+          "control_roundtrip_host_ms": 15.494161052629352,
+          "tp_cpu_vote_host_ms": 498.8866427447647,
+          "protection_timing": [
+            {
+              "capture_d2h_and_hash_ms": 367.29017505422235,
+              "checkpoint_submit_ms": 129.7614371869713,
+              "submit_transport_ms": {
+                "connect_ms": 0.018592,
+                "response_wait_ms": 117.554119,
+                "header_json_encode_ms": 0.379566,
+                "header_send_ms": 0.015428,
+                "payload_send_ms": 5.76613
+              },
+              "status_roundtrip_ms": 9.081609081476927,
+              "status_poll_count": 2,
+              "protection_total_ms": 578.1547199003398,
+              "parity_commit_ms": 100.12194095179439
+            }
+          ],
+          "capture_profile": true
+        },
+        {
+          "rank": 2,
+          "pause_blocking_ms": 2161.7861120030284,
+          "capture_d2h_hash_host_ms": 371.8513138592243,
+          "submit_roundtrip_host_ms": 130.9174180496484,
+          "control_roundtrip_host_ms": 12.260937364771962,
+          "tp_cpu_vote_host_ms": 473.7536618486047,
+          "protection_timing": [
+            {
+              "capture_d2h_and_hash_ms": 371.8513138592243,
+              "checkpoint_submit_ms": 130.9174180496484,
+              "submit_transport_ms": {
+                "connect_ms": 0.020423,
+                "response_wait_ms": 115.984791,
+                "header_json_encode_ms": 0.415241,
+                "header_send_ms": 0.018193,
+                "payload_send_ms": 8.595465
+              },
+              "status_roundtrip_ms": 7.373052882030606,
+              "status_poll_count": 2,
+              "protection_total_ms": 589.3641929142177,
+              "parity_commit_ms": 100.12194095179439
+            }
+          ],
+          "capture_profile": true
+        },
+        {
+          "rank": 3,
+          "pause_blocking_ms": 2151.4089319389313,
+          "capture_d2h_hash_host_ms": 366.5146410930902,
+          "submit_roundtrip_host_ms": 177.67085088416934,
+          "control_roundtrip_host_ms": 19.30009084753692,
+          "tp_cpu_vote_host_ms": 430.6276459246874,
+          "protection_timing": [
+            {
+              "capture_d2h_and_hash_ms": 366.5146410930902,
+              "checkpoint_submit_ms": 177.67085088416934,
+              "submit_transport_ms": {
+                "connect_ms": 0.016922,
+                "response_wait_ms": 165.283817,
+                "header_json_encode_ms": 0.334639,
+                "header_send_ms": 0.013287,
+                "payload_send_ms": 7.070855
+              },
+              "status_roundtrip_ms": 2.831795020028949,
+              "status_poll_count": 1,
+              "protection_total_ms": 547.5882738828659,
+              "parity_commit_ms": 100.12194095179439
+            }
+          ],
+          "capture_profile": true
+        }
+      ],
+      "manager_xor_cpu_wall_ms": [
+        8.191803004592657
+      ],
+      "manager_commit_enclosing_ms": [
+        100.12194095179439
+      ]
+    }
+  ],
+  "traces": [
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624863-0.trace.json",
+      "host_wall_ms": {
+        "total": 253.120458,
+        "slot_tensor": 3.363144,
+        "mapping_and_tensor_checks": 116.26612700000007,
+        "gpu_gather_host": 10.100975999999998,
+        "d2h_host_blocking": 12.766277999999994,
+        "cpu_copy": 7.268664999999999,
+        "segment_hash": 54.221944,
+        "cpu_concatenate": 4.870198,
+        "payload_hash": 20.731715,
+        "payload_validation": 63.400245999999996
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 3.409231,
+          "mapping_and_tensor_checks": 68.549226,
+          "gpu_gather_host": 10.988220999999998,
+          "d2h_host_blocking": 12.793069000000003,
+          "cpu_copy": 8.072028000000001,
+          "segment_hash": 54.96753500000001,
+          "cpu_concatenate": 4.890035,
+          "payload_hash": 20.754616,
+          "payload_validation": 63.423171
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.215945,
+          "mapping_and_tensor_checks": 68.679507,
+          "gpu_gather_host": 11.225141000000002,
+          "d2h_host_blocking": 12.954220999999997,
+          "cpu_copy": 8.187897,
+          "segment_hash": 55.088221999999995,
+          "cpu_concatenate": 4.883141,
+          "payload_hash": 20.758576,
+          "payload_validation": 63.427232
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 253.370252,
+        "accounted_ms": 247.84713200000002,
+        "unaccounted_ms": 5.523119999999977,
+        "tp_rank": 0,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.133519,
+      "gather_kernel_activity_ms": 0.09869,
+      "device_activity_union_ms": 2.5898056640625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624863-1.trace.json",
+      "host_wall_ms": {
+        "total": 207.878363,
+        "slot_tensor": 1.167807,
+        "mapping_and_tensor_checks": 41.99572300000001,
+        "gpu_gather_host": 10.676963000000017,
+        "d2h_host_blocking": 10.18746,
+        "cpu_copy": 5.417274999999999,
+        "segment_hash": 62.99284699999998,
+        "cpu_concatenate": 2.475811,
+        "payload_hash": 20.389830999999997,
+        "payload_validation": 63.149487
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.200497,
+          "mapping_and_tensor_checks": 23.828576999999996,
+          "gpu_gather_host": 11.742939999999999,
+          "d2h_host_blocking": 10.299045000000001,
+          "cpu_copy": 6.284183999999999,
+          "segment_hash": 63.83351799999999,
+          "cpu_concatenate": 2.489665,
+          "payload_hash": 20.410684,
+          "payload_validation": 63.172701
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.208375,
+          "mapping_and_tensor_checks": 23.972512,
+          "gpu_gather_host": 11.960902999999995,
+          "d2h_host_blocking": 10.453418000000001,
+          "cpu_copy": 6.405571,
+          "segment_hash": 63.992937000000005,
+          "cpu_concatenate": 2.492099,
+          "payload_hash": 20.415176,
+          "payload_validation": 63.17624
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 207.980625,
+        "accounted_ms": 203.261811,
+        "unaccounted_ms": 4.718814000000009,
+        "tp_rank": 0,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.1462180000000002,
+      "gather_kernel_activity_ms": 0.084672,
+      "device_activity_union_ms": 2.5872734375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624863-2.trace.json",
+      "host_wall_ms": {
+        "total": 168.358673,
+        "slot_tensor": 0.781923,
+        "mapping_and_tensor_checks": 27.87028000000001,
+        "gpu_gather_host": 6.86379999999998,
+        "d2h_host_blocking": 7.366982999999991,
+        "cpu_copy": 3.8701280000000002,
+        "segment_hash": 41.98754100000001,
+        "cpu_concatenate": 3.6644409999999996,
+        "payload_hash": 20.340633999999998,
+        "payload_validation": 63.052308
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.794398,
+          "mapping_and_tensor_checks": 15.767935999999999,
+          "gpu_gather_host": 7.507243999999996,
+          "d2h_host_blocking": 7.156732000000002,
+          "cpu_copy": 4.463947,
+          "segment_hash": 42.537211000000006,
+          "cpu_concatenate": 3.67775,
+          "payload_hash": 20.361118,
+          "payload_validation": 63.073634
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.79784,
+          "mapping_and_tensor_checks": 15.860583999999996,
+          "gpu_gather_host": 7.647428000000002,
+          "d2h_host_blocking": 7.266046000000003,
+          "cpu_copy": 4.552132000000001,
+          "segment_hash": 42.627331,
+          "cpu_concatenate": 3.680289,
+          "payload_hash": 20.364995,
+          "payload_validation": 63.077324
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 168.420763,
+        "accounted_ms": 165.33997,
+        "unaccounted_ms": 3.080793,
+        "tp_rank": 0,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.091121,
+      "gather_kernel_activity_ms": 0.084573,
+      "device_activity_union_ms": 2.531514404296875,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624863-3.trace.json",
+      "host_wall_ms": {
+        "total": 164.397384,
+        "slot_tensor": 1.229902,
+        "mapping_and_tensor_checks": 27.067835000000002,
+        "gpu_gather_host": 6.751083999999979,
+        "d2h_host_blocking": 6.936131999999994,
+        "cpu_copy": 4.046006000000001,
+        "segment_hash": 41.365253,
+        "cpu_concatenate": 3.150013,
+        "payload_hash": 19.741981,
+        "payload_validation": 61.248137
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.24247,
+          "mapping_and_tensor_checks": 15.323098,
+          "gpu_gather_host": 7.376169000000002,
+          "d2h_host_blocking": 6.802006000000002,
+          "cpu_copy": 4.600752000000001,
+          "segment_hash": 41.92496399999999,
+          "cpu_concatenate": 3.163196,
+          "payload_hash": 19.756882,
+          "payload_validation": 61.263982
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.246195,
+          "mapping_and_tensor_checks": 15.430809,
+          "gpu_gather_host": 7.513135999999999,
+          "d2h_host_blocking": 6.9101810000000015,
+          "cpu_copy": 4.678726000000002,
+          "segment_hash": 42.009599,
+          "cpu_concatenate": 3.165547,
+          "payload_hash": 19.75939,
+          "payload_validation": 61.266427
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 164.460417,
+        "accounted_ms": 161.453519,
+        "unaccounted_ms": 3.0068980000000067,
+        "tp_rank": 0,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.093826,
+      "gather_kernel_activity_ms": 0.085313,
+      "device_activity_union_ms": 2.534822021484375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624865-0.trace.json",
+      "host_wall_ms": {
+        "total": 275.453306,
+        "slot_tensor": 3.01609,
+        "mapping_and_tensor_checks": 117.15836800000004,
+        "gpu_gather_host": 10.183285000000009,
+        "d2h_host_blocking": 12.758543999999997,
+        "cpu_copy": 7.371911999999997,
+        "segment_hash": 54.018265000000014,
+        "cpu_concatenate": 4.699684,
+        "payload_hash": 26.078331,
+        "payload_validation": 80.651586
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 3.058904,
+          "mapping_and_tensor_checks": 69.04166499999997,
+          "gpu_gather_host": 11.068167,
+          "d2h_host_blocking": 12.734686,
+          "cpu_copy": 8.169331000000001,
+          "segment_hash": 54.75182200000001,
+          "cpu_concatenate": 4.716442,
+          "payload_hash": 26.096227,
+          "payload_validation": 80.676382
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.067173,
+          "mapping_and_tensor_checks": 69.18049500000001,
+          "gpu_gather_host": 11.261892,
+          "d2h_host_blocking": 12.894594999999997,
+          "cpu_copy": 8.300151000000003,
+          "segment_hash": 54.87291500000001,
+          "cpu_concatenate": 4.720255,
+          "payload_hash": 26.098988,
+          "payload_validation": 80.681153
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 275.730664,
+        "accounted_ms": 270.313626,
+        "unaccounted_ms": 5.417037999999991,
+        "tp_rank": 1,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.20168,
+      "gather_kernel_activity_ms": 0.099907,
+      "device_activity_union_ms": 2.67297900390625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624865-1.trace.json",
+      "host_wall_ms": {
+        "total": 238.12910699999998,
+        "slot_tensor": 1.192264,
+        "mapping_and_tensor_checks": 44.12923,
+        "gpu_gather_host": 11.017493000000034,
+        "d2h_host_blocking": 9.603513999999993,
+        "cpu_copy": 6.033032000000003,
+        "segment_hash": 68.08391599999997,
+        "cpu_concatenate": 2.429773,
+        "payload_hash": 26.028016,
+        "payload_validation": 80.686835
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.222706,
+          "mapping_and_tensor_checks": 24.979918,
+          "gpu_gather_host": 12.089056999999997,
+          "d2h_host_blocking": 9.746174000000002,
+          "cpu_copy": 6.963807000000002,
+          "segment_hash": 68.983041,
+          "cpu_concatenate": 2.447404,
+          "payload_hash": 26.046584,
+          "payload_validation": 80.710126
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.231253,
+          "mapping_and_tensor_checks": 25.135121,
+          "gpu_gather_host": 12.310615000000007,
+          "d2h_host_blocking": 9.926630999999999,
+          "cpu_copy": 7.112267,
+          "segment_hash": 69.12340699999999,
+          "cpu_concatenate": 2.450697,
+          "payload_hash": 26.049378,
+          "payload_validation": 80.715629
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 238.225671,
+        "accounted_ms": 233.188817,
+        "unaccounted_ms": 5.036854000000005,
+        "tp_rank": 1,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.201057,
+      "gather_kernel_activity_ms": 0.08503,
+      "device_activity_union_ms": 2.656306396484375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624865-2.trace.json",
+      "host_wall_ms": {
+        "total": 211.115374,
+        "slot_tensor": 0.800701,
+        "mapping_and_tensor_checks": 33.65912300000001,
+        "gpu_gather_host": 8.108742000000026,
+        "d2h_host_blocking": 8.119723,
+        "cpu_copy": 4.1910810000000005,
+        "segment_hash": 53.6841,
+        "cpu_concatenate": 3.3966190000000003,
+        "payload_hash": 27.269177,
+        "payload_validation": 80.723067
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.815059,
+          "mapping_and_tensor_checks": 18.958026,
+          "gpu_gather_host": 8.884566,
+          "d2h_host_blocking": 8.047759000000001,
+          "cpu_copy": 4.904519999999998,
+          "segment_hash": 54.35269999999998,
+          "cpu_concatenate": 3.410221,
+          "payload_hash": 27.291629,
+          "payload_validation": 80.750241
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.818987,
+          "mapping_and_tensor_checks": 19.068467,
+          "gpu_gather_host": 9.048733,
+          "d2h_host_blocking": 8.186829999999999,
+          "cpu_copy": 5.02024,
+          "segment_hash": 54.469702,
+          "cpu_concatenate": 3.413388,
+          "payload_hash": 27.295316,
+          "payload_validation": 80.754955
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 211.172115,
+        "accounted_ms": 207.414721,
+        "unaccounted_ms": 3.757394000000005,
+        "tp_rank": 1,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.1507239999999999,
+      "gather_kernel_activity_ms": 0.08528,
+      "device_activity_union_ms": 2.60621533203125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624865-3.trace.json",
+      "host_wall_ms": {
+        "total": 174.28872099999998,
+        "slot_tensor": 1.3107060000000001,
+        "mapping_and_tensor_checks": 29.167155000000005,
+        "gpu_gather_host": 10.45485600000002,
+        "d2h_host_blocking": 7.533335,
+        "cpu_copy": 3.760856,
+        "segment_hash": 44.431039,
+        "cpu_concatenate": 2.034818,
+        "payload_hash": 20.369606,
+        "payload_validation": 62.908735
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.325727,
+          "mapping_and_tensor_checks": 16.498697999999997,
+          "gpu_gather_host": 11.134702999999998,
+          "d2h_host_blocking": 7.368094000000001,
+          "cpu_copy": 4.373016,
+          "segment_hash": 45.01895799999998,
+          "cpu_concatenate": 2.047148,
+          "payload_hash": 20.385248,
+          "payload_validation": 62.928751
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.330964,
+          "mapping_and_tensor_checks": 16.597189,
+          "gpu_gather_host": 11.279756999999998,
+          "d2h_host_blocking": 7.4872999999999985,
+          "cpu_copy": 4.470682000000001,
+          "segment_hash": 45.111309,
+          "cpu_concatenate": 2.04973,
+          "payload_hash": 20.387928,
+          "payload_validation": 62.932106
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 174.356653,
+        "accounted_ms": 171.08034299999997,
+        "unaccounted_ms": 3.2763100000000236,
+        "tp_rank": 1,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.100517,
+      "gather_kernel_activity_ms": 0.08499199999999998,
+      "device_activity_union_ms": 2.555947509765625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624867-0.trace.json",
+      "host_wall_ms": {
+        "total": 277.104395,
+        "slot_tensor": 3.289749,
+        "mapping_and_tensor_checks": 117.21307099999994,
+        "gpu_gather_host": 10.297208000000008,
+        "d2h_host_blocking": 12.913042999999993,
+        "cpu_copy": 7.3316589999999975,
+        "segment_hash": 54.159739000000016,
+        "cpu_concatenate": 4.894415,
+        "payload_hash": 26.166895,
+        "payload_validation": 81.097133
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 3.338762,
+          "mapping_and_tensor_checks": 69.18064399999997,
+          "gpu_gather_host": 11.186386,
+          "d2h_host_blocking": 12.884651000000003,
+          "cpu_copy": 8.134922999999999,
+          "segment_hash": 54.89963899999999,
+          "cpu_concatenate": 4.915875,
+          "payload_hash": 26.192131,
+          "payload_validation": 81.12361
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.144747,
+          "mapping_and_tensor_checks": 69.32813900000002,
+          "gpu_gather_host": 11.395291,
+          "d2h_host_blocking": 13.058435,
+          "cpu_copy": 8.252775,
+          "segment_hash": 55.01309800000002,
+          "cpu_concatenate": 4.909298,
+          "payload_hash": 26.196185,
+          "payload_validation": 81.1285
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 277.375045,
+        "accounted_ms": 271.85662099999996,
+        "unaccounted_ms": 5.518424000000039,
+        "tp_rank": 2,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.151852,
+      "gather_kernel_activity_ms": 0.097958,
+      "device_activity_union_ms": 2.59059521484375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624867-1.trace.json",
+      "host_wall_ms": {
+        "total": 245.979804,
+        "slot_tensor": 1.2379859999999998,
+        "mapping_and_tensor_checks": 47.71362200000003,
+        "gpu_gather_host": 11.976114000000003,
+        "d2h_host_blocking": 9.971457000000003,
+        "cpu_copy": 6.258510999999999,
+        "segment_hash": 69.08474600000001,
+        "cpu_concatenate": 2.412952,
+        "payload_hash": 26.56614,
+        "payload_validation": 82.47940799999999
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.269719,
+          "mapping_and_tensor_checks": 27.052458,
+          "gpu_gather_host": 13.189311000000002,
+          "d2h_host_blocking": 10.212612000000004,
+          "cpu_copy": 7.2514829999999995,
+          "segment_hash": 70.107965,
+          "cpu_concatenate": 2.428244,
+          "payload_hash": 26.586848,
+          "payload_validation": 82.504831
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.278767,
+          "mapping_and_tensor_checks": 27.223978000000013,
+          "gpu_gather_host": 13.427753,
+          "d2h_host_blocking": 10.422987000000001,
+          "cpu_copy": 7.388126999999999,
+          "segment_hash": 70.28815800000002,
+          "cpu_concatenate": 2.432036,
+          "payload_hash": 26.59015,
+          "payload_validation": 82.509642
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 246.08245,
+        "accounted_ms": 240.60347099999998,
+        "unaccounted_ms": 5.47897900000001,
+        "tp_rank": 2,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.122317,
+      "gather_kernel_activity_ms": 0.083134,
+      "device_activity_union_ms": 2.5455859375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624867-2.trace.json",
+      "host_wall_ms": {
+        "total": 219.158414,
+        "slot_tensor": 0.8425699999999999,
+        "mapping_and_tensor_checks": 35.98503200000001,
+        "gpu_gather_host": 8.783813999999996,
+        "d2h_host_blocking": 8.662545000000007,
+        "cpu_copy": 4.323372999999998,
+        "segment_hash": 55.743708,
+        "cpu_concatenate": 4.140112,
+        "payload_hash": 26.731655,
+        "payload_validation": 83.095155
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.857566,
+          "mapping_and_tensor_checks": 20.368524999999998,
+          "gpu_gather_host": 9.681525000000002,
+          "d2h_host_blocking": 8.650433,
+          "cpu_copy": 5.059929,
+          "segment_hash": 56.51974499999999,
+          "cpu_concatenate": 4.156247,
+          "payload_hash": 26.751011,
+          "payload_validation": 83.119352
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.862083,
+          "mapping_and_tensor_checks": 20.500579000000002,
+          "gpu_gather_host": 9.859185,
+          "d2h_host_blocking": 8.802167999999998,
+          "cpu_copy": 5.166292,
+          "segment_hash": 56.65809200000002,
+          "cpu_concatenate": 4.159615,
+          "payload_hash": 26.754638,
+          "payload_validation": 83.123833
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 219.217918,
+        "accounted_ms": 215.164333,
+        "unaccounted_ms": 4.053584999999998,
+        "tp_rank": 2,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.086145,
+      "gather_kernel_activity_ms": 0.08299799999999999,
+      "device_activity_union_ms": 2.50933642578125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624867-3.trace.json",
+      "host_wall_ms": {
+        "total": 178.503532,
+        "slot_tensor": 1.303984,
+        "mapping_and_tensor_checks": 29.964776999999998,
+        "gpu_gather_host": 10.89773199999999,
+        "d2h_host_blocking": 7.780190999999996,
+        "cpu_copy": 3.887271000000001,
+        "segment_hash": 44.67773900000002,
+        "cpu_concatenate": 2.068356,
+        "payload_hash": 20.843996999999998,
+        "payload_validation": 64.654954
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.3179,
+          "mapping_and_tensor_checks": 17.053355,
+          "gpu_gather_host": 11.640309999999998,
+          "d2h_host_blocking": 7.66295,
+          "cpu_copy": 4.508676,
+          "segment_hash": 45.309811,
+          "cpu_concatenate": 2.082539,
+          "payload_hash": 20.860649,
+          "payload_validation": 64.675624
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.32186,
+          "mapping_and_tensor_checks": 17.164284,
+          "gpu_gather_host": 11.802926000000003,
+          "d2h_host_blocking": 7.7926769999999985,
+          "cpu_copy": 4.595606999999999,
+          "segment_hash": 45.423628,
+          "cpu_concatenate": 2.085785,
+          "payload_hash": 20.863525,
+          "payload_validation": 64.679595
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 178.565014,
+        "accounted_ms": 175.111814,
+        "unaccounted_ms": 3.453199999999981,
+        "tp_rank": 2,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.090403,
+      "gather_kernel_activity_ms": 0.083265,
+      "device_activity_union_ms": 2.513403564453125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624869-0.trace.json",
+      "host_wall_ms": {
+        "total": 286.228443,
+        "slot_tensor": 2.946026,
+        "mapping_and_tensor_checks": 126.690924,
+        "gpu_gather_host": 12.91692600000001,
+        "d2h_host_blocking": 13.946351000000005,
+        "cpu_copy": 7.941844000000002,
+        "segment_hash": 54.739105,
+        "cpu_concatenate": 4.411683,
+        "payload_hash": 26.18143,
+        "payload_validation": 79.410235
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 2.994012,
+          "mapping_and_tensor_checks": 74.31359600000002,
+          "gpu_gather_host": 14.115821,
+          "d2h_host_blocking": 14.285041999999995,
+          "cpu_copy": 9.049592,
+          "segment_hash": 55.781271999999994,
+          "cpu_concatenate": 4.433097,
+          "payload_hash": 26.21136,
+          "payload_validation": 79.434821
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.002359,
+          "mapping_and_tensor_checks": 74.470764,
+          "gpu_gather_host": 14.335249000000003,
+          "d2h_host_blocking": 14.473416999999996,
+          "cpu_copy": 9.189676,
+          "segment_hash": 55.92974800000001,
+          "cpu_concatenate": 4.437502,
+          "payload_hash": 26.214853,
+          "payload_validation": 79.438407
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 286.504855,
+        "accounted_ms": 280.618613,
+        "unaccounted_ms": 5.886242000000038,
+        "tp_rank": 3,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.0986310000000001,
+      "gather_kernel_activity_ms": 0.097827,
+      "device_activity_union_ms": 2.556906005859375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624869-1.trace.json",
+      "host_wall_ms": {
+        "total": 242.093593,
+        "slot_tensor": 1.1975110000000002,
+        "mapping_and_tensor_checks": 46.120475,
+        "gpu_gather_host": 11.615402000000003,
+        "d2h_host_blocking": 9.841642,
+        "cpu_copy": 6.0133849999999995,
+        "segment_hash": 69.62477100000001,
+        "cpu_concatenate": 2.0632989999999998,
+        "payload_hash": 26.09011,
+        "payload_validation": 80.931516
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.230094,
+          "mapping_and_tensor_checks": 26.149202,
+          "gpu_gather_host": 12.795575999999997,
+          "d2h_host_blocking": 10.100168999999998,
+          "cpu_copy": 7.062695999999998,
+          "segment_hash": 70.580176,
+          "cpu_concatenate": 2.079279,
+          "payload_hash": 26.108317,
+          "payload_validation": 80.951898
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.238105,
+          "mapping_and_tensor_checks": 26.296046999999984,
+          "gpu_gather_host": 13.043589000000003,
+          "d2h_host_blocking": 10.287845999999998,
+          "cpu_copy": 7.202475000000002,
+          "segment_hash": 70.74287899999999,
+          "cpu_concatenate": 2.082349,
+          "payload_hash": 26.111045,
+          "payload_validation": 80.955335
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 242.19029,
+        "accounted_ms": 237.05740699999998,
+        "unaccounted_ms": 5.132883000000021,
+        "tp_rank": 3,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.118719,
+      "gather_kernel_activity_ms": 0.084321,
+      "device_activity_union_ms": 2.56267578125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624869-2.trace.json",
+      "host_wall_ms": {
+        "total": 178.48057,
+        "slot_tensor": 0.708854,
+        "mapping_and_tensor_checks": 37.247077999999995,
+        "gpu_gather_host": 9.174528000000013,
+        "d2h_host_blocking": 8.397487,
+        "cpu_copy": 4.4596529999999985,
+        "segment_hash": 43.980608,
+        "cpu_concatenate": 3.5741750000000003,
+        "payload_hash": 20.206045,
+        "payload_validation": 60.827386
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.724633,
+          "mapping_and_tensor_checks": 20.952385999999997,
+          "gpu_gather_host": 10.087514,
+          "d2h_host_blocking": 8.491022000000003,
+          "cpu_copy": 5.307948999999999,
+          "segment_hash": 44.80108699999998,
+          "cpu_concatenate": 3.592739,
+          "payload_hash": 20.228438,
+          "payload_validation": 60.847617
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.728526,
+          "mapping_and_tensor_checks": 21.060727,
+          "gpu_gather_host": 10.246345999999999,
+          "d2h_host_blocking": 8.626616000000004,
+          "cpu_copy": 5.411121999999999,
+          "segment_hash": 44.91749,
+          "cpu_concatenate": 3.596054,
+          "payload_hash": 20.231459,
+          "payload_validation": 60.850792
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 178.536059,
+        "accounted_ms": 175.03338499999998,
+        "unaccounted_ms": 3.502674000000013,
+        "tp_rank": 3,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.066824,
+      "gather_kernel_activity_ms": 0.084321,
+      "device_activity_union_ms": 2.5097265625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/online_recovery/capture-profiles/capture-2624869-3.trace.json",
+      "host_wall_ms": {
+        "total": 173.639363,
+        "slot_tensor": 1.277903,
+        "mapping_and_tensor_checks": 35.092025,
+        "gpu_gather_host": 11.837222000000017,
+        "d2h_host_blocking": 7.798025000000004,
+        "cpu_copy": 4.209840000000002,
+        "segment_hash": 40.79624099999998,
+        "cpu_concatenate": 1.88299,
+        "payload_hash": 20.032584999999997,
+        "payload_validation": 60.193572
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.293968,
+          "mapping_and_tensor_checks": 19.779385999999995,
+          "gpu_gather_host": 12.692886,
+          "d2h_host_blocking": 7.827400000000002,
+          "cpu_copy": 4.989642000000001,
+          "segment_hash": 41.56945200000002,
+          "cpu_concatenate": 1.899797,
+          "payload_hash": 20.053794,
+          "payload_validation": 60.213557
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.29841,
+          "mapping_and_tensor_checks": 19.88448,
+          "gpu_gather_host": 12.852500999999995,
+          "d2h_host_blocking": 7.949586000000001,
+          "cpu_copy": 5.062640999999999,
+          "segment_hash": 41.676961000000006,
+          "cpu_concatenate": 1.903305,
+          "payload_hash": 20.056914,
+          "payload_validation": 60.216427
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 173.702264,
+        "accounted_ms": 170.319882,
+        "unaccounted_ms": 3.382382000000007,
+        "tp_rank": 3,
+        "snapshot_id": "pause-11c7f8216a3040538312761dd9d03664-chunk0",
+        "token_start": 0,
+        "mode": null
+      },
+      "d2h_device_activity_ms": 1.066263,
+      "gather_kernel_activity_ms": 0.084384,
+      "device_activity_union_ms": 2.509394287109375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626739-0.trace.json",
+      "host_wall_ms": {
+        "total": 221.59294699999998,
+        "slot_tensor": 3.30386,
+        "mapping_and_tensor_checks": 98.65358400000002,
+        "gpu_gather_host": 7.634653999999992,
+        "d2h_host_blocking": 10.346778999999998,
+        "cpu_copy": 5.493089,
+        "segment_hash": 42.264968,
+        "cpu_concatenate": 3.8748090000000004,
+        "payload_hash": 20.432204000000002,
+        "payload_validation": 63.397103
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 3.355535,
+          "mapping_and_tensor_checks": 58.880874999999996,
+          "gpu_gather_host": 8.296394000000003,
+          "d2h_host_blocking": 10.188633999999999,
+          "cpu_copy": 6.082768,
+          "segment_hash": 42.80509699999999,
+          "cpu_concatenate": 3.888217,
+          "payload_hash": 20.449671,
+          "payload_validation": 63.418104
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.364967,
+          "mapping_and_tensor_checks": 58.98924900000003,
+          "gpu_gather_host": 8.435436000000001,
+          "d2h_host_blocking": 10.310612999999998,
+          "cpu_copy": 6.17698,
+          "segment_hash": 42.88774499999998,
+          "cpu_concatenate": 3.884859,
+          "payload_hash": 20.45335,
+          "payload_validation": 63.422187
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 221.861981,
+        "accounted_ms": 217.36529499999997,
+        "unaccounted_ms": 4.496686000000011,
+        "tp_rank": 0,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle0",
+        "token_start": 0,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.0882049999999999,
+      "gather_kernel_activity_ms": 0.09984,
+      "device_activity_union_ms": 2.545087158203125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626739-1.trace.json",
+      "host_wall_ms": {
+        "total": 168.156569,
+        "slot_tensor": 0.8001480000000001,
+        "mapping_and_tensor_checks": 27.75183699999999,
+        "gpu_gather_host": 6.868131999999997,
+        "d2h_host_blocking": 7.5453320000000055,
+        "cpu_copy": 3.707238,
+        "segment_hash": 42.15663099999998,
+        "cpu_concatenate": 3.39506,
+        "payload_hash": 20.334725,
+        "payload_validation": 63.067972999999995
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.813432,
+          "mapping_and_tensor_checks": 15.691920000000001,
+          "gpu_gather_host": 7.478594000000004,
+          "d2h_host_blocking": 7.331184,
+          "cpu_copy": 4.265701999999998,
+          "segment_hash": 42.679458999999994,
+          "cpu_concatenate": 3.408762,
+          "payload_hash": 20.351085,
+          "payload_validation": 63.087689
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.817453,
+          "mapping_and_tensor_checks": 15.784287999999998,
+          "gpu_gather_host": 7.619541999999998,
+          "d2h_host_blocking": 7.445237999999999,
+          "cpu_copy": 4.353414999999998,
+          "segment_hash": 42.76632000000001,
+          "cpu_concatenate": 3.411695,
+          "payload_hash": 20.35408,
+          "payload_validation": 63.0916
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 168.209609,
+        "accounted_ms": 165.107827,
+        "unaccounted_ms": 3.1017820000000142,
+        "tp_rank": 0,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle256",
+        "token_start": 256,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.083817,
+      "gather_kernel_activity_ms": 0.102561,
+      "device_activity_union_ms": 2.5423955078125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626739-2.trace.json",
+      "host_wall_ms": {
+        "total": 167.912992,
+        "slot_tensor": 0.774098,
+        "mapping_and_tensor_checks": 27.751002999999997,
+        "gpu_gather_host": 6.729747000000001,
+        "d2h_host_blocking": 7.320860000000003,
+        "cpu_copy": 3.770040000000001,
+        "segment_hash": 42.143139000000005,
+        "cpu_concatenate": 3.4953939999999997,
+        "payload_hash": 20.188808,
+        "payload_validation": 63.334593
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.787361,
+          "mapping_and_tensor_checks": 15.649123999999995,
+          "gpu_gather_host": 7.315345000000004,
+          "d2h_host_blocking": 7.096054,
+          "cpu_copy": 4.345974,
+          "segment_hash": 42.65958799999999,
+          "cpu_concatenate": 3.508057,
+          "payload_hash": 20.205238,
+          "payload_validation": 63.355634
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.791136,
+          "mapping_and_tensor_checks": 15.742111000000003,
+          "gpu_gather_host": 7.45192,
+          "d2h_host_blocking": 7.208484000000002,
+          "cpu_copy": 4.435442,
+          "segment_hash": 42.74244899999999,
+          "cpu_concatenate": 3.51061,
+          "payload_hash": 20.208039,
+          "payload_validation": 63.359945
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 167.964288,
+        "accounted_ms": 164.922375,
+        "unaccounted_ms": 3.0419130000000223,
+        "tp_rank": 0,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle512",
+        "token_start": 512,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.082864,
+      "gather_kernel_activity_ms": 0.10525,
+      "device_activity_union_ms": 2.544589599609375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626739-3.trace.json",
+      "host_wall_ms": {
+        "total": 171.635726,
+        "slot_tensor": 2.780112,
+        "mapping_and_tensor_checks": 27.364665,
+        "gpu_gather_host": 6.730112999999979,
+        "d2h_host_blocking": 9.703992,
+        "cpu_copy": 5.228088000000002,
+        "segment_hash": 42.018392999999996,
+        "cpu_concatenate": 3.081703,
+        "payload_hash": 20.20592,
+        "payload_validation": 61.766537
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 2.79477,
+          "mapping_and_tensor_checks": 15.482283,
+          "gpu_gather_host": 7.345230999999997,
+          "d2h_host_blocking": 9.494047,
+          "cpu_copy": 5.785344999999999,
+          "segment_hash": 42.544563,
+          "cpu_concatenate": 3.093644,
+          "payload_hash": 20.218905,
+          "payload_validation": 61.782566
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 2.799671,
+          "mapping_and_tensor_checks": 15.585409000000002,
+          "gpu_gather_host": 7.4942350000000015,
+          "d2h_host_blocking": 9.609779000000005,
+          "cpu_copy": 5.876857999999999,
+          "segment_hash": 42.629704000000004,
+          "cpu_concatenate": 3.096246,
+          "payload_hash": 20.221342,
+          "payload_validation": 61.785258
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 171.704319,
+        "accounted_ms": 168.54135399999998,
+        "unaccounted_ms": 3.162965000000014,
+        "tp_rank": 0,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-cleared",
+        "token_start": 0,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.0897029999999999,
+      "gather_kernel_activity_ms": 0.084448,
+      "device_activity_union_ms": 2.529830322265625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626739-4.trace.json",
+      "host_wall_ms": {
+        "total": 217.527206,
+        "slot_tensor": 5.500283,
+        "mapping_and_tensor_checks": 40.82652600000001,
+        "gpu_gather_host": 17.46248900000005,
+        "d2h_host_blocking": 9.398613000000006,
+        "cpu_copy": 4.888471,
+        "segment_hash": 62.915493999999995,
+        "cpu_concatenate": 3.6987550000000002,
+        "payload_hash": 20.435245,
+        "payload_validation": 62.978271
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 5.531502,
+          "mapping_and_tensor_checks": 23.069547999999998,
+          "gpu_gather_host": 18.420778000000002,
+          "d2h_host_blocking": 9.456626,
+          "cpu_copy": 5.709123,
+          "segment_hash": 63.715319000000015,
+          "cpu_concatenate": 3.713803,
+          "payload_hash": 20.453073,
+          "payload_validation": 62.998536
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 5.539666,
+          "mapping_and_tensor_checks": 23.21145600000001,
+          "gpu_gather_host": 18.622614000000006,
+          "d2h_host_blocking": 9.622823,
+          "cpu_copy": 5.8424229999999975,
+          "segment_hash": 63.84201899999999,
+          "cpu_concatenate": 3.716499,
+          "payload_hash": 20.456095,
+          "payload_validation": 63.001657
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 217.613968,
+        "accounted_ms": 213.068308,
+        "unaccounted_ms": 4.545659999999998,
+        "tp_rank": 0,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle0",
+        "token_start": 0,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.117614,
+      "gather_kernel_activity_ms": 0.09888,
+      "device_activity_union_ms": 2.5730087890625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626739-5.trace.json",
+      "host_wall_ms": {
+        "total": 166.90268,
+        "slot_tensor": 1.27718,
+        "mapping_and_tensor_checks": 27.937194,
+        "gpu_gather_host": 6.844001999999995,
+        "d2h_host_blocking": 6.946227999999999,
+        "cpu_copy": 4.255970999999999,
+        "segment_hash": 41.965121,
+        "cpu_concatenate": 1.905335,
+        "payload_hash": 20.364681,
+        "payload_validation": 62.992387
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.289148,
+          "mapping_and_tensor_checks": 15.803206000000001,
+          "gpu_gather_host": 7.437722999999999,
+          "d2h_host_blocking": 6.7184209999999975,
+          "cpu_copy": 4.83033,
+          "segment_hash": 42.494749999999996,
+          "cpu_concatenate": 1.918854,
+          "payload_hash": 20.3823,
+          "payload_validation": 63.013627
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.293094,
+          "mapping_and_tensor_checks": 15.895273000000001,
+          "gpu_gather_host": 7.575693000000001,
+          "d2h_host_blocking": 6.8318379999999985,
+          "cpu_copy": 4.922823,
+          "segment_hash": 42.584147999999985,
+          "cpu_concatenate": 1.922077,
+          "payload_hash": 20.376319,
+          "payload_validation": 63.018006
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 166.958286,
+        "accounted_ms": 163.888359,
+        "unaccounted_ms": 3.0699269999999785,
+        "tp_rank": 0,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle256",
+        "token_start": 256,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.08749,
+      "gather_kernel_activity_ms": 0.103073,
+      "device_activity_union_ms": 2.546010986328125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626739-6.trace.json",
+      "host_wall_ms": {
+        "total": 168.142573,
+        "slot_tensor": 1.360762,
+        "mapping_and_tensor_checks": 27.78489899999999,
+        "gpu_gather_host": 6.759885999999999,
+        "d2h_host_blocking": 7.204807999999995,
+        "cpu_copy": 3.6336450000000013,
+        "segment_hash": 42.17856700000001,
+        "cpu_concatenate": 3.1712689999999997,
+        "payload_hash": 20.310748,
+        "payload_validation": 63.289599
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.374609,
+          "mapping_and_tensor_checks": 15.699049999999996,
+          "gpu_gather_host": 7.377895000000001,
+          "d2h_host_blocking": 6.980414000000003,
+          "cpu_copy": 4.182945999999999,
+          "segment_hash": 42.70031500000001,
+          "cpu_concatenate": 3.185733,
+          "payload_hash": 20.328377,
+          "payload_validation": 63.309989
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.378739,
+          "mapping_and_tensor_checks": 15.792002,
+          "gpu_gather_host": 7.514597000000001,
+          "d2h_host_blocking": 7.0930990000000005,
+          "cpu_copy": 4.273307,
+          "segment_hash": 42.785115999999995,
+          "cpu_concatenate": 3.188858,
+          "payload_hash": 20.331393,
+          "payload_validation": 63.313295
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 168.205123,
+        "accounted_ms": 165.139328,
+        "unaccounted_ms": 3.06579499999998,
+        "tp_rank": 0,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle512",
+        "token_start": 512,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.088211,
+      "gather_kernel_activity_ms": 0.10346,
+      "device_activity_union_ms": 2.547090087890625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626741-0.trace.json",
+      "host_wall_ms": {
+        "total": 281.421177,
+        "slot_tensor": 3.7127640000000004,
+        "mapping_and_tensor_checks": 117.47192200000003,
+        "gpu_gather_host": 9.597751000000013,
+        "d2h_host_blocking": 12.147001000000003,
+        "cpu_copy": 6.534027000000002,
+        "segment_hash": 55.264903,
+        "cpu_concatenate": 4.200092,
+        "payload_hash": 27.248759,
+        "payload_validation": 84.47357099999999
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 3.765497,
+          "mapping_and_tensor_checks": 70.29544600000001,
+          "gpu_gather_host": 10.444252999999998,
+          "d2h_host_blocking": 12.16586,
+          "cpu_copy": 7.348863999999998,
+          "segment_hash": 56.08656299999998,
+          "cpu_concatenate": 4.214808,
+          "payload_hash": 27.268344,
+          "payload_validation": 84.49841
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.776436,
+          "mapping_and_tensor_checks": 70.43561899999999,
+          "gpu_gather_host": 10.623076000000001,
+          "d2h_host_blocking": 12.330943,
+          "cpu_copy": 7.463756,
+          "segment_hash": 56.20792599999998,
+          "cpu_concatenate": 4.218191,
+          "payload_hash": 27.272106,
+          "payload_validation": 84.503544
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 281.785178,
+        "accounted_ms": 276.08804499999997,
+        "unaccounted_ms": 5.697133000000008,
+        "tp_rank": 1,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle0",
+        "token_start": 0,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.1556659999999999,
+      "gather_kernel_activity_ms": 0.099357,
+      "device_activity_union_ms": 2.6109609375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626741-1.trace.json",
+      "host_wall_ms": {
+        "total": 217.613144,
+        "slot_tensor": 0.7679410000000001,
+        "mapping_and_tensor_checks": 35.65876699999999,
+        "gpu_gather_host": 8.535959000000021,
+        "d2h_host_blocking": 8.250934999999997,
+        "cpu_copy": 4.485765000000001,
+        "segment_hash": 55.47523700000001,
+        "cpu_concatenate": 3.654406,
+        "payload_hash": 26.887297,
+        "payload_validation": 83.121533
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.782314,
+          "mapping_and_tensor_checks": 20.17632499999999,
+          "gpu_gather_host": 9.356911000000002,
+          "d2h_host_blocking": 8.21339,
+          "cpu_copy": 5.18361,
+          "segment_hash": 56.25941899999999,
+          "cpu_concatenate": 3.670383,
+          "payload_hash": 26.907789,
+          "payload_validation": 83.148216
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.786468,
+          "mapping_and_tensor_checks": 20.297394,
+          "gpu_gather_host": 9.533439000000001,
+          "d2h_host_blocking": 8.360145999999999,
+          "cpu_copy": 5.296752999999998,
+          "segment_hash": 56.391982,
+          "cpu_concatenate": 3.673947,
+          "payload_hash": 26.911314,
+          "payload_validation": 83.153779
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 217.68291,
+        "accounted_ms": 213.698357,
+        "unaccounted_ms": 3.9845530000000053,
+        "tp_rank": 1,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle256",
+        "token_start": 256,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.138601,
+      "gather_kernel_activity_ms": 0.102244,
+      "device_activity_union_ms": 2.59578759765625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626741-2.trace.json",
+      "host_wall_ms": {
+        "total": 209.8992,
+        "slot_tensor": 0.8070360000000001,
+        "mapping_and_tensor_checks": 34.958938,
+        "gpu_gather_host": 8.545700000000013,
+        "d2h_host_blocking": 8.253311,
+        "cpu_copy": 4.374971000000002,
+        "segment_hash": 55.12158999999999,
+        "cpu_concatenate": 4.246084,
+        "payload_hash": 26.637865,
+        "payload_validation": 75.91558500000001
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.822357,
+          "mapping_and_tensor_checks": 19.773155,
+          "gpu_gather_host": 9.390251999999993,
+          "d2h_host_blocking": 8.210900000000002,
+          "cpu_copy": 5.0974949999999986,
+          "segment_hash": 55.865898999999985,
+          "cpu_concatenate": 4.262993,
+          "payload_hash": 26.658152,
+          "payload_validation": 75.938527
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.826953,
+          "mapping_and_tensor_checks": 19.892616999999998,
+          "gpu_gather_host": 9.565373,
+          "d2h_host_blocking": 8.357618,
+          "cpu_copy": 5.203296999999999,
+          "segment_hash": 55.98853800000002,
+          "cpu_concatenate": 4.266432,
+          "payload_hash": 26.66145,
+          "payload_validation": 75.9304
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 209.955744,
+        "accounted_ms": 206.01972999999998,
+        "unaccounted_ms": 3.9360140000000285,
+        "tp_rank": 1,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle512",
+        "token_start": 512,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.137168,
+      "gather_kernel_activity_ms": 0.105057,
+      "device_activity_union_ms": 2.596914306640625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626741-3.trace.json",
+      "host_wall_ms": {
+        "total": 249.64642,
+        "slot_tensor": 1.671434,
+        "mapping_and_tensor_checks": 46.998857000000015,
+        "gpu_gather_host": 11.133095000000013,
+        "d2h_host_blocking": 10.473854000000003,
+        "cpu_copy": 6.4490820000000015,
+        "segment_hash": 71.035719,
+        "cpu_concatenate": 3.8898479999999998,
+        "payload_hash": 26.73462,
+        "payload_validation": 83.074428
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.701694,
+          "mapping_and_tensor_checks": 26.611690000000003,
+          "gpu_gather_host": 12.230439,
+          "d2h_host_blocking": 10.660615999999997,
+          "cpu_copy": 7.445082000000005,
+          "segment_hash": 72.051629,
+          "cpu_concatenate": 3.906497,
+          "payload_hash": 26.753957,
+          "payload_validation": 83.099381
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.70964,
+          "mapping_and_tensor_checks": 26.777664999999995,
+          "gpu_gather_host": 12.460058,
+          "d2h_host_blocking": 10.855944,
+          "cpu_copy": 7.587811999999998,
+          "segment_hash": 72.21053200000001,
+          "cpu_concatenate": 3.910124,
+          "payload_hash": 26.757327,
+          "payload_validation": 83.104386
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 249.732722,
+        "accounted_ms": 244.460985,
+        "unaccounted_ms": 5.271737000000002,
+        "tp_rank": 1,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle0",
+        "token_start": 0,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.1683379999999999,
+      "gather_kernel_activity_ms": 0.098177,
+      "device_activity_union_ms": 2.62039990234375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626741-4.trace.json",
+      "host_wall_ms": {
+        "total": 226.442231,
+        "slot_tensor": 1.334083,
+        "mapping_and_tensor_checks": 35.01814500000001,
+        "gpu_gather_host": 18.887589000000023,
+        "d2h_host_blocking": 8.302008999999991,
+        "cpu_copy": 4.260238000000001,
+        "segment_hash": 54.892139,
+        "cpu_concatenate": 3.502799,
+        "payload_hash": 26.543535,
+        "payload_validation": 82.624247
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.350736,
+          "mapping_and_tensor_checks": 19.803305,
+          "gpu_gather_host": 19.719524,
+          "d2h_host_blocking": 8.281225,
+          "cpu_copy": 4.986368,
+          "segment_hash": 55.646079000000015,
+          "cpu_concatenate": 3.519018,
+          "payload_hash": 26.563083,
+          "payload_validation": 82.648921
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.355751,
+          "mapping_and_tensor_checks": 19.924082999999996,
+          "gpu_gather_host": 19.896837999999992,
+          "d2h_host_blocking": 8.434203,
+          "cpu_copy": 5.092079,
+          "segment_hash": 55.767699000000015,
+          "cpu_concatenate": 3.522451,
+          "payload_hash": 26.545877,
+          "payload_validation": 82.653666
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 226.499062,
+        "accounted_ms": 222.51825900000003,
+        "unaccounted_ms": 3.9808029999999803,
+        "tp_rank": 1,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle256",
+        "token_start": 256,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.136996,
+      "gather_kernel_activity_ms": 0.102244,
+      "device_activity_union_ms": 2.592644287109375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626741-5.trace.json",
+      "host_wall_ms": {
+        "total": 192.210847,
+        "slot_tensor": 1.32606,
+        "mapping_and_tensor_checks": 35.13027299999998,
+        "gpu_gather_host": 8.558432000000023,
+        "d2h_host_blocking": 7.954319000000002,
+        "cpu_copy": 4.383749000000001,
+        "segment_hash": 55.011616000000004,
+        "cpu_concatenate": 1.963165,
+        "payload_hash": 23.285071,
+        "payload_validation": 63.693318
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.342665,
+          "mapping_and_tensor_checks": 19.877578000000003,
+          "gpu_gather_host": 9.368432999999998,
+          "d2h_host_blocking": 7.915650999999997,
+          "cpu_copy": 5.096748,
+          "segment_hash": 55.775895,
+          "cpu_concatenate": 1.978846,
+          "payload_hash": 23.30187,
+          "payload_validation": 63.712542
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.34731,
+          "mapping_and_tensor_checks": 19.996482000000007,
+          "gpu_gather_host": 9.549504999999998,
+          "d2h_host_blocking": 8.06021,
+          "cpu_copy": 5.202501999999999,
+          "segment_hash": 55.899191,
+          "cpu_concatenate": 1.981621,
+          "payload_hash": 23.30445,
+          "payload_validation": 63.716207
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 192.267414,
+        "accounted_ms": 188.370228,
+        "unaccounted_ms": 3.897186000000005,
+        "tp_rank": 1,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle512",
+        "token_start": 512,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.126211,
+      "gather_kernel_activity_ms": 0.102405,
+      "device_activity_union_ms": 2.582051025390625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626748-0.trace.json",
+      "host_wall_ms": {
+        "total": 271.442718,
+        "slot_tensor": 3.7820270000000002,
+        "mapping_and_tensor_checks": 114.72774600000005,
+        "gpu_gather_host": 9.019068000000019,
+        "d2h_host_blocking": 11.08834399999999,
+        "cpu_copy": 6.282413999999998,
+        "segment_hash": 53.855414999999994,
+        "cpu_concatenate": 4.089008,
+        "payload_hash": 26.134931,
+        "payload_validation": 81.17432000000001
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 3.847163,
+          "mapping_and_tensor_checks": 68.84469200000001,
+          "gpu_gather_host": 9.789029000000003,
+          "d2h_host_blocking": 11.042415999999998,
+          "cpu_copy": 6.99831,
+          "segment_hash": 54.53741100000001,
+          "cpu_concatenate": 4.102905,
+          "payload_hash": 26.150228,
+          "payload_validation": 81.19919
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.857094,
+          "mapping_and_tensor_checks": 68.961489,
+          "gpu_gather_host": 9.948249,
+          "d2h_host_blocking": 11.187895,
+          "cpu_copy": 7.111255999999999,
+          "segment_hash": 54.651368999999995,
+          "cpu_concatenate": 4.106362,
+          "payload_hash": 26.152618,
+          "payload_validation": 81.215445
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 271.767765,
+        "accounted_ms": 266.511344,
+        "unaccounted_ms": 5.256420999999989,
+        "tp_rank": 2,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle0",
+        "token_start": 0,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.089388,
+      "gather_kernel_activity_ms": 0.098341,
+      "device_activity_union_ms": 2.528642333984375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626748-1.trace.json",
+      "host_wall_ms": {
+        "total": 210.728299,
+        "slot_tensor": 0.76728,
+        "mapping_and_tensor_checks": 33.852357999999995,
+        "gpu_gather_host": 8.101402000000006,
+        "d2h_host_blocking": 7.9601340000000045,
+        "cpu_copy": 4.311488000000001,
+        "segment_hash": 53.727487999999994,
+        "cpu_concatenate": 4.087984,
+        "payload_hash": 26.017622,
+        "payload_validation": 80.892092
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.780687,
+          "mapping_and_tensor_checks": 19.04557,
+          "gpu_gather_host": 8.854005999999998,
+          "d2h_host_blocking": 7.893951999999997,
+          "cpu_copy": 5.005064,
+          "segment_hash": 54.387257999999996,
+          "cpu_concatenate": 4.104796,
+          "payload_hash": 26.03973,
+          "payload_validation": 80.918342
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.785197,
+          "mapping_and_tensor_checks": 19.154673000000003,
+          "gpu_gather_host": 9.019332,
+          "d2h_host_blocking": 8.029888000000001,
+          "cpu_copy": 5.110244999999996,
+          "segment_hash": 54.501222000000006,
+          "cpu_concatenate": 4.108055,
+          "payload_hash": 26.043475,
+          "payload_validation": 80.922859
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 210.797416,
+        "accounted_ms": 207.029405,
+        "unaccounted_ms": 3.7680110000000013,
+        "tp_rank": 2,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle256",
+        "token_start": 256,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.0711769999999998,
+      "gather_kernel_activity_ms": 0.101248,
+      "device_activity_union_ms": 2.512372314453125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626748-2.trace.json",
+      "host_wall_ms": {
+        "total": 210.97759200000002,
+        "slot_tensor": 0.797001,
+        "mapping_and_tensor_checks": 33.676416,
+        "gpu_gather_host": 8.081109000000005,
+        "d2h_host_blocking": 7.987551000000003,
+        "cpu_copy": 4.171937999999998,
+        "segment_hash": 53.725579,
+        "cpu_concatenate": 3.958753,
+        "payload_hash": 26.115248,
+        "payload_validation": 81.42992600000001
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.811276,
+          "mapping_and_tensor_checks": 18.963449999999998,
+          "gpu_gather_host": 8.812664,
+          "d2h_host_blocking": 7.918489999999999,
+          "cpu_copy": 4.8749590000000005,
+          "segment_hash": 54.393814,
+          "cpu_concatenate": 3.974743,
+          "payload_hash": 26.134491,
+          "payload_validation": 81.452927
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.815781,
+          "mapping_and_tensor_checks": 19.072446000000003,
+          "gpu_gather_host": 8.977570999999998,
+          "d2h_host_blocking": 8.055622,
+          "cpu_copy": 4.980408000000001,
+          "segment_hash": 54.50269900000001,
+          "cpu_concatenate": 3.977866,
+          "payload_hash": 26.137565,
+          "payload_validation": 81.456699
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 211.036699,
+        "accounted_ms": 207.336814,
+        "unaccounted_ms": 3.6998849999999948,
+        "tp_rank": 2,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle512",
+        "token_start": 512,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.0819290000000001,
+      "gather_kernel_activity_ms": 0.10419400000000001,
+      "device_activity_union_ms": 2.5262236328125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626748-3.trace.json",
+      "host_wall_ms": {
+        "total": 243.208526,
+        "slot_tensor": 1.6734330000000002,
+        "mapping_and_tensor_checks": 44.354720000000015,
+        "gpu_gather_host": 10.79473400000002,
+        "d2h_host_blocking": 10.172108000000001,
+        "cpu_copy": 6.113792999999999,
+        "segment_hash": 70.042614,
+        "cpu_concatenate": 4.402418,
+        "payload_hash": 26.171054,
+        "payload_validation": 80.865615
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.71367,
+          "mapping_and_tensor_checks": 25.01763399999999,
+          "gpu_gather_host": 11.843120000000003,
+          "d2h_host_blocking": 10.317350999999999,
+          "cpu_copy": 7.0516879999999995,
+          "segment_hash": 70.92128600000001,
+          "cpu_concatenate": 4.417958,
+          "payload_hash": 26.191098,
+          "payload_validation": 80.889643
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.721735,
+          "mapping_and_tensor_checks": 25.164917,
+          "gpu_gather_host": 12.063356000000004,
+          "d2h_host_blocking": 10.4968,
+          "cpu_copy": 7.191291999999998,
+          "segment_hash": 71.081203,
+          "cpu_concatenate": 4.421372,
+          "payload_hash": 26.194248,
+          "payload_validation": 80.874539
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 243.294242,
+        "accounted_ms": 238.363448,
+        "unaccounted_ms": 4.930793999999992,
+        "tp_rank": 2,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle0",
+        "token_start": 0,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.168585,
+      "gather_kernel_activity_ms": 0.097918,
+      "device_activity_union_ms": 2.60571142578125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626748-4.trace.json",
+      "host_wall_ms": {
+        "total": 220.024206,
+        "slot_tensor": 1.300292,
+        "mapping_and_tensor_checks": 33.915526,
+        "gpu_gather_host": 18.010551000000035,
+        "d2h_host_blocking": 8.151009,
+        "cpu_copy": 4.211416,
+        "segment_hash": 53.78316399999999,
+        "cpu_concatenate": 2.8534520000000003,
+        "payload_hash": 26.01241,
+        "payload_validation": 80.736079
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.31446,
+          "mapping_and_tensor_checks": 19.085661999999996,
+          "gpu_gather_host": 18.780289,
+          "d2h_host_blocking": 8.080458,
+          "cpu_copy": 4.928768000000001,
+          "segment_hash": 54.47049300000001,
+          "cpu_concatenate": 2.867708,
+          "payload_hash": 26.029763,
+          "payload_validation": 80.760013
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.318522,
+          "mapping_and_tensor_checks": 19.194456000000002,
+          "gpu_gather_host": 18.947376000000002,
+          "d2h_host_blocking": 8.218407999999998,
+          "cpu_copy": 5.034012999999999,
+          "segment_hash": 54.581644000000004,
+          "cpu_concatenate": 2.870829,
+          "payload_hash": 26.032344,
+          "payload_validation": 80.764756
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 220.083195,
+        "accounted_ms": 216.31761400000002,
+        "unaccounted_ms": 3.765580999999969,
+        "tp_rank": 2,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle256",
+        "token_start": 256,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.129578,
+      "gather_kernel_activity_ms": 0.100994,
+      "device_activity_union_ms": 2.5690087890625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626748-5.trace.json",
+      "host_wall_ms": {
+        "total": 200.784326,
+        "slot_tensor": 1.3106929999999999,
+        "mapping_and_tensor_checks": 33.791728,
+        "gpu_gather_host": 8.11411000000001,
+        "d2h_host_blocking": 7.653655000000001,
+        "cpu_copy": 4.153414,
+        "segment_hash": 53.841631000000014,
+        "cpu_concatenate": 1.884493,
+        "payload_hash": 26.124855,
+        "payload_validation": 72.865989
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.324116,
+          "mapping_and_tensor_checks": 19.030339,
+          "gpu_gather_host": 8.877288,
+          "d2h_host_blocking": 7.572906000000002,
+          "cpu_copy": 4.855817999999999,
+          "segment_hash": 54.53010499999998,
+          "cpu_concatenate": 1.904276,
+          "payload_hash": 26.142685,
+          "payload_validation": 72.885157
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.328642,
+          "mapping_and_tensor_checks": 19.139013000000002,
+          "gpu_gather_host": 9.072602,
+          "d2h_host_blocking": 7.708255999999999,
+          "cpu_copy": 4.958573999999998,
+          "segment_hash": 54.64650499999999,
+          "cpu_concatenate": 1.906655,
+          "payload_hash": 26.145847,
+          "payload_validation": 72.888273
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 200.844538,
+        "accounted_ms": 197.12268999999998,
+        "unaccounted_ms": 3.7218480000000227,
+        "tp_rank": 2,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle512",
+        "token_start": 512,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.1415350000000002,
+      "gather_kernel_activity_ms": 0.10205,
+      "device_activity_union_ms": 2.582406494140625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626750-0.trace.json",
+      "host_wall_ms": {
+        "total": 267.941929,
+        "slot_tensor": 3.397385,
+        "mapping_and_tensor_checks": 112.336088,
+        "gpu_gather_host": 9.148630000000013,
+        "d2h_host_blocking": 11.363483999999993,
+        "cpu_copy": 6.407438,
+        "segment_hash": 54.13417700000002,
+        "cpu_concatenate": 3.509,
+        "payload_hash": 26.013812,
+        "payload_validation": 80.56587300000001
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 3.437967,
+          "mapping_and_tensor_checks": 66.34716100000001,
+          "gpu_gather_host": 9.979408,
+          "d2h_host_blocking": 11.335977,
+          "cpu_copy": 7.152390999999998,
+          "segment_hash": 54.835699,
+          "cpu_concatenate": 3.523356,
+          "payload_hash": 26.02942,
+          "payload_validation": 80.588639
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.40868,
+          "mapping_and_tensor_checks": 66.455181,
+          "gpu_gather_host": 10.155679000000003,
+          "d2h_host_blocking": 11.485063,
+          "cpu_copy": 7.265828999999998,
+          "segment_hash": 54.945417,
+          "cpu_concatenate": 3.526359,
+          "payload_hash": 26.031771,
+          "payload_validation": 80.593835
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 268.197321,
+        "accounted_ms": 263.23001800000003,
+        "unaccounted_ms": 4.9673029999999585,
+        "tp_rank": 3,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle0",
+        "token_start": 0,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.0709859999999998,
+      "gather_kernel_activity_ms": 0.098238,
+      "device_activity_union_ms": 2.52901806640625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626750-1.trace.json",
+      "host_wall_ms": {
+        "total": 163.305174,
+        "slot_tensor": 0.782497,
+        "mapping_and_tensor_checks": 27.419016,
+        "gpu_gather_host": 6.734269999999993,
+        "d2h_host_blocking": 7.1131920000000095,
+        "cpu_copy": 3.7813760000000007,
+        "segment_hash": 41.56074400000001,
+        "cpu_concatenate": 3.408718,
+        "payload_hash": 19.059051,
+        "payload_validation": 60.84291
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.797296,
+          "mapping_and_tensor_checks": 15.503141999999997,
+          "gpu_gather_host": 7.349735999999998,
+          "d2h_host_blocking": 6.911585,
+          "cpu_copy": 4.317475,
+          "segment_hash": 42.09041899999999,
+          "cpu_concatenate": 3.420932,
+          "payload_hash": 19.073239,
+          "payload_validation": 60.859064
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.801696,
+          "mapping_and_tensor_checks": 15.616682,
+          "gpu_gather_host": 7.491198000000001,
+          "d2h_host_blocking": 7.022809000000001,
+          "cpu_copy": 4.401454000000002,
+          "segment_hash": 42.17930099999998,
+          "cpu_concatenate": 3.423536,
+          "payload_hash": 19.075744,
+          "payload_validation": 60.862014
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 163.364392,
+        "accounted_ms": 160.32288799999998,
+        "unaccounted_ms": 3.0415040000000317,
+        "tp_rank": 3,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle256",
+        "token_start": 256,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.060901,
+      "gather_kernel_activity_ms": 0.101533,
+      "device_activity_union_ms": 2.52117626953125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626750-2.trace.json",
+      "host_wall_ms": {
+        "total": 159.78919,
+        "slot_tensor": 0.66973,
+        "mapping_and_tensor_checks": 26.671474000000003,
+        "gpu_gather_host": 6.526352999999997,
+        "d2h_host_blocking": 6.941435000000009,
+        "cpu_copy": 3.4979560000000007,
+        "segment_hash": 40.14025799999999,
+        "cpu_concatenate": 3.071498,
+        "payload_hash": 19.324363,
+        "payload_validation": 60.254628
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 0.680089,
+          "mapping_and_tensor_checks": 15.089577,
+          "gpu_gather_host": 7.0975340000000005,
+          "d2h_host_blocking": 6.710799000000002,
+          "cpu_copy": 4.034695999999999,
+          "segment_hash": 40.65887700000001,
+          "cpu_concatenate": 3.084061,
+          "payload_hash": 19.338105,
+          "payload_validation": 60.269679
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 0.68398,
+          "mapping_and_tensor_checks": 15.185187,
+          "gpu_gather_host": 7.231976999999998,
+          "d2h_host_blocking": 6.818379999999999,
+          "cpu_copy": 4.113300000000001,
+          "segment_hash": 40.739302,
+          "cpu_concatenate": 3.086659,
+          "payload_hash": 19.33997,
+          "payload_validation": 60.272631
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 159.836131,
+        "accounted_ms": 156.96341700000002,
+        "unaccounted_ms": 2.8727139999999736,
+        "tp_rank": 3,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle512",
+        "token_start": 512,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.059719,
+      "gather_kernel_activity_ms": 0.10537600000000001,
+      "device_activity_union_ms": 2.523858642578125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626750-3.trace.json",
+      "host_wall_ms": {
+        "total": 243.138726,
+        "slot_tensor": 1.609245,
+        "mapping_and_tensor_checks": 44.25107900000001,
+        "gpu_gather_host": 10.788997000000018,
+        "d2h_host_blocking": 10.137488999999997,
+        "cpu_copy": 6.236877,
+        "segment_hash": 69.635826,
+        "cpu_concatenate": 4.214579,
+        "payload_hash": 26.129759,
+        "payload_validation": 81.37879799999999
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.639275,
+          "mapping_and_tensor_checks": 24.987432999999996,
+          "gpu_gather_host": 11.857476,
+          "d2h_host_blocking": 10.317786000000003,
+          "cpu_copy": 7.160499,
+          "segment_hash": 70.54674800000001,
+          "cpu_concatenate": 4.230785,
+          "payload_hash": 26.147957,
+          "payload_validation": 81.398173
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.646957,
+          "mapping_and_tensor_checks": 25.136474,
+          "gpu_gather_host": 12.088042,
+          "d2h_host_blocking": 10.513006000000004,
+          "cpu_copy": 7.322603,
+          "segment_hash": 70.696723,
+          "cpu_concatenate": 4.234112,
+          "payload_hash": 26.150489,
+          "payload_validation": 81.401932
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 243.228352,
+        "accounted_ms": 238.286132,
+        "unaccounted_ms": 4.942219999999992,
+        "tp_rank": 3,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle0",
+        "token_start": 0,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.092781,
+      "gather_kernel_activity_ms": 0.098558,
+      "device_activity_union_ms": 2.549159423828125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626750-4.trace.json",
+      "host_wall_ms": {
+        "total": 219.538337,
+        "slot_tensor": 1.1673850000000001,
+        "mapping_and_tensor_checks": 33.887878999999984,
+        "gpu_gather_host": 8.22829900000001,
+        "d2h_host_blocking": 17.408521000000015,
+        "cpu_copy": 4.124156000000001,
+        "segment_hash": 54.03348600000001,
+        "cpu_concatenate": 2.669398,
+        "payload_hash": 26.13184,
+        "payload_validation": 80.588902
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.181843,
+          "mapping_and_tensor_checks": 19.127458,
+          "gpu_gather_host": 9.052127,
+          "d2h_host_blocking": 17.374990999999994,
+          "cpu_copy": 4.846587,
+          "segment_hash": 54.755873000000015,
+          "cpu_concatenate": 2.683723,
+          "payload_hash": 26.151181,
+          "payload_validation": 80.61028
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.185902,
+          "mapping_and_tensor_checks": 19.238831,
+          "gpu_gather_host": 9.235964000000001,
+          "d2h_host_blocking": 17.517405,
+          "cpu_copy": 4.9631349999999985,
+          "segment_hash": 54.867520999999996,
+          "cpu_concatenate": 2.686607,
+          "payload_hash": 26.15459,
+          "payload_validation": 80.613645
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 219.592316,
+        "accounted_ms": 215.784063,
+        "unaccounted_ms": 3.8082530000000077,
+        "tp_rank": 3,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle256",
+        "token_start": 256,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.0681420000000001,
+      "gather_kernel_activity_ms": 0.102149,
+      "device_activity_union_ms": 2.527263916015625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/prefill_retry/capture-profiles/capture-2626750-5.trace.json",
+      "host_wall_ms": {
+        "total": 200.33158300000002,
+        "slot_tensor": 1.327585,
+        "mapping_and_tensor_checks": 34.07512700000001,
+        "gpu_gather_host": 8.177453000000012,
+        "d2h_host_blocking": 7.453313000000002,
+        "cpu_copy": 4.219685999999999,
+        "segment_hash": 53.896798999999994,
+        "cpu_concatenate": 1.601669,
+        "payload_hash": 26.165658,
+        "payload_validation": 72.377692
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.340794,
+          "mapping_and_tensor_checks": 19.220533,
+          "gpu_gather_host": 8.976102000000003,
+          "d2h_host_blocking": 7.396199999999999,
+          "cpu_copy": 4.920256999999999,
+          "segment_hash": 54.59162899999999,
+          "cpu_concatenate": 1.614831,
+          "payload_hash": 26.18521,
+          "payload_validation": 72.398256
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.345052,
+          "mapping_and_tensor_checks": 19.331318,
+          "gpu_gather_host": 9.157725999999998,
+          "d2h_host_blocking": 7.535941,
+          "cpu_copy": 5.033839000000001,
+          "segment_hash": 54.705035999999986,
+          "cpu_concatenate": 1.617508,
+          "payload_hash": 26.188622,
+          "payload_validation": 72.401321
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 200.381188,
+        "accounted_ms": 196.643812,
+        "unaccounted_ms": 3.737376000000012,
+        "tp_rank": 3,
+        "snapshot_id": "pause-1b5c6c079dd7438b9503813995215830-oracle512",
+        "token_start": 512,
+        "mode": "prefill_retry"
+      },
+      "d2h_device_activity_ms": 1.071348,
+      "gather_kernel_activity_ms": 0.10281799999999999,
+      "device_activity_union_ms": 2.531236572265625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/protection_only/capture-profiles/capture-2621904-0.trace.json",
+      "host_wall_ms": {
+        "total": 277.1322,
+        "slot_tensor": 3.45588,
+        "mapping_and_tensor_checks": 118.51001100000002,
+        "gpu_gather_host": 9.884255000000016,
+        "d2h_host_blocking": 12.65758400000001,
+        "cpu_copy": 7.229898999999999,
+        "segment_hash": 53.839801,
+        "cpu_concatenate": 4.873079,
+        "payload_hash": 26.058009,
+        "payload_validation": 80.851595
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 3.507491,
+          "mapping_and_tensor_checks": 70.454403,
+          "gpu_gather_host": 10.734490000000005,
+          "d2h_host_blocking": 12.621215999999993,
+          "cpu_copy": 8.00843,
+          "segment_hash": 54.559056000000005,
+          "cpu_concatenate": 4.891667,
+          "payload_hash": 26.080113,
+          "payload_validation": 80.877537
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.516162,
+          "mapping_and_tensor_checks": 70.570004,
+          "gpu_gather_host": 10.911293,
+          "d2h_host_blocking": 12.790726000000001,
+          "cpu_copy": 8.131381,
+          "segment_hash": 54.685425,
+          "cpu_concatenate": 4.886562,
+          "payload_hash": 26.08363,
+          "payload_validation": 80.882852
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 277.459046,
+        "accounted_ms": 271.734403,
+        "unaccounted_ms": 5.724643000000015,
+        "tp_rank": 0,
+        "snapshot_id": "pause-9b4cad1b06ab47a99eaf61d5f97864e2-chunk0",
+        "token_start": 0,
+        "mode": "protection_only"
+      },
+      "d2h_device_activity_ms": 1.1191410000000002,
+      "gather_kernel_activity_ms": 0.09939400000000001,
+      "device_activity_union_ms": 2.57577099609375,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/protection_only/capture-profiles/capture-2621904-1.trace.json",
+      "host_wall_ms": {
+        "total": 236.541201,
+        "slot_tensor": 1.071262,
+        "mapping_and_tensor_checks": 43.27662500000002,
+        "gpu_gather_host": 10.58599600000002,
+        "d2h_host_blocking": 9.90097100000001,
+        "cpu_copy": 5.267698999999999,
+        "segment_hash": 66.92247900000002,
+        "cpu_concatenate": 2.746996,
+        "payload_hash": 26.080881,
+        "payload_validation": 81.771637
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.101625,
+          "mapping_and_tensor_checks": 24.443749000000004,
+          "gpu_gather_host": 11.628524999999994,
+          "d2h_host_blocking": 10.026048000000001,
+          "cpu_copy": 6.163930999999998,
+          "segment_hash": 67.76342600000002,
+          "cpu_concatenate": 2.763417,
+          "payload_hash": 26.104276,
+          "payload_validation": 81.800975
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.109007,
+          "mapping_and_tensor_checks": 24.583767000000012,
+          "gpu_gather_host": 11.837760999999999,
+          "d2h_host_blocking": 10.207575,
+          "cpu_copy": 6.291356999999999,
+          "segment_hash": 67.909761,
+          "cpu_concatenate": 2.767255,
+          "payload_hash": 26.108169,
+          "payload_validation": 81.806798
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 236.638768,
+        "accounted_ms": 231.795972,
+        "unaccounted_ms": 4.842795999999993,
+        "tp_rank": 0,
+        "snapshot_id": "pause-9b4cad1b06ab47a99eaf61d5f97864e2-chunk0",
+        "token_start": 0,
+        "mode": "protection_only"
+      },
+      "d2h_device_activity_ms": 1.116326,
+      "gather_kernel_activity_ms": 0.08495699999999999,
+      "device_activity_union_ms": 2.55757275390625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/protection_only/capture-profiles/capture-2621906-0.trace.json",
+      "host_wall_ms": {
+        "total": 282.948243,
+        "slot_tensor": 4.06431,
+        "mapping_and_tensor_checks": 124.69336700000001,
+        "gpu_gather_host": 9.968553000000007,
+        "d2h_host_blocking": 12.759261000000006,
+        "cpu_copy": 7.217048999999997,
+        "segment_hash": 54.19660800000004,
+        "cpu_concatenate": 4.497966,
+        "payload_hash": 26.156726,
+        "payload_validation": 81.084682
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 4.120284,
+          "mapping_and_tensor_checks": 75.13424599999999,
+          "gpu_gather_host": 10.828898000000004,
+          "d2h_host_blocking": 12.748414,
+          "cpu_copy": 7.9962719999999985,
+          "segment_hash": 54.92720899999999,
+          "cpu_concatenate": 4.515004,
+          "payload_hash": 26.176143,
+          "payload_validation": 81.111751
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 4.080167,
+          "mapping_and_tensor_checks": 75.270383,
+          "gpu_gather_host": 11.011252999999998,
+          "d2h_host_blocking": 12.894333999999997,
+          "cpu_copy": 8.109901999999998,
+          "segment_hash": 55.04266,
+          "cpu_concatenate": 4.518849,
+          "payload_hash": 26.179538,
+          "payload_validation": 81.117607
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 283.282969,
+        "accounted_ms": 277.558221,
+        "unaccounted_ms": 5.724747999999977,
+        "tp_rank": 1,
+        "snapshot_id": "pause-9b4cad1b06ab47a99eaf61d5f97864e2-chunk0",
+        "token_start": 0,
+        "mode": "protection_only"
+      },
+      "d2h_device_activity_ms": 1.130721,
+      "gather_kernel_activity_ms": 0.099579,
+      "device_activity_union_ms": 2.6021962890625,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/protection_only/capture-profiles/capture-2621906-1.trace.json",
+      "host_wall_ms": {
+        "total": 239.29522,
+        "slot_tensor": 1.0849499999999999,
+        "mapping_and_tensor_checks": 44.611799000000005,
+        "gpu_gather_host": 10.729417000000021,
+        "d2h_host_blocking": 9.468658000000007,
+        "cpu_copy": 5.937442,
+        "segment_hash": 68.66089599999998,
+        "cpu_concatenate": 2.664513,
+        "payload_hash": 26.078898000000002,
+        "payload_validation": 81.358374
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.115076,
+          "mapping_and_tensor_checks": 25.228154000000007,
+          "gpu_gather_host": 11.811056000000004,
+          "d2h_host_blocking": 9.665307999999998,
+          "cpu_copy": 6.877003999999999,
+          "segment_hash": 69.562192,
+          "cpu_concatenate": 2.681969,
+          "payload_hash": 26.101318,
+          "payload_validation": 81.383583
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.123047,
+          "mapping_and_tensor_checks": 25.377272,
+          "gpu_gather_host": 12.023019999999994,
+          "d2h_host_blocking": 9.847879999999996,
+          "cpu_copy": 7.008465,
+          "segment_hash": 69.70693900000002,
+          "cpu_concatenate": 2.685782,
+          "payload_hash": 26.105186,
+          "payload_validation": 81.389377
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 239.399475,
+        "accounted_ms": 234.42566,
+        "unaccounted_ms": 4.973815000000002,
+        "tp_rank": 1,
+        "snapshot_id": "pause-9b4cad1b06ab47a99eaf61d5f97864e2-chunk0",
+        "token_start": 0,
+        "mode": "protection_only"
+      },
+      "d2h_device_activity_ms": 1.118725,
+      "gather_kernel_activity_ms": 0.085084,
+      "device_activity_union_ms": 2.574618408203125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/protection_only/capture-profiles/capture-2621908-0.trace.json",
+      "host_wall_ms": {
+        "total": 281.075242,
+        "slot_tensor": 3.962825,
+        "mapping_and_tensor_checks": 121.02288400000005,
+        "gpu_gather_host": 9.962761000000022,
+        "d2h_host_blocking": 12.650482000000006,
+        "cpu_copy": 7.279383999999999,
+        "segment_hash": 54.383088999999984,
+        "cpu_concatenate": 4.86341,
+        "payload_hash": 26.209165000000002,
+        "payload_validation": 81.14683000000001
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 4.01608,
+          "mapping_and_tensor_checks": 72.65096,
+          "gpu_gather_host": 10.864940999999998,
+          "d2h_host_blocking": 12.625714,
+          "cpu_copy": 8.086174999999999,
+          "segment_hash": 55.141318,
+          "cpu_concatenate": 4.881698,
+          "payload_hash": 26.232301,
+          "payload_validation": 81.172864
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 4.024967,
+          "mapping_and_tensor_checks": 72.772253,
+          "gpu_gather_host": 11.054750000000002,
+          "d2h_host_blocking": 12.787497000000002,
+          "cpu_copy": 8.204796,
+          "segment_hash": 55.25499900000002,
+          "cpu_concatenate": 4.885149,
+          "payload_hash": 26.23591,
+          "payload_validation": 81.178431
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 281.403919,
+        "accounted_ms": 275.672051,
+        "unaccounted_ms": 5.731867999999963,
+        "tp_rank": 2,
+        "snapshot_id": "pause-9b4cad1b06ab47a99eaf61d5f97864e2-chunk0",
+        "token_start": 0,
+        "mode": "protection_only"
+      },
+      "d2h_device_activity_ms": 1.212144,
+      "gather_kernel_activity_ms": 0.09769800000000001,
+      "device_activity_union_ms": 2.6507470703125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/protection_only/capture-profiles/capture-2621908-1.trace.json",
+      "host_wall_ms": {
+        "total": 238.17666200000002,
+        "slot_tensor": 1.092677,
+        "mapping_and_tensor_checks": 44.085679,
+        "gpu_gather_host": 10.894962999999995,
+        "d2h_host_blocking": 9.362908000000004,
+        "cpu_copy": 5.836094000000001,
+        "segment_hash": 68.27546899999999,
+        "cpu_concatenate": 2.666651,
+        "payload_hash": 26.113049999999998,
+        "payload_validation": 80.861004
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.123717,
+          "mapping_and_tensor_checks": 24.937780000000007,
+          "gpu_gather_host": 11.997449000000001,
+          "d2h_host_blocking": 9.501320999999999,
+          "cpu_copy": 6.774095,
+          "segment_hash": 69.173759,
+          "cpu_concatenate": 2.683993,
+          "payload_hash": 26.135874,
+          "payload_validation": 80.886451
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.131896,
+          "mapping_and_tensor_checks": 25.095846999999996,
+          "gpu_gather_host": 12.218357999999998,
+          "d2h_host_blocking": 9.684135000000001,
+          "cpu_copy": 6.909344000000002,
+          "segment_hash": 69.31000299999997,
+          "cpu_concatenate": 2.687757,
+          "payload_hash": 26.139675,
+          "payload_validation": 80.891797
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 238.270663,
+        "accounted_ms": 233.214439,
+        "unaccounted_ms": 5.0562240000000145,
+        "tp_rank": 2,
+        "snapshot_id": "pause-9b4cad1b06ab47a99eaf61d5f97864e2-chunk0",
+        "token_start": 0,
+        "mode": "protection_only"
+      },
+      "d2h_device_activity_ms": 1.205486,
+      "gather_kernel_activity_ms": 0.08310499999999998,
+      "device_activity_union_ms": 2.62879736328125,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/protection_only/capture-profiles/capture-2621910-0.trace.json",
+      "host_wall_ms": {
+        "total": 290.060506,
+        "slot_tensor": 3.64575,
+        "mapping_and_tensor_checks": 129.22737900000007,
+        "gpu_gather_host": 12.665685000000009,
+        "d2h_host_blocking": 13.742892999999999,
+        "cpu_copy": 8.167274,
+        "segment_hash": 54.36795199999998,
+        "cpu_concatenate": 4.236809,
+        "payload_hash": 25.987807,
+        "payload_validation": 81.54592
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 3.69758,
+          "mapping_and_tensor_checks": 76.552153,
+          "gpu_gather_host": 13.824947999999994,
+          "d2h_host_blocking": 13.986812000000002,
+          "cpu_copy": 9.213569999999997,
+          "segment_hash": 55.37065999999999,
+          "cpu_concatenate": 4.258473,
+          "payload_hash": 26.013603,
+          "payload_validation": 81.572716
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 3.559515,
+          "mapping_and_tensor_checks": 76.51073999999998,
+          "gpu_gather_host": 14.029039000000001,
+          "d2h_host_blocking": 14.175581000000003,
+          "cpu_copy": 9.347638000000002,
+          "segment_hash": 55.504583000000025,
+          "cpu_concatenate": 4.262841,
+          "payload_hash": 26.01793,
+          "payload_validation": 81.577133
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 290.372536,
+        "accounted_ms": 284.49051499999996,
+        "unaccounted_ms": 5.882021000000066,
+        "tp_rank": 3,
+        "snapshot_id": "pause-9b4cad1b06ab47a99eaf61d5f97864e2-chunk0",
+        "token_start": 0,
+        "mode": "protection_only"
+      },
+      "d2h_device_activity_ms": 1.1103450000000001,
+      "gather_kernel_activity_ms": 0.09856000000000001,
+      "device_activity_union_ms": 2.56874560546875,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    },
+    {
+      "path": "/tmp/kv-ec-m5-profile-U3QwOr/smoke/repeat1/protection_only/capture-profiles/capture-2621910-1.trace.json",
+      "host_wall_ms": {
+        "total": 227.84567800000002,
+        "slot_tensor": 1.064653,
+        "mapping_and_tensor_checks": 40.679294000000006,
+        "gpu_gather_host": 10.004018000000015,
+        "d2h_host_blocking": 8.736986000000007,
+        "cpu_copy": 5.424582000000002,
+        "segment_hash": 63.31173900000002,
+        "cpu_concatenate": 2.284665,
+        "payload_hash": 26.062898,
+        "payload_validation": 80.68633
+      },
+      "host_timing": {
+        "wall_regions_ms": {
+          "slot_tensor": 1.09536,
+          "mapping_and_tensor_checks": 22.976497000000002,
+          "gpu_gather_host": 10.995448999999997,
+          "d2h_host_blocking": 8.845469,
+          "cpu_copy": 6.263023,
+          "segment_hash": 64.133802,
+          "cpu_concatenate": 2.301859,
+          "payload_hash": 26.082662,
+          "payload_validation": 80.707781
+        },
+        "thread_cpu_regions_ms": {
+          "slot_tensor": 1.102608,
+          "mapping_and_tensor_checks": 23.118474,
+          "gpu_gather_host": 11.197395,
+          "d2h_host_blocking": 9.016720000000003,
+          "cpu_copy": 6.383207,
+          "segment_hash": 64.26107999999999,
+          "cpu_concatenate": 2.304977,
+          "payload_hash": 26.085734,
+          "payload_validation": 80.712147
+        },
+        "layer_wall_ms": {},
+        "scheduler_capture_ms": 227.953089,
+        "accounted_ms": 223.401902,
+        "unaccounted_ms": 4.551186999999999,
+        "tp_rank": 3,
+        "snapshot_id": "pause-9b4cad1b06ab47a99eaf61d5f97864e2-chunk0",
+        "token_start": 0,
+        "mode": "protection_only"
+      },
+      "d2h_device_activity_ms": 1.1064690000000001,
+      "gather_kernel_activity_ms": 0.084387,
+      "device_activity_union_ms": 2.55069873046875,
+      "d2h_activity_count": 288,
+      "note": "Host scopes and device activities overlap. total encloses host scopes. CPU durations are host wall, not thread CPU time. Device sums may overlap across streams. Missing CUDA/CUPTI activities are null, never CPU surrogates or zero."
+    }
+  ],
+  "missing_in_legacy_M4": [
+    "pure CUDA gather",
+    "pure CUDA D2H",
+    "CPU copy/concatenate",
+    "hash/metadata breakdown",
+    "coordination sleep and vote breakdown"
+  ],
+  "timing_contract": "Do not sum capture, submit, commit, pause, client or recovery enclosing timers. Rank timers are concurrent; retain individual ranks. Profiler export and CUPTI overhead perturb foreground latency. This is not a new GPU experiment."
+}

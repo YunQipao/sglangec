@@ -2,10 +2,65 @@
 
 import argparse
 import hashlib
+import http.client
 import json
 import time
 from pathlib import Path
+import urllib.error
 import urllib.request
+
+
+def validate_result(result, expected_tokens=16):
+    if not isinstance(result, dict):
+        raise ValueError("invalid_server_response: expected a JSON object")
+    if "error" in result:
+        raise ValueError("server_error: request failed; inspect the isolated server log")
+    meta = result.get("meta_info")
+    if not isinstance(meta, dict):
+        raise ValueError("invalid_meta_info: expected a dict; request completion is unproven")
+    reason = meta.get("finish_reason")
+    if not isinstance(reason, dict):
+        raise ValueError(
+            "incomplete_response: finish_reason is missing/null or not a dict; "
+            "server may have crashed or the stream was interrupted")
+    if reason.get("type") not in ("length", "stop"):
+        raise ValueError(f"request_aborted_or_failed: finish_type={reason.get('type')!r}")
+    ids = result.get("output_ids")
+    if (not isinstance(ids, list) or not ids
+            or any(type(token) is not int or token < 0 for token in ids)):
+        raise ValueError("invalid_output_ids: expected nonempty integer token IDs")
+    if len(ids) != expected_tokens:
+        raise ValueError(
+            f"incomplete_output: expected {expected_tokens} tokens, got {len(ids)}")
+    if meta.get("completion_tokens", expected_tokens) != len(ids):
+        raise ValueError("incomplete_output: completion_tokens disagrees with output_ids")
+    return result
+
+
+def read_response(response, streaming, on_output):
+    if not streaming:
+        return json.load(response)
+    result = None
+    done = False
+    for line in response:
+        if not line.startswith(b"data:"):
+            continue
+        raw = line[5:].strip()
+        if raw == b"[DONE]":
+            done = True
+            break
+        event = json.loads(raw)
+        if not isinstance(event, dict) or "error" in event:
+            raise ValueError("server_stream_error: invalid/error event; inspect server log")
+        # Keep the final event even when it reports an abort without token IDs.
+        result = event
+        if event.get("output_ids"):
+            on_output()
+    if not done:
+        raise ValueError("incomplete_stream: missing [DONE]; server crashed or connection closed")
+    if result is None:
+        raise ValueError("incomplete_stream: no generation events")
+    return result
 
 
 def request(args):
@@ -17,10 +72,11 @@ def request(args):
     prompt_tokens = getattr(args, "prompt_tokens", 384)
     ids = tokenizer.encode(text, add_special_tokens=False)[:prompt_tokens]
     if len(ids) < prompt_tokens:
-        raise ValueError("artificial prompt has fewer than 256 tokens")
+        raise ValueError(f"artificial prompt has fewer than {prompt_tokens} tokens")
     streaming = getattr(args, "stream_metrics", False)
     data = {"rid": args.request_id, "input_ids": ids,
-            "sampling_params": {"temperature": 0, "max_new_tokens": 16}, "stream": streaming}
+            "sampling_params": {"temperature": 0, "max_new_tokens": 16,
+                                "ignore_eos": True}, "stream": streaming}
     # No proxy for local traffic. Only generated response tokens, never prompt text,
     # are saved. Request IDs here are deliberately artificial.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -28,34 +84,34 @@ def request(args):
                                  data=json.dumps(data).encode(), headers={"Content-Type": "application/json"})
     started = time.perf_counter()
     first_token = None
-    with opener.open(req, timeout=600) as response:
-        if streaming:
-            result = None
-            for line in response:
-                if not line.startswith(b"data:"):
-                    continue
-                raw = line[5:].strip()
-                if raw == b"[DONE]":
-                    break
-                event = json.loads(raw)
-                if event.get("output_ids"):
-                    if first_token is None:
-                        first_token = time.perf_counter()
-                    result = event
-            if result is None:
-                raise ValueError("stream returned no output token IDs")
-        else:
-            result = json.load(response)
+    def on_output():
+        nonlocal first_token
+        if first_token is None:
+            first_token = time.perf_counter()
+    try:
+        with opener.open(req, timeout=600) as response:
+            result = read_response(response, streaming, on_output)
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"server_http_error: status={exc.code}; inspect server log") from exc
+    except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+        raise ValueError(
+            f"server_connection_failed: {type(exc).__name__}; server may have crashed") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid_server_json: response was malformed or truncated") from exc
     finished = time.perf_counter()
-    if not isinstance(result, dict) or not isinstance(result.get("output_ids"), list) or not result["output_ids"]:
-        raise ValueError("server did not return nonempty output_ids; cannot prove token regression")
-    if result.get("meta_info", {}).get("finish_reason", {}).get("type") not in ("length", "stop"):
-        raise ValueError("request did not finish normally")
+    validate_result(result)
     import numpy as np
 
     record = {"kind": "real_server_artificial_prompt", "request_id": args.request_id,
               "model_identifier": args.model, "input_token_count": len(ids),
               "input_ids_sha256": hashlib.sha256(np.asarray(ids, dtype="<i8").tobytes()).hexdigest(),
+              "input_chunks": [
+                  {"token_start": start, "token_count": len(ids[start:start + 256]),
+                   "token_ids_sha256": hashlib.sha256(
+                       np.asarray(ids[start:start + 256], dtype="<i8").tobytes()
+                   ).hexdigest()}
+                  for start in range(0, len(ids), 256)
+              ],
               "output_ids": result["output_ids"], "sampling": data["sampling_params"],
               "finish_reason": result["meta_info"]["finish_reason"]}
     record["client_metrics_ms"] = {
@@ -74,9 +130,16 @@ def request(args):
 
 def compare(paths):
     first, second = [json.loads(p.read_text()) for p in paths]
+    for record in (first, second):
+        if record.get("kind") != "real_server_artificial_prompt":
+            raise ValueError("comparison requires successful real-server response records")
+        validate_result({"output_ids": record.get("output_ids"),
+                         "meta_info": {"finish_reason": record.get("finish_reason")}})
     keys = ("model_identifier", "input_ids_sha256", "input_token_count", "sampling", "output_ids", "finish_reason")
-    if any(first[k] != second[k] for k in keys):
-        raise AssertionError("baseline/capture inference regression mismatch")
+    mismatches = [key for key in keys if key not in first or key not in second
+                  or first[key] != second[key]]
+    if mismatches:
+        raise AssertionError("baseline/capture inference regression mismatch: " + ", ".join(mismatches))
     print("PASS: identical artificial input and exact output token sequence/finish reason")
 
 

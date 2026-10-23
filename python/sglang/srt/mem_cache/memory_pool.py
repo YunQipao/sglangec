@@ -283,12 +283,16 @@ class ReqToTokenPool:
         self.req_generation = torch.zeros(self._alloc_size, dtype=torch.int64)
 
     def write(self, indices, values):
+        if getattr(self, "_kv_ec_row_owners", None):
+            raise RuntimeError("kv_ec_request_row_protected")
         self.req_to_token[indices] = values
 
     def available_size(self):
         return len(self.free_slots)
 
     def alloc(self, reqs: list[Req]) -> Optional[List[int]]:
+        if getattr(self, "_kv_ec_row_owners", None):
+            raise RuntimeError("kv_ec_request_row_protected")
         # Indices of reqs that already have a req_pool_idx and will reuse
         # their existing slot (e.g. chunked prefill continuing across chunks).
         reusing = [i for i, r in enumerate(reqs) if r.req_pool_idx is not None]
@@ -324,12 +328,35 @@ class ReqToTokenPool:
 
     def free(self, req: Req):
         assert req.req_pool_idx is not None, "request must have req_pool_idx"
+        if req.req_pool_idx in getattr(self, "_kv_ec_row_owners", {}):
+            raise RuntimeError("kv_ec_request_row_protected")
         self.free_slots.append(req.req_pool_idx)
         req.req_pool_idx = None
 
     def clear(self):
+        if getattr(self, "_kv_ec_row_owners", None):
+            raise RuntimeError("kv_ec_request_row_protected")
         self.free_slots = list(range(1, self._alloc_size))
         self.req_generation.zero_()
+
+    def protect_kv_ec_row(self, row: int, generation: int, owner: str):
+        """Opt-in research ownership; never enabled by normal inference."""
+        if (not owner or row <= 0 or row >= self._alloc_size
+                or row in self.free_slots or int(self.req_generation[row]) != generation):
+            raise RuntimeError("kv_ec_request_row_identity_changed")
+        owners = getattr(self, "_kv_ec_row_owners", None)
+        if owners is None:
+            owners = self._kv_ec_row_owners = {}
+        if row in owners:
+            raise RuntimeError("kv_ec_request_row_already_protected")
+        owners[row] = owner
+
+    def release_kv_ec_row(self, row: int, generation: int, owner: str):
+        owners = getattr(self, "_kv_ec_row_owners", {})
+        if (owners.get(row) != owner or row in self.free_slots
+                or int(self.req_generation[row]) != generation):
+            raise RuntimeError("kv_ec_request_row_identity_changed")
+        del owners[row]
 
 
 class MambaPool:

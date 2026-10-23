@@ -35,23 +35,160 @@ def load_real_snapshot(directory):
     directory = Path(directory)
     manifest_path = directory / "manifest.json"
     if not manifest_path.is_file():
-        raise ValueError("manifest.json is required")
+        timing_files = sorted(directory.glob("rank_*.timing.json"))
+        binary_files = sorted(directory.glob("rank_*.bin"))
+        if timing_files and not binary_files:
+            raise ValueError(
+                "control-plane evidence directory has timing/diagnostic JSON "
+                "but no rank Snapshot payload; FAST_PARITY intentionally does "
+                "not persist rank_*.bin or manifest.json. Run an explicit "
+                "DEBUG_SAFE/capture job that writes complete rank files."
+            )
+        raise ValueError(
+            f"real Snapshot directory requires manifest.json and rank_*.bin/json: "
+            f"{directory}"
+        )
     manifest = json.loads(manifest_path.read_text())
     loaded_manifest, blocks = assemble(directory)
     # Assemble validates every rank sidecar and payload. Also compare the
     # persisted manifest so a stale/mixed directory cannot be benchmarked.
-    for key in ("format", "snapshot_id", "request_id", "tp_size", "layers",
-                "token_start", "token_count", "dtype", "packed_byte_count",
-                "source_commit", "model_sha256"):
+    for key in loaded_manifest:
         if manifest.get(key) != loaded_manifest.get(key):
             raise ValueError(f"manifest mismatch: {key}")
     if manifest.get("provenance") != "sglang_request":
         raise ValueError("GPU restore requires real sglang_request provenance")
     if manifest.get("snapshot_completion_status") != "complete":
         raise ValueError("snapshot is not complete")
-    if manifest["tp_size"] != 4:
-        raise ValueError("this experiment requires TP=4")
+    if manifest["tp_size"] not in (2, 4):
+        raise ValueError("this experiment requires TP=2/4")
     return manifest, blocks
+
+
+def validate_snapshot_sequence(manifests, *, expected_chunks=3, chunk_tokens=256):
+    """Validate contiguous same-request chunks without retaining KV bytes."""
+    if len(manifests) != expected_chunks:
+        raise ValueError(f"expected {expected_chunks} snapshots")
+    first = manifests[0]
+    required = ("request_id", "request_id_encoding", "model_identifier",
+                "model_sha256", "source_commit", "core_diff_sha256", "tp_size",
+                "layers", "dtype", "provenance", "packed_byte_count")
+    for key in required:
+        if key not in first:
+            raise ValueError(f"missing sequence metadata: {key}")
+    if first["tp_size"] != 4 or first["layers"] != list(range(36)):
+        raise ValueError("sequence experiment requires TP4 and all 36 layers")
+    next_start = 0
+    seen = set()
+    for index, manifest in enumerate(manifests):
+        if int(manifest["token_start"]) != next_start:
+            raise ValueError("snapshot token ranges are not contiguous")
+        if int(manifest["token_count"]) != chunk_tokens:
+            raise ValueError("snapshot token count does not match chunk size")
+        if manifest["provenance"] != "sglang_request":
+            raise ValueError("GPU restore requires real sglang_request provenance")
+        for key in required:
+            if manifest[key] != first[key]:
+                raise ValueError(f"snapshot sequence mismatch: {key}")
+        next_start += chunk_tokens
+        if manifest["snapshot_id"] in seen:
+            raise ValueError("snapshot IDs must be unique per chunk")
+        seen.add(manifest["snapshot_id"])
+        if "ranks" in manifest:
+            for rank, metadata in enumerate(manifest["ranks"]):
+                reference = first["ranks"][rank]
+                for key in ("request_version", "checkpoint_version", "manager_epoch",
+                            "process_epoch", "req_pool_idx", "req_generation"):
+                    if metadata.get(key) != reference.get(key):
+                        raise ValueError(f"snapshot rank identity mismatch: {key}")
+                shapes = [record["packed_shape"] for record in metadata["layer_records"]]
+                expected_shapes = [
+                    {"k": [chunk_tokens, 2, 128], "v": [chunk_tokens, 2, 128]}
+                    for _ in range(36)
+                ]
+                if shapes != expected_shapes:
+                    raise ValueError("sequence requires Qwen3-8B TP4 NHD K/V layout")
+    return {
+        "chunk_count": len(manifests),
+        "token_start": int(first["token_start"]),
+        "token_count": next_start - int(first["token_start"]),
+        "tp_size": int(first["tp_size"]),
+        "layers": list(first["layers"]),
+        "request_id": first["request_id"],
+    }
+
+
+def benchmark_sequence(directories, device="cuda", warmup=1, repeat=5):
+    """Restore three real chunks one at a time into isolated GPU scratch."""
+    directories = [Path(directory) for directory in directories]
+    if warmup < 0 or repeat < 1:
+        raise ValueError("warmup must be >= 0 and repeat must be >= 1")
+    device = torch.device(device)
+    if device.type != "cuda":
+        raise RuntimeError("sequence restore requires CUDA scratch")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not accessible; run this tool on the GPU server")
+
+    manifests = []
+    for directory in directories:
+        manifest, blocks = load_real_snapshot(directory)
+        manifests.append(manifest)
+        del blocks
+    coverage = validate_snapshot_sequence(manifests)
+    chunk_results = []
+    for index, directory in enumerate(directories):
+        manifest, blocks = load_real_snapshot(directory)
+        for _ in range(warmup):
+            for lost in range(manifest["tp_size"]):
+                one_restore(manifest, blocks, lost, device)
+        samples = {rank: [] for rank in range(manifest["tp_size"])}
+        for _ in range(repeat):
+            for lost in range(manifest["tp_size"]):
+                samples[lost].append(one_restore(manifest, blocks, lost, device))
+        chunk_results.append({
+            "index": index,
+            "snapshot_dir": str(directory.resolve()),
+            "snapshot_id": manifest["snapshot_id"],
+            "token_start": manifest["token_start"],
+            "token_count": manifest["token_count"],
+            "rank_sha256": [rank["sha256"] for rank in manifest["ranks"]],
+            "ranks": [
+                {
+                    "lost_rank": lost,
+                    "byte_exact": all(item["byte_exact"] for item in samples[lost]),
+                    "xor_ms": _summary(samples[lost], "xor_ms"),
+                    "cpu_recovery_ms": _summary(samples[lost], "cpu_recovery_ms"),
+                    "h2d_restore_ms": _summary(samples[lost], "h2d_restore_ms"),
+                    "gpu_verification_ms": _summary(
+                        samples[lost], "gpu_verification_ms"
+                    ),
+                    "restored_bytes": samples[lost][0]["restored_bytes"],
+                }
+                for lost in range(manifest["tp_size"])
+            ],
+        })
+        del blocks
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    return {
+        "tool": "gpu_scratch_restore_sequence",
+        "chunks": chunk_results,
+        "coverage": coverage,
+        "device": str(device),
+        "warmup": warmup,
+        "repeat": repeat,
+        "online_kv_pool_modified": False,
+        "status": "byte_exact",
+        "erasure_cases": sum(len(chunk["ranks"]) for chunk in chunk_results),
+    }
+
+
+def _summary(samples, key):
+    values = [item[key] for item in samples]
+    return {
+        "median_ms": statistics.median(values),
+        "p95_ms": float(np.percentile(values, 95)),
+        "samples_ms": values,
+    }
 
 
 def split_layer_payload(payload, record):
@@ -65,7 +202,7 @@ def split_layer_payload(payload, record):
     return k, v
 
 
-def restore_rank_to_gpu(payload, metadata, device):
+def restore_rank_to_gpu(payload, metadata, device, *, cuda_metrics=None):
     """Restore one packed rank as temporary BF16/FP16 K/V tensors."""
     dtype = _dtype(metadata["dtype"])
     restored = []
@@ -85,9 +222,18 @@ def restore_rank_to_gpu(payload, metadata, device):
             tensor = torch.empty(shape, dtype=dtype, device=device)
             destination = tensor.view(torch.uint8).reshape(-1)
             source = torch.from_numpy(np.ascontiguousarray(raw))
+            events = None
+            if cuda_metrics is not None and device.type == "cuda":
+                events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
+                events[0].record()
             destination.copy_(source, non_blocking=False)
+            if events:
+                events[1].record()
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
+            if events:
+                cuda_metrics["h2d_copy_event_ms"] = (
+                    cuda_metrics.get("h2d_copy_event_ms", 0.) + events[0].elapsed_time(events[1]))
             h2d_ms += (time.perf_counter_ns() - started) / 1e6
             started = time.perf_counter_ns()
             actual = tensor.view(torch.uint8).detach().cpu().numpy().reshape(-1)
@@ -100,6 +246,8 @@ def restore_rank_to_gpu(payload, metadata, device):
 
 
 def one_restore(manifest, blocks, lost_rank, device):
+    if not 0 <= lost_rank < manifest["tp_size"] or len(blocks) != manifest["tp_size"]:
+        raise ValueError("invalid lost rank or incomplete TP blocks")
     parity_started = time.perf_counter_ns()
     parity = encode(blocks)
     xor_ms = (time.perf_counter_ns() - parity_started) / 1e6
@@ -127,32 +275,31 @@ def one_restore(manifest, blocks, lost_rank, device):
 
 def benchmark(directory, device="cuda", warmup=1, repeat=5):
     manifest, blocks = load_real_snapshot(directory)
+    tp = manifest["tp_size"]
     device = torch.device(device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("CUDA is not accessible; run this tool on the GPU server")
     if warmup < 0 or repeat < 1:
         raise ValueError("warmup must be >= 0 and repeat must be >= 1")
     for _ in range(warmup):
-        for lost in range(4):
+        for lost in range(tp):
             one_restore(manifest, blocks, lost, device)
-    samples = {rank: [] for rank in range(4)}
+    samples = {rank: [] for rank in range(tp)}
     for _ in range(repeat):
-        for lost in range(4):
+        for lost in range(tp):
             samples[lost].append(one_restore(manifest, blocks, lost, device))
-    def summary(key, rank):
-        values = [item[key] for item in samples[rank]]
-        return {"median_ms": statistics.median(values),
-                "p95_ms": float(np.percentile(values, 95)), "samples_ms": values}
     ranks = []
-    for lost in range(4):
+    for lost in range(tp):
         ranks.append({"lost_rank": lost, "byte_exact": True,
-                      "xor": summary("xor_ms", lost),
-                      "cpu_recovery": summary("cpu_recovery_ms", lost),
-                      "h2d_restore": summary("h2d_restore_ms", lost),
-                      "gpu_verification": summary("gpu_verification_ms", lost),
+                      "xor": _summary(samples[lost], "xor_ms"),
+                      "cpu_recovery": _summary(samples[lost], "cpu_recovery_ms"),
+                      "h2d_restore": _summary(samples[lost], "h2d_restore_ms"),
+                      "gpu_verification": _summary(
+                          samples[lost], "gpu_verification_ms"
+                      ),
                       "restored_bytes": samples[lost][0]["restored_bytes"]})
     return {"tool": "gpu_scratch_restore", "snapshot_dir": str(Path(directory).resolve()),
-            "snapshot_id": manifest["snapshot_id"], "tp": 4, "layers": manifest["layers"],
+            "snapshot_id": manifest["snapshot_id"], "tp": tp, "layers": manifest["layers"],
             "token_count": manifest["token_count"], "dtype": manifest["dtype"],
             "device": str(device), "warmup": warmup, "repeat": repeat,
             "provenance": manifest["provenance"], "online_kv_pool_modified": False,
@@ -161,13 +308,20 @@ def benchmark(directory, device="cuda", warmup=1, repeat=5):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("snapshot_dir", type=Path)
+    parser.add_argument("snapshot_dir", type=Path, nargs="+")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    result = benchmark(args.snapshot_dir, args.device, args.warmup, args.repeat)
+    if args.output and args.output.exists():
+        raise FileExistsError(f"output already exists: {args.output}")
+    if len(args.snapshot_dir) == 1:
+        result = benchmark(args.snapshot_dir[0], args.device, args.warmup, args.repeat)
+    else:
+        result = benchmark_sequence(
+            args.snapshot_dir, args.device, args.warmup, args.repeat
+        )
     encoded = json.dumps(result, indent=2) + "\n"
     print(encoded, end="")
     if args.output:

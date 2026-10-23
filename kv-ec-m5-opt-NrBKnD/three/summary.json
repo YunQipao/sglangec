@@ -1,0 +1,356 @@
+{
+  "state": "PASS",
+  "measurement_revision": "ABCD-production-parity-v1",
+  "capture_profile": false,
+  "repeat": 3,
+  "config": {
+    "lost_rank": 0,
+    "recover_tokens": 256,
+    "model_identifier": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+    "model_sha256": "7b9847a1e1530259c3b60505e32f1c8aa99ca20bd26c8de4ac5ede00262cc347",
+    "source_commit": "8586df9715e64d1b8b951547284dff6d3773063f",
+    "core_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "gpu_uuids": [
+      "GPU-264e0c1d-84a1-6c4b-1dc9-2642b67bd1e6",
+      "GPU-ef4e2292-6328-13af-3198-a1ed9198d3c4",
+      "GPU-a6984ac4-fa44-c087-7069-734b7e0482a0",
+      "GPU-dc33e507-c67b-85a8-4ed9-37c7e92f7c14"
+    ],
+    "tp": 4,
+    "dtype": "bf16",
+    "layout": "nhd",
+    "page_size": 1,
+    "overlap": false,
+    "prefix_cache": false,
+    "input_tokens": 768,
+    "output_tokens": 16,
+    "input_ids_sha256": "c7d0884c059a295b8b3352d41ef73584361c1906f46c08e0e3a81c614b90bb0f",
+    "sampling": {
+      "temperature": 0,
+      "max_new_tokens": 16,
+      "ignore_eos": true
+    },
+    "torch_version": "2.13.0+cu130",
+    "cuda_version": "13.0",
+    "experiment_source_sha256": {
+      "scheduler_shadow.py": "562a1ea2b1ca727c93a8d2512f821444af027574c66a91bfdc9c2125f16410b6",
+      "scheduler_pause.py": "cf1a243299d2f28fb9e8fc9b2f049cf3140162b7eca323bce5801ed80a810383",
+      "scheduler_retry.py": "de23bf4d78597b246b7308adebddabfbdd9c2413edd577ae2f9b7f95ad7adc3e",
+      "pause_control.py": "81bb3737109e7aefc7707d2d74d5d4df7313e79b71709f2c8443f385e2438b6b",
+      "m3_recovery.py": "7e03364c5029ab969aeccb6404106a7b3346542cc4c9fe4ad279156bbe9716dd",
+      "m3_performance.py": "c0fa3e80e9acfe14c672c79ccce9d633e3dd79640f87b17e3d1bbe730753301b",
+      "accept_pause.py": "507d544b70fef36d8d39cb3e4c8e2c31fabaa93428a32d369d9f38cfc3e74300",
+      "m5_capture_profile.py": "11994bff9e94184aa9cddbac5317925b6c496e1a989fd189ffeba7b5a62629b9",
+      "capture_timing.py": "3022c74eaccfeb3a2195042f3c7844375bfaffda6e317b561a727e3f5162a709"
+    },
+    "parity_test_oracle": false
+  },
+  "modes": {
+    "baseline": {
+      "request_total_ms": {
+        "n": 3,
+        "samples_ms": [
+          915.9182459115982,
+          893.3964499738067,
+          868.3722540736198
+        ],
+        "min_ms": 868.3722540736198,
+        "max_ms": 915.9182459115982,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "ttft_ms": {
+        "n": 3,
+        "samples_ms": [
+          211.5530539304018,
+          211.73839387483895,
+          209.76460608653724
+        ],
+        "min_ms": 209.76460608653724,
+        "max_ms": 211.73839387483895,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "tpot_ms": {
+        "n": 3,
+        "samples_ms": [
+          46.957679465413094,
+          45.44387040659785,
+          43.90717653247217
+        ],
+        "min_ms": 43.90717653247217,
+        "max_ms": 46.957679465413094,
+        "status": "pilot_only_no_stable_quantiles"
+      }
+    },
+    "protection_only": {
+      "request_total_ms": {
+        "n": 3,
+        "samples_ms": [
+          1976.462536957115,
+          1886.751689016819,
+          1859.1446101199836
+        ],
+        "min_ms": 1859.1446101199836,
+        "max_ms": 1976.462536957115,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "ttft_ms": {
+        "n": 3,
+        "samples_ms": [
+          211.52661787346005,
+          213.4381199721247,
+          211.1644099932164
+        ],
+        "min_ms": 211.1644099932164,
+        "max_ms": 213.4381199721247,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "tpot_ms": {
+        "n": 3,
+        "samples_ms": [
+          117.66239460557699,
+          111.55423793631296,
+          109.8653466751178
+        ],
+        "min_ms": 109.8653466751178,
+        "max_ms": 117.66239460557699,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "protection_blocking_ms": {
+        "n": 3,
+        "samples_ms": [
+          941.096686059609,
+          937.1418261434883,
+          918.6544220428914
+        ],
+        "min_ms": 918.6544220428914,
+        "max_ms": 941.096686059609,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "parity_commit_ms": {
+        "n": 3,
+        "samples_ms": [
+          98.57714688405395,
+          96.69104404747486,
+          99.81526900082827
+        ],
+        "min_ms": 96.69104404747486,
+        "max_ms": 99.81526900082827,
+        "status": "pilot_only_no_stable_quantiles"
+      }
+    },
+    "online_recovery": {
+      "request_total_ms": {
+        "n": 3,
+        "samples_ms": [
+          2717.415071092546,
+          2816.954788984731,
+          2792.3672769684345
+        ],
+        "min_ms": 2717.415071092546,
+        "max_ms": 2816.954788984731,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "ttft_ms": {
+        "n": 3,
+        "samples_ms": [
+          210.21535713225603,
+          210.4373110923916,
+          210.77203401364386
+        ],
+        "min_ms": 210.21535713225603,
+        "max_ms": 210.77203401364386,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "tpot_ms": {
+        "n": 3,
+        "samples_ms": [
+          167.14664759735265,
+          173.7678318594893,
+          172.10634953031936
+        ],
+        "min_ms": 167.14664759735265,
+        "max_ms": 173.7678318594893,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "protection_overhead_ms": {
+        "n": 3,
+        "samples_ms": [
+          437.45695194229484,
+          432.3672400787473,
+          419.04792189598083
+        ],
+        "min_ms": 419.04792189598083,
+        "max_ms": 437.45695194229484,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "parity_commit_ms": {
+        "n": 3,
+        "samples_ms": [
+          99.95948290452361,
+          60.77386601828039,
+          93.28556805849075
+        ],
+        "min_ms": 60.77386601828039,
+        "max_ms": 99.95948290452361,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "recovery_ms": {
+        "n": 3,
+        "samples_ms": [
+          574.6834180317819,
+          666.8484900146723,
+          660.806201165542
+        ],
+        "min_ms": 574.6834180317819,
+        "max_ms": 666.8484900146723,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "cpu_xor_ms": {
+        "n": 3,
+        "samples_ms": [
+          156.68005589395761,
+          191.3627628237009,
+          190.55353291332722
+        ],
+        "min_ms": 156.68005589395761,
+        "max_ms": 191.3627628237009,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "gather_ms": {
+        "n": 3,
+        "samples_ms": [
+          78.65416700951755,
+          77.10313587449491,
+          77.6269449852407
+        ],
+        "min_ms": 77.10313587449491,
+        "max_ms": 78.65416700951755,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "h2d_ms": {
+        "n": 3,
+        "samples_ms": [
+          12.216991,
+          16.063973999999995,
+          15.870354999999998
+        ],
+        "min_ms": 12.216991,
+        "max_ms": 16.063973999999995,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "kv_writeback_ms": {
+        "n": 3,
+        "samples_ms": [
+          7.162546971812844,
+          8.610571967437863,
+          8.634872967377305
+        ],
+        "min_ms": 7.162546971812844,
+        "max_ms": 8.634872967377305,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "validation_ms": {
+        "n": 3,
+        "samples_ms": [
+          199.86962004976905,
+          236.97153905240393,
+          238.45215794586088
+        ],
+        "min_ms": 199.86962004976905,
+        "max_ms": 238.45215794586088,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "fault_to_decode_ms": {
+        "n": 3,
+        "samples_ms": [
+          939.2759930342436,
+          1008.6617961060256,
+          1002.0473089534789
+        ],
+        "min_ms": 939.2759930342436,
+        "max_ms": 1008.6617961060256,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "fault_to_first_decode_ms": {
+        "n": 3,
+        "samples_ms": [
+          939.274684060365,
+          1008.6603499948978,
+          1002.0454740151763
+        ],
+        "min_ms": 939.274684060365,
+        "max_ms": 1008.6603499948978,
+        "status": "pilot_only_no_stable_quantiles"
+      }
+    },
+    "prefill_retry": {
+      "request_total_ms": {
+        "n": 3,
+        "samples_ms": [
+          2922.8145428933203,
+          3033.2549731247127,
+          2805.87488389574
+        ],
+        "min_ms": 2805.87488389574,
+        "max_ms": 3033.2549731247127,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "ttft_ms": {
+        "n": 3,
+        "samples_ms": [
+          213.3386959321797,
+          211.69954212382436,
+          208.6628400720656
+        ],
+        "min_ms": 208.6628400720656,
+        "max_ms": 213.3386959321797,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "tpot_ms": {
+        "n": 3,
+        "samples_ms": [
+          180.6317231307427,
+          188.10369540005922,
+          173.14746958824495
+        ],
+        "min_ms": 173.14746958824495,
+        "max_ms": 188.10369540005922,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "fault_to_rebuilt_state_ms": {
+        "n": 3,
+        "samples_ms": [
+          1039.3725701142102,
+          1054.897196823731,
+          975.2381779253483
+        ],
+        "min_ms": 975.2381779253483,
+        "max_ms": 1054.897196823731,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "fault_to_first_decode_ms": {
+        "n": 3,
+        "samples_ms": [
+          1381.9771490525454,
+          1409.4057178590447,
+          1312.804939923808
+        ],
+        "min_ms": 1312.804939923808,
+        "max_ms": 1409.4057178590447,
+        "status": "pilot_only_no_stable_quantiles"
+      },
+      "prefill_forward_ms": {
+        "n": 3,
+        "samples_ms": [
+          184.14405822753906,
+          183.66458129882812,
+          183.5924835205078
+        ],
+        "min_ms": 183.5924835205078,
+        "max_ms": 184.14405822753906,
+        "status": "pilot_only_no_stable_quantiles"
+      }
+    }
+  },
+  "note": "fresh servers, no warmup; B/C no recovery-based parity oracle; strict byte validation enabled; no speedup against legacy test-oracle Pilot; n=3 has no stable P95"
+}

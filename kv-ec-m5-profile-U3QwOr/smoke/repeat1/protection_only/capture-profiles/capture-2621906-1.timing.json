@@ -1,0 +1,32 @@
+{
+  "wall_regions_ms": {
+    "slot_tensor": 1.115076,
+    "mapping_and_tensor_checks": 25.228154000000007,
+    "gpu_gather_host": 11.811056000000004,
+    "d2h_host_blocking": 9.665307999999998,
+    "cpu_copy": 6.877003999999999,
+    "segment_hash": 69.562192,
+    "cpu_concatenate": 2.681969,
+    "payload_hash": 26.101318,
+    "payload_validation": 81.383583
+  },
+  "thread_cpu_regions_ms": {
+    "slot_tensor": 1.123047,
+    "mapping_and_tensor_checks": 25.377272,
+    "gpu_gather_host": 12.023019999999994,
+    "d2h_host_blocking": 9.847879999999996,
+    "cpu_copy": 7.008465,
+    "segment_hash": 69.70693900000002,
+    "cpu_concatenate": 2.685782,
+    "payload_hash": 26.105186,
+    "payload_validation": 81.389377
+  },
+  "layer_wall_ms": {},
+  "scheduler_capture_ms": 239.399475,
+  "accounted_ms": 234.42566,
+  "unaccounted_ms": 4.973815000000002,
+  "tp_rank": 1,
+  "snapshot_id": "pause-9b4cad1b06ab47a99eaf61d5f97864e2-chunk0",
+  "token_start": 0,
+  "mode": "protection_only"
+}

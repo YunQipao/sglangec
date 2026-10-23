@@ -10,6 +10,21 @@ logger = logging.getLogger(__name__)
 _capture_module = None
 
 
+def create_pause_gate(scheduler):
+    """Load the checkout-only gate; failures must propagate, never resume."""
+    root = Path(__file__).resolve().parents[4] / "experiments" / "kv_ec"
+    name = "_sglang_kv_ec_experiment"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, root / "__init__.py", submodule_search_locations=[str(root)]
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    pause = importlib.import_module(name + ".scheduler_pause")
+    return pause.SchedulerPauseGate.from_env(scheduler)
+
+
 def maybe_capture_prefill(scheduler, batch, req):
     global _capture_module
     try:

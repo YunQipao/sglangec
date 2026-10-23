@@ -1,0 +1,58 @@
+{
+  "state": "PASS",
+  "run": "/tmp/kv-ec-abcd-PYvwwJ/three",
+  "repeat": 3,
+  "trials": [
+    {
+      "state": "PASS",
+      "run": "/tmp/kv-ec-abcd-PYvwwJ/three/repeat1",
+      "repeat": 1,
+      "completed_modes": [
+        "baseline",
+        "protection_only",
+        "online_recovery",
+        "prefill_retry"
+      ]
+    },
+    {
+      "state": "PASS",
+      "run": "/tmp/kv-ec-abcd-PYvwwJ/three/repeat2",
+      "repeat": 2,
+      "completed_modes": [
+        "baseline",
+        "protection_only",
+        "online_recovery",
+        "prefill_retry"
+      ]
+    },
+    {
+      "state": "PASS",
+      "run": "/tmp/kv-ec-abcd-PYvwwJ/three/repeat3",
+      "repeat": 3,
+      "completed_modes": [
+        "baseline",
+        "protection_only",
+        "online_recovery",
+        "prefill_retry"
+      ]
+    }
+  ],
+  "modes": [
+    "baseline",
+    "protection_only",
+    "online_recovery",
+    "prefill_retry"
+  ],
+  "lost_rank": 0,
+  "recover_tokens": 256,
+  "source_sha256": {
+    "scheduler_shadow.py": "49aeb0504303d6e5d28ee74f61a310f228ebd2cf6b57d269736c9deff56d6dd0",
+    "scheduler_pause.py": "76c19fa56e5472151484e6b939019f69c57f191bb3353bb7da723d39e10a4e64",
+    "scheduler_retry.py": "de23bf4d78597b246b7308adebddabfbdd9c2413edd577ae2f9b7f95ad7adc3e",
+    "pause_control.py": "81bb3737109e7aefc7707d2d74d5d4df7313e79b71709f2c8443f385e2438b6b",
+    "m3_recovery.py": "7e03364c5029ab969aeccb6404106a7b3346542cc4c9fe4ad279156bbe9716dd",
+    "m3_performance.py": "c0fa3e80e9acfe14c672c79ccce9d633e3dd79640f87b17e3d1bbe730753301b",
+    "accept_pause.py": "407450b4b8207faaf0196fd195b342290469ce1b9c4e928c592773bf8ad6c99b"
+  },
+  "cpu_returncode": 0
+}
