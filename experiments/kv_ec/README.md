@@ -1,5 +1,13 @@
 # KV EC 第一阶段：源码分析、CPU XOR 与 Snapshot 格式
 
+双逻辑节点 + 第三机 Gateway 的独立实验原型及限制见
+[TWO_NODE_GATEWAY.md](TWO_NODE_GATEWAY.md)。当前范围为 TCP relay、CPU
+synthetic 网络与 A/C chunk-XOR；尚未接入真实 GPU D2H，不能声称跨物理节点
+TP 推理或真实 KV 网络恢复。
+
+单机 4 GPU 模拟 Node0/Node1 的原生 `nnodes=2,tp=4` 实验入口见
+[TWO_LOGICAL_NODES.md](TWO_LOGICAL_NODES.md)。
+
 CPU DRAM parity-only 最小在线原型：见 [PARITY_ONLY.md](PARITY_ONLY.md)，
 包括状态机、IPC、内存策略、手动 GPU 命令与测量限制。以下早期阶段证据描述
 保留作历史记录，不代表新增在线实验已在本会话完成。

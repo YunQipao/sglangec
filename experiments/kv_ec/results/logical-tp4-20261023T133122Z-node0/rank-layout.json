@@ -1,0 +1,34 @@
+{
+  "schema": "sglang-kv-ec-logical-node-layout-v1",
+  "run_id": "logical-tp4-20261023T133122Z",
+  "model_path": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+  "global_tp_size": 4,
+  "nnodes": 2,
+  "processes_per_node": 2,
+  "diagnostic_transport": false,
+  "nodes": [
+    {
+      "node_rank": 0,
+      "global_tp_ranks": [
+        0,
+        1
+      ],
+      "visible_devices": [
+        0,
+        1
+      ]
+    },
+    {
+      "node_rank": 1,
+      "global_tp_ranks": [
+        2,
+        3
+      ],
+      "visible_devices": [
+        2,
+        3
+      ]
+    }
+  ],
+  "layout_note": "CUDA_VISIBLE_DEVICES is local to each net namespace process; global rank equals node_rank*2 + local_rank for pp_size=1"
+}
