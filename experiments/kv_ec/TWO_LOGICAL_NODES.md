@@ -17,8 +17,9 @@ The scripts never modify the host default route, physical NIC, Docker network,
 global firewall, or existing namespaces. Setup and cleanup are plan-only until
 the user passes `--apply` and types the confirmation phrase. No namespace is
 created if a named namespace or veth already exists. GPU tasks are not probed
-or terminated by this prototype; check shared-GPU admission separately before
-using `--execute`.
+or terminated by this prototype. The launcher requires explicit
+`--allow-shared-gpu-debug` and performs read-only per-GPU memory/task admission
+before launch; shared-GPU results are functional-debug evidence only.
 
 ## Source audit conclusions
 
@@ -74,50 +75,57 @@ export SGLANG_EC_RUN_ID=logical-tp4-smoke-$(date -u +%Y%m%dT%H%M%SZ)
 export SGLANG_PORT=30000
 export SGLANG_DIST_PORT=29577
 
-bash experiments/kv_ec/run_logical_node.sh A --no-cuda-graph
-bash experiments/kv_ec/run_logical_node.sh B --no-cuda-graph
+bash experiments/kv_ec/run_logical_node.sh A --allow-shared-gpu-debug --no-cuda-graph
+bash experiments/kv_ec/run_logical_node.sh B --allow-shared-gpu-debug --no-cuda-graph
 ```
 
 If the plans are correct, run each in separate terminals and type the required
 per-node confirmation:
 
 ```bash
-bash experiments/kv_ec/run_logical_node.sh A --no-cuda-graph --execute
-bash experiments/kv_ec/run_logical_node.sh B --no-cuda-graph --execute
+bash experiments/kv_ec/run_logical_node.sh A --allow-shared-gpu-debug --no-cuda-graph --execute
+bash experiments/kv_ec/run_logical_node.sh B --allow-shared-gpu-debug --no-cuda-graph --execute
 ```
 
 For the first diagnostic attempt, force NCCL away from P2P and SHM only inside
 the child processes:
 
 ```bash
-bash experiments/kv_ec/run_logical_node.sh A --diagnostic-socket --no-cuda-graph --execute
-bash experiments/kv_ec/run_logical_node.sh B --diagnostic-socket --no-cuda-graph --execute
+bash experiments/kv_ec/run_logical_node.sh A --allow-shared-gpu-debug --diagnostic-socket --no-cuda-graph --execute
+bash experiments/kv_ec/run_logical_node.sh B --allow-shared-gpu-debug --diagnostic-socket --no-cuda-graph --execute
 ```
 
-This is a diagnostic transport run, not the comparable baseline. The normal
-run does not set `NCCL_P2P_DISABLE` or `NCCL_SHM_DISABLE`. Inspect each saved
+This is a diagnostic transport run, not the comparable baseline. Network
+Namespaces isolate network stacks but do **not** isolate the UTS/IPC namespaces
+or physical GPUs. In normal mode NCCL may select P2P/SHM for same-host peers,
+including paths that do not cross veth. Diagnostic mode disables P2P and SHM
+in these workers to force NCCL Socket where supported; inspect each saved
 `server.log` for NCCL `NET/Socket` lines and save the exact command and
-environment. Do not infer that every NCCL operation used veth from an
-application log alone.
+environment. Also capture veth `ip -s link` counters before and after an
+identical request. Only correlated NCCL transport logs plus veth counters or
+packet capture establish cross-logical-node traffic. Do not infer that all
+NCCL traffic used veth from an application log alone. SGLang itself is launched
+as the invoking user inside the namespace; sudo is used only for namespace
+entry.
 
-The default service port is inside each namespace. A request must therefore be
-issued from Node A's namespace, for example:
+The service port is inside each namespace. Capture exact output IDs and latency
+from Node A's namespace using the existing request harness:
 
 ```bash
-sudo ip netns exec kvectp-a curl -sS http://10.233.77.1:30000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"/media/sda1/iic_data/luotao/models/Qwen3-8B","messages":[{"role":"user","content":"Say hello."}],"max_tokens":16,"temperature":0}'
+sudo ip netns exec kvectp-a env PYTHONPATH="$PWD:$PWD/python" \
+  "$CONDA_PREFIX/bin/python" -m experiments.kv_ec.request_debug request \
+  --url http://10.233.77.1:30000 --model "$SGLANG_MODEL" \
+  --request-id logical-tp4-smoke --prompt-tokens 384 --stream-metrics \
+  --output /tmp/kv-ec-logical-output.json
 ```
 
-The model name must match the server's configured model/API expectations.
-Capture the response separately and compare token IDs with a previously
-validated single-machine TP4 baseline. The launcher does not declare success
-from process startup alone. Use:
+Compare this response with the same request harness against a validated
+single-machine TP4 baseline. Startup alone is not success. Use:
 
 ```bash
 python -m experiments.kv_ec.verify_logical_rank_logs \
-  experiments/kv_ec/results/$SGLANG_EC_RUN_ID-node0/server.log \
-  experiments/kv_ec/results/$SGLANG_EC_RUN_ID-node1/server.log \
+  /tmp/kv-ec-logical-nodes/$SGLANG_EC_RUN_ID-node0/server.log \
+  /tmp/kv-ec-logical-nodes/$SGLANG_EC_RUN_ID-node1/server.log \
   --output /tmp/kv-ec-logical-rank-map.json
 ```
 

@@ -7,28 +7,8 @@
   "processes_per_node": 2,
   "diagnostic_transport": false,
   "nodes": [
-    {
-      "node_rank": 0,
-      "global_tp_ranks": [
-        0,
-        1
-      ],
-      "visible_devices": [
-        0,
-        1
-      ]
-    },
-    {
-      "node_rank": 1,
-      "global_tp_ranks": [
-        2,
-        3
-      ],
-      "visible_devices": [
-        2,
-        3
-      ]
-    }
+    {"node_rank": 0, "global_tp_ranks": [0, 1], "visible_devices": [0, 1]},
+    {"node_rank": 1, "global_tp_ranks": [2, 3], "visible_devices": [2, 3]}
   ],
   "layout_note": "CUDA_VISIBLE_DEVICES is local to each net namespace process; global rank equals node_rank*2 + local_rank for pp_size=1"
 }

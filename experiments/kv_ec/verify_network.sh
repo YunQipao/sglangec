@@ -4,8 +4,8 @@ NS_A=kvectp-a
 NS_B=kvectp-b
 APPLY=0
 [[ "${1:-}" == "--run" ]] && APPLY=1
-if ! sudo ip netns list | awk '{print $1}' | grep -Fxq "$NS_A" ||
-   ! sudo ip netns list | awk '{print $1}' | grep -Fxq "$NS_B"; then
+if ! ip netns list | awk '{print $1}' | grep -Fxq "$NS_A" ||
+   ! ip netns list | awk '{print $1}' | grep -Fxq "$NS_B"; then
   echo "Missing experiment namespace(s); run setup_network.sh after reviewing its plan." >&2
   exit 2
 fi

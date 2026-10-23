@@ -12,12 +12,12 @@ IP_B=10.233.77.2/30
 APPLY=0
 [[ "${1:-}" == "--apply" ]] && APPLY=1
 
-if sudo ip netns list | awk '{print $1}' | grep -Fxq "$NS_A" ||
-   sudo ip netns list | awk '{print $1}' | grep -Fxq "$NS_B"; then
+if ip netns list | awk '{print $1}' | grep -Fxq "$NS_A" ||
+   ip netns list | awk '{print $1}' | grep -Fxq "$NS_B"; then
   echo "REFUSED: one of the experiment namespace names already exists; nothing changed." >&2
   exit 2
 fi
-if sudo ip link show "$VETH_A" >/dev/null 2>&1 || sudo ip link show "$VETH_B" >/dev/null 2>&1; then
+if ip link show "$VETH_A" >/dev/null 2>&1 || ip link show "$VETH_B" >/dev/null 2>&1; then
   echo "REFUSED: one of the dedicated veth names already exists; nothing changed." >&2
   exit 2
 fi
