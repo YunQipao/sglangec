@@ -63,6 +63,8 @@ def main():
     p.add_argument("--gpus", required=True, help="PCI ordered GPU indices, e.g. 0 or 0,1,2,3")
     p.add_argument("--port", type=int, default=30281)
     p.add_argument("--model", default="/media/sda1/iic_data/luotao/models/Qwen3-8B")
+    p.add_argument("--mem-fraction-static", type=float, default=0.60)
+    p.add_argument("--context-length", type=int, default=4096)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--snapshot-id", required=True)
     p.add_argument("--request-id", default="kv-ec-artificial-request")
@@ -80,6 +82,11 @@ def main():
     args = p.parse_args()
     if args.chunk_size is not None and args.token_count != args.chunk_size:
         p.error("--chunk-size must equal --token-count")
+    if not 0 < args.mem_fraction_static <= 1:
+        p.error("--mem-fraction-static must be in (0, 1]")
+    # Existing requests contain 768 input tokens and generate up to 16 more.
+    if args.context_length < 784:
+        p.error("--context-length must be at least 784 for the 768-token prompt and output")
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from experiments.kv_ec.capture_plan import capture_plan
     try:
@@ -160,7 +167,7 @@ def main():
     # validation/transport work differs. FAST_PARITY remains experimental.
     argv = [sys.executable, "-m", "sglang.launch_server", "--model-path", args.model,
             "--host", "127.0.0.1", "--port", str(args.port), "--tp-size", str(args.tp),
-            "--mem-fraction-static", "0.60", "--context-length", "4096", "--dtype", "bfloat16",
+            "--mem-fraction-static", str(args.mem_fraction_static), "--context-length", str(args.context_length), "--dtype", "bfloat16",
             "--kv-cache-dtype", "auto", "--page-size", "1", "--attention-backend", "triton",
             "--disable-radix-cache", "--chunked-prefill-size", "-1", "--disable-overlap-schedule",
             "--max-running-requests", "1", "--skip-server-warmup", "--random-seed", "42",
