@@ -1,6 +1,7 @@
 """One isolated TP4 baseline/pause acceptance run. Never takes over busy GPUs."""
 
 import argparse
+import csv
 from contextlib import redirect_stdout
 import hashlib
 import io
@@ -39,6 +40,9 @@ def experiment_performance_record(experiment_mode, response, records, *, config)
     }[experiment_mode]
     return dict(
         mode=experiment_mode, config=config, **response["client_metrics_ms"],
+        shared_gpu_debug=bool(config.get("shared_gpu_debug", False)),
+        external_gpu_load_note=("external GPU load may affect performance"
+                                if config.get("shared_gpu_debug") else None),
         **{key: max(record[experiment_mode][key] for record in records) for key in metric_keys},
         rank_metrics=[record[experiment_mode] for record in records],
         timing_note="all-rank max; enclosing intervals overlap; first-decode is rank-local result, not SSE")
@@ -54,6 +58,76 @@ def resolve_ports(port=None, baseline_port=None, pause_port=None):
     if baseline == paused:
         raise ValueError("--baseline-port and --pause-port must be different")
     return baseline, paused
+
+
+def gpu_inventory():
+    """Return NVML physical-index keyed GPU state and compute processes."""
+    listing = subprocess.check_output([
+        "nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used,memory.free",
+        "--format=csv,noheader,nounits"], text=True, stderr=subprocess.STDOUT)
+    devices = {}
+    for row in csv.reader(listing.splitlines(), skipinitialspace=True):
+        if len(row) != 6:
+            raise RuntimeError(f"unexpected nvidia-smi GPU row: {row!r}")
+        index, gpu_uuid, name, total, used, free = (item.strip() for item in row)
+        devices[index] = dict(physical_index=int(index), uuid=gpu_uuid, name=name,
+                              total_mib=int(total), used_mib=int(used), free_mib=int(free),
+                              processes=[])
+    task_listing = subprocess.check_output([
+        "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+        "--format=csv,noheader,nounits"], text=True, stderr=subprocess.STDOUT)
+    by_uuid = {device["uuid"]: device for device in devices.values()}
+    for row in csv.reader(task_listing.splitlines(), skipinitialspace=True):
+        if not row:
+            continue
+        if len(row) < 2:
+            raise RuntimeError(f"unexpected nvidia-smi process row: {row!r}")
+        gpu_uuid, pid = row[0].strip(), row[1].strip()
+        if gpu_uuid in by_uuid:
+            by_uuid[gpu_uuid]["processes"].append(dict(
+                pid=int(pid), process_name=row[2].strip() if len(row) > 2 else None,
+                used_memory=row[3].strip() if len(row) > 3 else None))
+    return devices
+
+
+def check_gpu_preflight(devices, physical_indices, *, allow_shared, min_free_gpu_gb):
+    """Validate the explicit physical GPU selection without changing it."""
+    selected = []
+    for physical_index in physical_indices:
+        if physical_index not in devices:
+            raise RuntimeError(f"physical GPU index {physical_index} is not present in nvidia-smi")
+        gpu = devices[physical_index]
+        selected.append(gpu)
+        if gpu["free_mib"] < min_free_gpu_gb * 1024:
+            raise RuntimeError(
+                f"GPU {physical_index} ({gpu['uuid']}) has {gpu['free_mib'] / 1024:.2f} GiB free; "
+                f"minimum is {min_free_gpu_gb:.2f} GiB")
+        if gpu["processes"] and not allow_shared:
+            raise RuntimeError(
+                f"selected GPU {physical_index} ({gpu['uuid']}) has active compute tasks; "
+                "use --allow-shared-gpu-debug to permit shared-GPU debug (no processes are stopped)")
+    return selected
+
+
+def server_launch_args(args, *, port, root, transaction_id, label):
+    return ["--mode", "baseline", "--tp", "4", "--gpus", args.gpus,
+            "--port", str(port), "--model", args.model,
+            "--mem-fraction-static", str(args.mem_fraction_static),
+            "--context-length", str(args.context_length),
+            "--output", str(root / "evidence"), "--snapshot-id", transaction_id + "-" + label,
+            "--request-id", "kv-ec-pause-request", "--token-count", "256",
+            "--layers", "all"]
+
+
+def mark_performance_gpu_mode(performance, args):
+    performance.update(
+        shared_gpu_debug=bool(args.allow_shared_gpu_debug),
+        external_gpu_load_note=("external GPU load may affect performance"
+                                if args.allow_shared_gpu_debug else None),
+        mem_fraction_static=args.mem_fraction_static,
+        context_length=args.context_length,
+    )
+    return performance
 
 
 def check_evidence(root, identity, *, online=False, retry=False):
@@ -596,6 +670,12 @@ def main():
     parser.add_argument("--pause-response", type=Path)
     parser.add_argument("--report", type=Path, help="exclusive new offline audit report; never overwrites evidence")
     parser.add_argument("--model", default="/media/sda1/iic_data/luotao/models/Qwen3-8B")
+    parser.add_argument("--allow-shared-gpu-debug", action="store_true",
+                        help="permit existing compute processes on selected GPUs; debug results are externally loaded")
+    parser.add_argument("--min-free-gpu-gb", type=float, default=0.0,
+                        help="minimum free GiB required on every selected GPU before startup")
+    parser.add_argument("--mem-fraction-static", type=float, default=0.60)
+    parser.add_argument("--context-length", type=int, default=4096)
     parser.add_argument("--port", type=int, help="legacy alias for --baseline-port; pause defaults to baseline+1")
     parser.add_argument("--baseline-port", type=int, help="baseline TCP port (default: 30359)")
     parser.add_argument("--pause-port", type=int, help="pause TCP port (default: baseline+1)")
@@ -630,6 +710,12 @@ def main():
     parser.add_argument("--m7-test-no-fault", action="store_true",
                         help="M7 control run: decode normally without M6-B2 fault injection")
     args = parser.parse_args()
+    if args.min_free_gpu_gb < 0:
+        parser.error("--min-free-gpu-gb must be nonnegative")
+    if not 0 < args.mem_fraction_static <= 1:
+        parser.error("--mem-fraction-static must be in (0, 1]")
+    if args.context_length < 784:
+        parser.error("--context-length must be at least 784 for the 768-token prompt and output")
     if args.mode and (args.shadow or args.online_restore):
         parser.error("--mode cannot be combined with legacy --shadow/--online-restore")
     if args.mode == "online_recovery":
@@ -795,6 +881,11 @@ def main():
             "--stream-metrics", "--output", str(root / output)], log, env)
 
     verdict = {"state": "FAIL", "transaction_id": tx, "run": str(root), "M1": False,
+               "shared_gpu_debug": bool(args.allow_shared_gpu_debug),
+               "external_gpu_load_note": ("performance may be affected by external GPU load"
+                                          if args.allow_shared_gpu_debug else None),
+               "mem_fraction_static": args.mem_fraction_static,
+               "context_length": args.context_length,
                "capture_profile": args.capture_profile,
                "async_commit_delay_s": args.async_commit_delay,
                "require_async_overlap": args.require_async_overlap}
@@ -821,16 +912,14 @@ def main():
         gpus = args.gpus.split(",")
         if len(gpus) != 4 or len(set(gpus)) != 4 or not all(g.isdigit() for g in gpus):
             raise ValueError("--gpus must select four distinct physical GPU indices")
-        listing = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
-            text=True, stderr=subprocess.STDOUT)
-        gpu_ids = dict(line.strip().split(", ") for line in listing.splitlines())
-        selected = {gpu_ids[g] for g in gpus}
-        tasks = subprocess.check_output(
-            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader"],
-            text=True, stderr=subprocess.STDOUT)
-        if any(line.split(",")[0].strip() in selected for line in tasks.splitlines()):
-            raise RuntimeError("selected GPUs have active compute tasks; no processes were stopped")
+        inventory = gpu_inventory()
+        gpu_ids = {index: gpu["uuid"] for index, gpu in inventory.items()}
+        gpu_audit = {"before_start": inventory, "after_server_ready": {}, "after_experiment": {}}
+        (root / "gpu-memory.json").write_text(json.dumps(gpu_audit, indent=2) + "\n")
+        check_gpu_preflight(inventory, gpus, allow_shared=args.allow_shared_gpu_debug,
+                            min_free_gpu_gb=args.min_free_gpu_gb)
+        verdict.update(gpu_uuids=[gpu_ids[g] for g in gpus],
+                       gpu_physical_indices=[int(g) for g in gpus])
         import torch
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA unavailable; GPU validation NOT performed")
@@ -838,18 +927,21 @@ def main():
             "baseline": check_port(baseline_port), "pause": check_port(pause_port)}
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("SGLANG_KV_EC_")}
+        if args.allow_shared_gpu_debug:
+            # This disables only SGLang's early TP free-memory imbalance guard.
+            # KV pool allocation, OOM, capacity, and EC validation stay active.
+            env["SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK"] = "0"
 
         def server(label, server_env):
             port = baseline_port if label == "baseline" else pause_port
             url = baseline_url if label == "baseline" else pause_url
-            process = spawn("experiments.kv_ec.launch_debug", [
-                "--mode", "baseline", "--tp", "4", "--gpus", args.gpus,
-                "--port", str(port), "--model", args.model,
-                "--output", str(root / "evidence"), "--snapshot-id", tx + "-" + label,
-                "--request-id", "kv-ec-pause-request", "--token-count", "256",
-                "--layers", "all"], label + "-server.log", server_env)
+            process = spawn("experiments.kv_ec.launch_debug", server_launch_args(
+                args, port=port, root=root, transaction_id=tx, label=label),
+                label + "-server.log", server_env)
             wait_for(lambda: healthy(url), args.startup_timeout, label + " health timeout",
                      [(process, label + " server")])
+            gpu_audit["after_server_ready"][label] = gpu_inventory()
+            (root / "gpu-memory.json").write_text(json.dumps(gpu_audit, indent=2) + "\n")
             return process
 
         baseline = server("baseline", env)
@@ -865,6 +957,7 @@ def main():
             performance = dict(mode="baseline", **response["client_metrics_ms"],
                                model_identifier=args.model, gpu_uuids=[gpu_ids[g] for g in gpus],
                                input_ids_sha256=response["input_ids_sha256"], sampling=response["sampling"])
+            mark_performance_gpu_mode(performance, args)
             (root / "performance-baseline.json").write_text(json.dumps(performance, indent=2) + "\n")
             verdict.update(state="PASS", mode="baseline", GPU_VALIDATED=True, reason="independent real TP4 baseline",
                            gpu_uuids=[gpu_ids[g] for g in gpus])
@@ -1065,6 +1158,10 @@ def main():
                 gpu_uuids=[gpu_ids[g] for g in gpus], tp=4, dtype="bf16", layout="nhd", page_size=1,
                 overlap=False, prefix_cache=False, input_tokens=768, output_tokens=16,
                 input_ids_sha256=response["input_ids_sha256"], sampling=response["sampling"],
+                shared_gpu_debug=args.allow_shared_gpu_debug,
+                mem_fraction_static=args.mem_fraction_static, context_length=args.context_length,
+                external_gpu_load_note=("external GPU load may affect performance"
+                                        if args.allow_shared_gpu_debug else None),
                 torch_version=torch.__version__, cuda_version=torch.version.cuda,
                 parity_test_oracle=False, experiment_source_sha256={
                     name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
@@ -1099,6 +1196,7 @@ def main():
                         "verification and is not pure XOR compute time")
             else:
                 performance = experiment_performance_record(args.mode, response, records, config=config)
+            mark_performance_gpu_mode(performance, args)
             (root / f"performance-{args.mode.replace('_', '-')}.json").write_text(
                 json.dumps(performance, indent=2) + "\n")
             verdict.update(mode=args.mode, EXPERIMENT_PASS=True, GPU_VALIDATED=True, M1=args.mode != "prefill_retry",
@@ -1159,6 +1257,10 @@ def main():
             performance = online_record(target, response, config=dict(
                 admission, lost_rank=args.lost_rank, recover_tokens=args.recover_tokens,
                 input_ids_sha256=response["input_ids_sha256"], input_tokens=768, output_tokens=16,
+                shared_gpu_debug=args.allow_shared_gpu_debug,
+                mem_fraction_static=args.mem_fraction_static, context_length=args.context_length,
+                external_gpu_load_note=("external GPU load may affect performance"
+                                        if args.allow_shared_gpu_debug else None),
                 gpu_uuids=[gpu_ids[g] for g in gpus], tp=4, dtype="bf16", layout="nhd", page_size=1,
                 overlap=False, prefix_cache=False, sampling=response["sampling"],
                 torch_version=torch.__version__, cuda_version=torch.version.cuda,
@@ -1174,6 +1276,7 @@ def main():
                 first_fault = min(c["fault_monotonic"] for c in target["online"]["chunks"])
                 performance["fault_to_first_decode_ms"] = max(
                     (r["decode_observed_monotonic"] - first_fault) * 1000 for r in ranks)
+            mark_performance_gpu_mode(performance, args)
             with (root / "performance-online.json").open("x") as handle:
                 json.dump(performance, handle, indent=2)
             verdict.update(M2_PASS=args.lost_rank == 0 and args.recover_tokens == 256, M3_PASS=True,
@@ -1202,6 +1305,13 @@ def main():
             stop_owned(process)
         for handle in logs:
             handle.close()
+        if "gpu_audit" in locals():
+            try:
+                gpu_audit["after_experiment"] = gpu_inventory()
+            except Exception as exc:
+                gpu_audit["after_experiment_error"] = f"{type(exc).__name__}: {exc}"
+            (root / "gpu-memory.json").write_text(json.dumps(gpu_audit, indent=2) + "\n")
+            verdict["gpu_memory_audit"] = str(root / "gpu-memory.json")
         with (root / "acceptance.json").open("x") as handle:
             json.dump(verdict, handle, indent=2)
     print(f"{verdict['state']}: {verdict['reason']}\nEvidence: {root}", flush=True)
