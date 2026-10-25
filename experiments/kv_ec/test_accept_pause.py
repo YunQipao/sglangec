@@ -22,6 +22,13 @@ from experiments.kv_ec.launch_debug import check_port
 IDENTITY = {"transaction_id": "test", "epoch": "test-epoch"}
 
 
+def mocked_nvidia_smi(command, **kwargs):
+    if any(str(argument).startswith("--query-gpu=") for argument in command):
+        return ("0, GPU-0, A, 81920, 0, 81920\n1, GPU-1, A, 81920, 0, 81920\n"
+                "2, GPU-2, A, 81920, 0, 81920\n3, GPU-3, A, 81920, 0, 81920\n")
+    return ""
+
+
 def rank_record(rank):
     return dict(
         tp_rank=rank, state="RESUMED", transaction_id="test", coordinator_epoch="test-epoch",
@@ -132,8 +139,7 @@ class AcceptanceTests(unittest.TestCase):
                     "sys.argv", ["accept_pause", "--gpus", "0,1,2,3", "--baseline-port", "30359",
                                  "--pause-port", "30359" if conflict == "same" else "30360"]), patch(
                     "experiments.kv_ec.accept_pause.tempfile.mkdtemp", return_value=tmp), patch(
-                    "experiments.kv_ec.accept_pause.subprocess.check_output", side_effect=[
-                        "0, GPU-0\n1, GPU-1\n2, GPU-2\n3, GPU-3\n", ""]), patch(
+                    "experiments.kv_ec.accept_pause.subprocess.check_output", side_effect=mocked_nvidia_smi), patch(
                     "torch.cuda.is_available", return_value=True), patch(
                     "experiments.kv_ec.accept_pause.check_port", side_effect=(
                         OSError(errno.EADDRINUSE, "active_listener 30359") if conflict == "baseline" else
@@ -182,8 +188,7 @@ class AcceptanceTests(unittest.TestCase):
                                      "--pause-port", "32000", "--mem-fraction-static", ".22",
                                      "--context-length", "1024", "--allow-shared-gpu-debug"]), patch(
                     "experiments.kv_ec.accept_pause.tempfile.mkdtemp", return_value=tmp), patch(
-                    "experiments.kv_ec.accept_pause.subprocess.check_output", side_effect=[
-                        "0, GPU-0\n1, GPU-1\n2, GPU-2\n3, GPU-3\n", ""]), patch(
+                    "experiments.kv_ec.accept_pause.subprocess.check_output", side_effect=mocked_nvidia_smi), patch(
                     "torch.cuda.is_available", return_value=True), patch(
                     "experiments.kv_ec.accept_pause.check_port", return_value="available"), patch(
                     "experiments.kv_ec.gpu_memory_budget.check_shared_gpu_budget",
@@ -236,8 +241,7 @@ class AcceptanceTests(unittest.TestCase):
             opener.open.return_value.__enter__.return_value.status = 200
             with patch("sys.argv", ["accept_pause", "--shadow", "--gpus", "0,1,2,3"]), patch(
                     "experiments.kv_ec.accept_pause.tempfile.mkdtemp", return_value=tmp), patch(
-                    "experiments.kv_ec.accept_pause.subprocess.check_output", side_effect=[
-                        "0, GPU-0\n1, GPU-1\n2, GPU-2\n3, GPU-3\n", ""]), patch(
+                    "experiments.kv_ec.accept_pause.subprocess.check_output", side_effect=mocked_nvidia_smi), patch(
                     "torch.cuda.is_available", return_value=True), patch(
                     "experiments.kv_ec.accept_pause.check_port", return_value="available"), patch(
                     "experiments.kv_ec.accept_pause.subprocess.Popen", side_effect=spawn), patch(
@@ -303,8 +307,11 @@ class AcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch(
                 "sys.argv", ["accept_pause", "--gpus", "0,1,2,3"]), patch(
                     "experiments.kv_ec.accept_pause.tempfile.mkdtemp", return_value=tmp), patch(
-                    "experiments.kv_ec.accept_pause.subprocess.check_output", side_effect=[
-                        "0, GPU-0\n1, GPU-1\n2, GPU-2\n3, GPU-3\n", "GPU-2, 1234\n"]), patch(
+                    "experiments.kv_ec.accept_pause.subprocess.check_output",
+                    side_effect=lambda command, **kwargs: (
+                        mocked_nvidia_smi(command, **kwargs) if any(
+                            str(argument).startswith("--query-gpu=") for argument in command)
+                        else "GPU-2, 1234, python, 1024\n")), patch(
                     "experiments.kv_ec.accept_pause.subprocess.Popen") as popen, patch(
                     "experiments.kv_ec.accept_pause.os.killpg") as killpg:
             with redirect_stdout(io.StringIO()):

@@ -85,6 +85,11 @@ def main():
     args = p.parse_args()
     if args.chunk_size is not None and args.token_count != args.chunk_size:
         p.error("--chunk-size must equal --token-count")
+    if not 0 < args.mem_fraction_static <= 1:
+        p.error("--mem-fraction-static must be in (0, 1]")
+    # Existing requests contain 768 input tokens and generate up to 16 more.
+    if args.context_length < 784:
+        p.error("--context-length must be at least 784 for the 768-token prompt and output")
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from experiments.kv_ec.capture_plan import capture_plan
     try:
