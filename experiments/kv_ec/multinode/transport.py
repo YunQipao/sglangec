@@ -11,7 +11,7 @@ class Transport(ABC):
         """Transfer a payload and return elapsed seconds after completion."""
 
 
-def create_transport(name):
+def create_transport(name, **kwargs):
     if name == "tcp":
         from .tcp_transport import TCPTransport
 
@@ -19,5 +19,5 @@ def create_transport(name):
     if name == "rdma":
         from .rdma_transport import RDMATransport
 
-        return RDMATransport()
+        return RDMATransport(**kwargs)
     raise ValueError(f"unsupported transport: {name}")

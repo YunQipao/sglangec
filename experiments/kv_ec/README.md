@@ -1,9 +1,23 @@
 # KV EC 第一阶段：源码分析、CPU XOR 与 Snapshot 格式
 
 双逻辑节点 + 第三机 Gateway 的独立实验原型及限制见
-[TWO_NODE_GATEWAY.md](TWO_NODE_GATEWAY.md)。当前范围为 TCP relay、CPU
-synthetic 网络与 A/C chunk-XOR；尚未接入真实 GPU D2H，不能声称跨物理节点
-TP 推理或真实 KV 网络恢复。
+[TWO_NODE_GATEWAY.md](TWO_NODE_GATEWAY.md)。早期 Gateway 章节的范围是 TCP
+relay、CPU synthetic 网络与 A/C chunk-XOR；它不代表下面新增的物理 TP4
+Snapshot/RDMA 入口，也不能用其结果声称真实在线 Serving 恢复。
+
+当前 TP4 双物理节点、CPU-owned KV Node Block、独立 descriptor 注册、TCP
+Remote RS(2,1) 和逻辑恢复原型见
+[DUAL_NODE_REMOTE_RS.md](DUAL_NODE_REMOTE_RS.md) 的 M 节；可执行入口为
+`experiments.kv_ec.physical_two_node_rs`。该入口只处理已经完成 Capture 的
+离线 bytes，默认不改变 SGLang Serving，也不实现 GPU KV Pool 写回。
+
+同一入口现在支持 `--transport rdma`：TCP 继续承载 Remote RS 控制协议，
+完整 TP4 Node Block、Parity 与恢复块通过 `experiments.kv_ec.multinode`
+中的真实 libibverbs RC QP/RDMA Write 传输。服务器 B 的 RDMA 参数和 Node
+A/B 的可复制命令见 [DUAL_NODE_REMOTE_RS.md](DUAL_NODE_REMOTE_RS.md) 的
+“真实物理双节点 TP4 RDMA”节。当前 verbs helper 是 one-shot QP；若主机没有
+verbs headers/HCA，RDMA 构造会显式失败，不能回退 TCP，真实双机结果必须标记
+`NOT VERIFIED`。
 
 单机 4 GPU 模拟 Node0/Node1 的原生 `nnodes=2,tp=4` 实验入口见
 [TWO_LOGICAL_NODES.md](TWO_LOGICAL_NODES.md)。
@@ -13,6 +27,9 @@ CPU DRAM parity-only 最小在线原型：见 [PARITY_ONLY.md](PARITY_ONLY.md)�
 保留作历史记录，不代表新增在线实验已在本会话完成。
 
 ## 范围与证据等级
+
+下表记录早期在线 Capture 评估的证据等级；它不把本次新增的 CPU/RDMA
+传输原型误报成已完成的 GPU 在线恢复。
 
 分析版本：本地 `v0.5.18`，commit `71de97b264b04dcd514cf904003028aefe9775c8`。
 开始时 `git status --branch --short` 为 `HEAD (no branch)`，已有未跟踪
@@ -33,7 +50,9 @@ PyTorch `2.13.0+cu130`。当前工具会话 `nvidia-smi` 无法连接驱动，
 | E 代码、命令、CSV | CPU/CUDA synthetic CSV 已提供；没有真实 KV CSV |
 | F 默认关闭 | 本目录仅手动执行；SGLang 不会 import 或调用这些实验 |
 
-本实验不实现跨 Node RS、实际 GPU/Node 故障、线上请求恢复或在线增量保护。
+早期分析章节仍不实现在线增量保护、GPU KV Pool 写回或机器级故障切换；
+当前新增的 `physical_two_node_rs --transport {tcp,rdma}` 仅对已完成的真实
+TP4 Snapshot 做离线跨节点 RS 和逻辑恢复。
 CSV 中的 TP 是合成数据块数，**不是运行中的 SGLang TP 作业**。
 
 ## 1. 实际 KVCache 类与访问链路

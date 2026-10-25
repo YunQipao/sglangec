@@ -16,19 +16,24 @@ def validate_manifest(manifest, *, allow_fixture=False):
     nodes = manifest["nodes"]
     if len(nodes) != 2:
         raise ValueError("two nodes required")
+    tp_sizes = set()
     for i, d in enumerate(nodes):
+        metadata = d.get("metadata", {})
+        ranks = metadata.get("ranks", [])
         if (
             type(d["length"]) is not int
             or not 0 < d["length"] <= MAX_NODE_BYTES
             or not re.fullmatch("[0-9a-f]{64}", d["sha256"])
-            or d["metadata"]["node_id"] != i
-            or len(d["metadata"]["ranks"]) != 2
+            or metadata.get("node_id") != i
+            or len(ranks) not in (2, 4)
+            or any(m.get("tp_size") != len(ranks) for m in ranks)
         ):
             raise ValueError("invalid node descriptor")
-        for rank, m in enumerate(d["metadata"]["ranks"]):
+        tp_sizes.add(ranks[0].get("tp_size") if ranks else None)
+        for rank, m in enumerate(ranks):
             if (
                 m["tp_rank"] != rank
-                or m["tp_size"] != 2
+                or m["tp_size"] != len(ranks)
                 or m["dtype"] != "torch.bfloat16"
                 or m["snapshot_completion_status"] != "complete"
                 or (
@@ -37,7 +42,10 @@ def validate_manifest(manifest, *, allow_fixture=False):
                 )
             ):
                 raise ValueError("invalid descriptor provenance/layout")
-    a, b = [d["metadata"]["ranks"][0] for d in nodes]
+    if len(tp_sizes) != 1 or next(iter(tp_sizes)) not in (2, 4):
+        raise ValueError("both nodes must use the same TP2 or TP4 layout")
+    a_ranks, b_ranks = [d["metadata"]["ranks"] for d in nodes]
+    a, b = a_ranks[0], b_ranks[0]
     # Request IDs, generations and checkpoint versions belong to EACH node.
     # They need not be equal across independent requests; their full documents
     # are pinned by the manifest hash and verified on every submission.
@@ -52,7 +60,9 @@ def validate_manifest(manifest, *, allow_fixture=False):
         "token_count",
         "layers",
     )
-    if any(a[k] != b[k] for k in shared) or layout(a) != layout(b):
+    if (any(a[k] != b[k] for k in shared)
+            or any(layout(left) != layout(right)
+                   for left, right in zip(a_ranks, b_ranks))):
         raise ValueError("cross-node chunk/model/layout mismatch")
     if a["snapshot_id"] == b["snapshot_id"] or a["request_id"] == b["request_id"]:
         raise ValueError("independent node snapshot/request identities required")

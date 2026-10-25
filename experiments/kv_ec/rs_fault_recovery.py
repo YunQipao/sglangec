@@ -6,19 +6,25 @@ only the surviving block and parity; unavailable nodes are passed as None.
 
 import time
 
-from .node_block_export import descriptor, sha, unpack
+from .node_block_export import descriptor, sha, unpack, xor as local_xor
 from .remote_rs_client import binding
-from .rs_codec import recover, xor
+from .rs_codec import recover, xor as xor_pair
 
 
 def verify_faults(client, committed, blocks, *, allow_fixture=False):
     checks = []
     for node in (0, 1):
         meta, ranks = unpack(blocks[node], allow_fixture=allow_fixture)
-        parity = xor(*ranks)
-        for lost in (0, 1):
+        parity = local_xor(*ranks)
+        for lost in range(len(ranks)):
             start = time.perf_counter()
-            restored = xor(ranks[1 - lost], parity)
+            # A parity block made by XOR of all TP shards recovers one rank
+            # only when every other rank is available.
+            survivor = bytes(len(parity))
+            for rank, block in enumerate(ranks):
+                if rank != lost:
+                    survivor = xor_pair(survivor, bytes(block))
+            restored = xor_pair(parity, survivor)
             if (
                 restored != ranks[lost]
                 or sha(restored) != meta["ranks"][lost]["sha256"]

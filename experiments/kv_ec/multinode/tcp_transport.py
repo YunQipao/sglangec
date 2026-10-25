@@ -3,7 +3,6 @@
 import socket
 import struct
 import time
-import struct
 
 from .transport import Transport
 

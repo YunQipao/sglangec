@@ -60,7 +60,9 @@ def run(args):
             "model_identifier"
         ]
         report.update(
-            tp=2, kv_dtype="torch.bfloat16", node_lengths=list(map(len, blocks))
+            tp=manifest["nodes"][0]["metadata"]["ranks"][0]["tp_size"],
+            kv_dtype=manifest["nodes"][0]["metadata"]["ranks"][0]["dtype"],
+            node_lengths=list(map(len, blocks)),
         )
         report["export_measurements"] = []
         for path, block in zip((args.node0_block, args.node1_block), blocks):

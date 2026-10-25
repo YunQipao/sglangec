@@ -113,7 +113,11 @@ def run(args):
                     remaining -= len(chunk)
                 conn.sendall(b"\x01")
     else:
-        receive_file(args.data_port, received_path, device=args.rdma_device)
+        rdma_receive_stats = receive_file(
+            args.data_port, received_path, device=args.rdma_device,
+            gid_index=args.rdma_gid_index, port_num=args.rdma_port_num,
+            timeout=args.timeout, return_stats=True,
+        )
         if received_path.stat().st_size != args.d0_bytes:
             raise ValueError("D0 payload length does not match configured length")
     d0_raw = received_path.read_bytes()
@@ -168,8 +172,17 @@ def run(args):
         return_transport = TCPTransport()
     else:
         from .rdma_transport import RDMATransport
-        return_transport = RDMATransport(device=args.rdma_device)
-    return_seconds = return_transport.send(args.return_host, args.return_port, d1_raw)
+        return_transport = RDMATransport(
+            device=args.rdma_device, gid_index=args.rdma_gid_index,
+            port_num=args.rdma_port_num, timeout=args.timeout,
+        )
+    if args.transport == "rdma":
+        return_stats = return_transport.send_with_stats(args.return_host, args.return_port, d1_raw)
+        return_seconds = return_stats["elapsed_s"]
+        return_transport.close()
+    else:
+        return_stats = None
+        return_seconds = return_transport.send(args.return_host, args.return_port, d1_raw)
     # Persist the complete padded stripe before publishing COMMITTED metadata.
     _write_block(output / "D0.padded.bin", d0)
     _write_block(output / "D1.padded.bin", d1)
@@ -193,6 +206,8 @@ def run(args):
               "host_dram_bytes": int(d0.nbytes + d1.nbytes + parity.nbytes),
               "max_rss_bytes": process_usage_after.ru_maxrss * 1024,
               "node_b_return_transfer_ms": return_seconds * 1000,
+              "rdma_receive": locals().get("rdma_receive_stats"),
+              "rdma_return": return_stats,
               "checksum": hashes,
               "verification": {"D0_lost_byte_exact": True, "D1_lost_byte_exact": True,
                                "P_recomputed_byte_exact": True, **verification},
@@ -213,6 +228,8 @@ def main():
     parser.add_argument("--return-host", default="127.0.0.1")
     parser.add_argument("--return-port", type=int, default=19472)
     parser.add_argument("--rdma-device", default="-")
+    parser.add_argument("--rdma-gid-index", type=int)
+    parser.add_argument("--rdma-port-num", type=int, default=1)
     parser.add_argument("--d0-bytes", type=int, required=True)
     parser.add_argument("--d1-bytes", type=int, required=True)
     parser.add_argument("--experiment-id", default="synthetic-rs21-experiment")

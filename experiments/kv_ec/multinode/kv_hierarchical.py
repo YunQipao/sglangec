@@ -170,9 +170,14 @@ def run_receive(args):
     remote_path = out / "remote-node-block.bin"
     if args.transport == "tcp":
         transfer_seconds = tcp_receive_file(args.bind_host, args.data_port, remote_path, timeout=args.timeout)
+        rdma_receive_stats = None
     else:
-        transfer_seconds = rdma_receive_file(args.data_port, remote_path, device=args.rdma_device,
-                                             bind_host=args.bind_host)
+        rdma_receive_stats = rdma_receive_file(
+            args.data_port, remote_path, device=args.rdma_device,
+            bind_host=args.bind_host, gid_index=args.rdma_gid_index,
+            port_num=args.rdma_port_num, timeout=args.timeout, return_stats=True,
+        )
+        transfer_seconds = rdma_receive_stats["elapsed_s"]
     remote_envelope = remote_path.read_bytes()
     remote_header, remote_blocks = _decode_node(remote_envelope)
     _compatible({**local_manifest, "ranks": local_manifest["ranks"]},
@@ -249,6 +254,7 @@ def run_receive(args):
         "throughput_tokens_s": request_metrics.get("throughput_tokens_s"),
         "checkpoint": {"data_transfer_completed": True, "rank_checksums_valid": True,
                        "local_xor_verified": True, "rs_recoveries_verified": True},
+        "rdma_receive": rdma_receive_stats,
     }
     report["cpu_utilization_percent"] = (
         100 * report["cpu_seconds"] / (report["protection_completion_ms"] / 1000)
@@ -265,8 +271,17 @@ def run_send(args):
     manifest, blocks, parity, checks, envelope, header, xor_encode_ms, xor_recovery_ms = _load_node(args.snapshot, args.node_id)
     _persist(out, f"{args.node_id}-local-xor.bin", parity.tobytes())
     _persist(out, f"{args.node_id}-node-block.bin", envelope)
-    transport = TCPTransport() if args.transport == "tcp" else RDMATransport(device=args.rdma_device)
-    elapsed = transport.send(args.peer, args.data_port, envelope)
+    transport = TCPTransport() if args.transport == "tcp" else RDMATransport(
+        device=args.rdma_device, gid_index=args.rdma_gid_index,
+        port_num=args.rdma_port_num, timeout=args.timeout,
+    )
+    if args.transport == "rdma":
+        send_stats = transport.send_with_stats(args.peer, args.data_port, envelope)
+        elapsed = send_stats["elapsed_s"]
+        transport.close()
+    else:
+        send_stats = None
+        elapsed = transport.send(args.peer, args.data_port, envelope)
     if args.transport == "rdma" and transport.name != "rdma":
         raise ValueError("RDMA transport identity mismatch")
     request_metrics = _request_metrics(args.request_metrics)
@@ -279,6 +294,7 @@ def run_send(args):
               "tpot_ms": request_metrics.get("tpot_ms"),
               "throughput_tokens_s": request_metrics.get("throughput_tokens_s"),
               "transfer_ms": elapsed * 1000, "shared_node_failure_recovery": False,
+              "rdma_send": send_stats,
               "host_dram_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
               "gpu_memory_bytes": None,
               "note": "Node B must validate and commit the global stripe."}
@@ -317,6 +333,8 @@ def main():
         p.add_argument("--experiment-id", default="qwen3-kv-hierarchical")
         p.add_argument("--timeout", type=float, default=120)
         p.add_argument("--rdma-device", default="-")
+        p.add_argument("--rdma-gid-index", type=int)
+        p.add_argument("--rdma-port-num", type=int, default=1)
         p.add_argument("--request-metrics", type=Path,
                        help="request_debug response JSON; attaches TTFT/TPOT/client throughput")
         if role == "send":

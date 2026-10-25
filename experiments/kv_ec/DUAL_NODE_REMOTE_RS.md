@@ -1,5 +1,161 @@
 # 双逻辑 TP2 Node + Host XOR + 远端 RS(2,1)
 
+## 真实物理双节点 TP4 RDMA（当前原型）
+
+本节是本仓库当前 TP4/RDMA 入口。它复用下面的 `node.bin`/`export.json`
+格式和 Remote RS manifest；每个 Node Block 必须来自该节点自己的四个真实
+Qwen3-8B TP=4 rank snapshot。`--transport rdma` 时 TCP 只承载控制帧、长度、
+QP/MR 元数据和 ACK，完整 Node Block、Parity、Recovery Node Block 由
+`RDMA_WRITE_WITH_IMM` 写入已注册的 Host DRAM，并等待 CQ completion。RDMA
+初始化、注册、连接、长度、SHA256 或 completion 失败都会在 JSON 中标记
+`state=FAILED`，不会回退成 TCP。
+
+Node A 使用 `192.168.2.243`、`mlx5_0`、GID index `5`；Node B 使用
+`192.168.2.245`、`mlx5_0`、GID index `3`。服务器 B 的 TCP 控制端口是
+`30300`，RDMA rendezvous 端口池默认从 `30400` 开始。每轮必须使用新的
+`STRIPE` 和新的输出目录；以下命令不会覆盖已有实验结果。
+
+先在两台机器确认真实设备和 RoCE 状态（这些命令不会停止任何进程）：
+
+```bash
+ibv_devinfo -d mlx5_0
+rdma link
+ibstat
+ls -l /dev/infiniband
+ip -br address
+ip route get 192.168.2.245   # A；B 上改为 192.168.2.243
+```
+
+在 Node B 启动 Remote RS Server，明确设置本机 GID index 3：
+
+```bash
+cd /path/to/sglangec/sglang
+export PYTHONPATH="$PWD"
+python -u -m experiments.kv_ec.remote_rs_server \
+  --host 192.168.2.245 --port 30300 --timeout 60 --ttl 1800 \
+  --max-stripes 16 --max-bytes 536870912 \
+  --rdma-device mlx5_0 --rdma-gid-index 3 --rdma-port-num 1 \
+  --rdma-port-base 30400 --rdma-timeout 120 \
+  --rdma-directory /tmp/kv-ec-rdma-server
+```
+
+Node A 和 Node B 各自启动原有 Qwen TP=4 服务及 capture 流程；共享 GPU
+调试参数仍可照旧使用（例如 `--allow-shared-gpu-debug
+--mem-fraction-static 0.35 --context-length 1024`），RDMA 代码不修改
+SGLang/CUDA。真实 capture 完成后，分别在各节点执行：
+
+Node A（四卡 TP=4，独立请求身份）：
+
+```bash
+export SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0
+python -u -m experiments.kv_ec.launch_debug --mode capture --tp 4 \
+  --gpus 0,1,2,3 --host 192.168.2.243 --port 30292 \
+  --model "$MODEL" --output "$RUN_A/capture" \
+  --snapshot-id "$SNAPSHOT_A" --request-id "$REQUEST_A" \
+  --token-count 256 --chunk-size 256 --context-length 1024 \
+  --mem-fraction-static 0.35 --allow-shared-gpu-debug \
+  2>&1 | tee "$RUN_A/capture.log"
+```
+
+Node B（四卡 TP=4，独立请求身份）：
+
+```bash
+export SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0
+python -u -m experiments.kv_ec.launch_debug --mode capture --tp 4 \
+  --gpus 0,1,2,3 --host 192.168.2.245 --port 30292 \
+  --model "$MODEL" --output "$RUN_B/capture" \
+  --snapshot-id "$SNAPSHOT_B" --request-id "$REQUEST_B" \
+  --token-count 256 --chunk-size 256 --context-length 1024 \
+  --mem-fraction-static 0.35 --allow-shared-gpu-debug \
+  2>&1 | tee "$RUN_B/capture.log"
+```
+
+在各节点向本机服务发送真实请求并等待 capture 完成，再导出：
+
+```bash
+python -m experiments.kv_ec.request_debug request --url http://192.168.2.243:30292 \
+  --model "$MODEL" --request-id "$REQUEST_A" --prompt-tokens 768 \
+  --stream-metrics --output "$RUN_A/response.json"
+python -m experiments.kv_ec.request_debug request --url http://192.168.2.245:30292 \
+  --model "$MODEL" --request-id "$REQUEST_B" --prompt-tokens 768 \
+  --stream-metrics --output "$RUN_B/response.json"
+python -m experiments.kv_ec.rank_snapshot "$RUN_A/capture/$SNAPSHOT_A"
+python -m experiments.kv_ec.rank_snapshot "$RUN_B/capture/$SNAPSHOT_B"
+python -m experiments.kv_ec.node_block_export --snapshot "$RUN_A/capture/$SNAPSHOT_A" \
+  --node-id 0 --output "$RUN_A/export"
+python -m experiments.kv_ec.node_block_export --snapshot "$RUN_B/capture/$SNAPSHOT_B" \
+  --node-id 1 --output "$RUN_B/export"
+```
+
+Node A 只上传自己的 `node.bin`。其发送端使用 GID index 5；`--remote-host`
+是 B 的 RoCE 地址：
+
+```bash
+python -m experiments.kv_ec.physical_two_node_rs node \
+  --remote-host 192.168.2.245 --remote-port 30300 \
+  --stripe-id "$STRIPE" --node-id 0 --node-block "$RUN_A/export/node.bin" \
+  --output "$RUN_A/rdma-submit" --chunk-tokens 256 \
+  --transport rdma --rdma-device mlx5_0 --rdma-gid-index 5 \
+  --rdma-port-num 1 --timeout 300
+```
+
+Node B 只上传自己的 `node.bin`。服务器和发送端都在 B，因此仍会经过
+verbs QP/MR/CQ；本机 GID index 是 3：
+
+```bash
+python -m experiments.kv_ec.physical_two_node_rs node \
+  --remote-host 192.168.2.245 --remote-port 30300 \
+  --stripe-id "$STRIPE" --node-id 1 --node-block "$RUN_B/export/node.bin" \
+  --output "$RUN_B/rdma-submit" --chunk-tokens 256 \
+  --transport rdma --rdma-device mlx5_0 --rdma-gid-index 3 \
+  --rdma-port-num 1 --timeout 300
+```
+
+在 Node A 运行 Coordinator，先取回 Parity，再可选地注入一个逻辑 Node
+Block 丢失。Coordinator 在 A 监听返回 RDMA 端口 30490，服务器 B 仍只发
+控制请求和 RDMA 数据：
+
+```bash
+python -m experiments.kv_ec.physical_two_node_rs coordinator \
+  --remote-host 192.168.2.245 --remote-port 30300 \
+  --stripe-id "$STRIPE" --output "$RUN_A/rdma-coordinator" \
+  --chunk-tokens 256 --transport rdma --rdma-device mlx5_0 \
+  --rdma-gid-index 5 --rdma-port-num 1 \
+  --rdma-return-host 192.168.2.243 --rdma-return-port 30490 \
+  --timeout 300
+```
+
+使用 Node B 的原始 Node Block 作为 D1 survivor 恢复 D0 的示例：
+
+```bash
+python -m experiments.kv_ec.physical_two_node_rs coordinator \
+  --remote-host 192.168.2.245 --remote-port 30300 \
+  --stripe-id "$STRIPE" --output "$RUN_A/rdma-recovery" \
+  --chunk-tokens 256 --transport rdma --rdma-device mlx5_0 \
+  --rdma-gid-index 5 --rdma-return-host 192.168.2.243 \
+  --rdma-return-port 30491 --missing-node 0 \
+  --survivor "$RUN_B/export/node.bin" \
+  --expected "$RUN_A/export/node.bin" --timeout 300
+```
+
+合成数据只用于先验证 verbs 通道，可使用 `experiments.kv_ec.multinode`
+中的 paired worker/coordinator；它不能代替 TP4 真实 KV 验收。真实验收顺序
+是：`ib_write_bw`/设备检查 → 合成 RDMA → 两节点四 rank capture/export →
+Node A/B 独立上传 → Parity COMMITTED → 逻辑 D0/D1 恢复 → `unpack`、SHA256
+和 byte-exact 检查。当前容器没有 verbs headers/HCA 时这些步骤必须报告
+`NOT VERIFIED`，不得把 TCP 单测或本机 fixture 结果标成 RDMA。
+
+每个 `result.json`/`metrics.csv` 至少保存 `transport`、`rdma_device`、
+`gid_index`、`port_num`、`qp_num`、`remote_qpn`、`completion_status`、
+`device_setup_ms`、`connection_setup_ms`、`memory_registration_ms`、`qp_setup_ms`、
+`exchange_ms`、`completion_ms`、`payload_bytes`、`effective_throughput`、
+`rs_encode_ms`、`rs_reconstruct_ms`、`network_payload_bytes`、
+`network_control_bytes`、完整
+`sha256` 和 `byte_exact`。这些统计将连接/MR/QP 建立开销与 payload 完成
+开销分开；当前 helper 是 one-shot RC QP，尚未实现持久连接复用，因此不能
+声称已测得 connection reuse 性能。RDMA 数据位于 CPU Host DRAM，完成确认
+前不会覆盖或释放注册 buffer。
+
 ## 状态与边界
 
 这是默认关闭的独立实验工具。未修改 SGLang 核心调度、CUDA、PyTorch 或
@@ -467,6 +623,136 @@ compare 逐 Node 检查 input hash/model/sampling/output token sequence/finish
 reason 一致；它不会把第三组升级成在线保护实验。
 
 ## L. 测试、验收和停止
+
+## M. 真实物理双节点 TP4 TCP 原型（当前实现）
+
+本节是当前代码新增的 TP4 工作流。它与上面的历史 TP2 流程并行存在，默认
+仍然关闭远端 RS。Node A 和 Node B 各自拥有自己的 snapshot、request、node.bin
+和上传进程；B 上的 Remote RS 服务只在两份完整 Node Block 都提交后生成 P，
+COMMITTED 后释放 D0/D1，只保留 P 和完整 manifest。该流程是 capture 后的离线
+实验，不包含 GPU KV Pool 写回或继续推理。CPU fixture 只能用于单元测试。
+
+环境变量应在两台机器分别设置（模型目录和仓库版本必须一致）：
+
+```bash
+export REPO=/path/to/sglang
+export PY=/path/to/existing/sglang-env/bin/python
+export MODEL=/path/to/Qwen3-8B
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+export REMOTE_HOST=192.168.2.245
+export REMOTE_PORT=30300
+export STRIPE_ID="tp4-rs-$(date +%s)"
+export CHUNK_TOKENS=256
+export RUN=/tmp/kv-ec-"$STRIPE_ID"
+mkdir -p "$RUN"
+git -C "$REPO" rev-parse HEAD | tee "$RUN/git-sha.txt"
+```
+
+服务器 B（`192.168.2.245`）先检查路由、GPU 和内存，然后启动协调服务：
+
+```bash
+ip -br address; ip route; free -b
+nvidia-smi --query-gpu=index,uuid,pci.bus_id --format=csv
+cd "$REPO"
+"$PY" -u -m experiments.kv_ec.remote_rs_server --host 0.0.0.0 \
+  --port "$REMOTE_PORT" --timeout 60 --ttl 1800 --max-stripes 16 \
+  --max-bytes 536870912 2>&1 | tee "$RUN/remote-rs-server.log"
+```
+
+服务器 A（`192.168.2.243`）和服务器 B 各自启动一个独立的 Qwen3-8B TP4
+capture 实例。`--allow-shared-gpu-debug` 只在确认显存准入检查允许共享时
+显式加入；该选项不会停止其他 GPU 进程。两台机器都保留要求的环境变量和
+显存参数：
+
+```bash
+export SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0
+export GPUS=0,1,2,3
+export NODE_ID=0                 # A 使用 0；B 使用 1
+export NODE_HOST=10.102.0.232   # B 改成 10.102.0.233
+export HTTP_PORT=30292           # B 可改成 30294，必须独立
+export SNAPSHOT_ID="${STRIPE_ID}-node${NODE_ID}"
+export REQUEST_ID="request-${STRIPE_ID}-node${NODE_ID}"
+mkdir -p "$RUN/node${NODE_ID}"
+cd "$REPO"
+"$PY" -u -m experiments.kv_ec.launch_debug --mode capture --tp 4 \
+  --gpus "$GPUS" --host "$NODE_HOST" --port "$HTTP_PORT" --model "$MODEL" \
+  --output "$RUN/node${NODE_ID}" --snapshot-id "$SNAPSHOT_ID" \
+  --request-id "$REQUEST_ID" --token-count "$CHUNK_TOKENS" --chunk-size 256 \
+  --layers all --mem-fraction-static 0.35 --context-length 1024 \
+  --allow-shared-gpu-debug 2>&1 | tee "$RUN/node${NODE_ID}/sglang.log"
+```
+
+在对应机器发送真实请求并完成 snapshot 校验（请求内容必须相同模型配置、
+但 request ID 可以不同）：
+
+```bash
+curl --fail "http://${NODE_HOST}:${HTTP_PORT}/health"
+"$PY" -m experiments.kv_ec.request_debug request \
+  --url "http://${NODE_HOST}:${HTTP_PORT}" --model "$MODEL" \
+  --request-id "$REQUEST_ID" --prompt-tokens 768 --stream-metrics \
+  --output "$RUN/node${NODE_ID}/response.json"
+"$PY" -m experiments.kv_ec.rank_snapshot "$RUN/node${NODE_ID}/$SNAPSHOT_ID"
+"$PY" -m experiments.kv_ec.node_block_export \
+  --snapshot "$RUN/node${NODE_ID}/$SNAPSHOT_ID" --node-id "$NODE_ID" \
+  --output "$RUN/node${NODE_ID}/export"
+sha256sum "$RUN/node${NODE_ID}/export/node.bin" \
+  "$RUN/node${NODE_ID}/export/local_parity.bin" \
+  "$RUN/node${NODE_ID}/export/export.json"
+```
+
+确认 `export.json` 中 `tp_size=4`、`rank_bytes` 有四项，且目录中同时存在
+`node.bin`、`local_parity.bin`、`export.json` 和 `export.csv`。这一步使用的
+是已经完成 checksum 的 CPU-owned capture；不要从已 COMMITTED 的在线 Manager
+或已复用的 GPU slot 重新读取。
+
+两台机器分别执行以下命令。它们先把 descriptor 注册到 B，第二个注册完成后
+服务端生成 Stripe binding；随后各自只上传本机的完整 `node.bin`：
+
+```bash
+cd "$REPO"
+"$PY" -m experiments.kv_ec.physical_two_node_rs node \
+  --remote-host "$REMOTE_HOST" --remote-port "$REMOTE_PORT" \
+  --stripe-id "$STRIPE_ID" --node-id "$NODE_ID" \
+  --node-block "$RUN/node${NODE_ID}/export/node.bin" \
+  --output "$RUN/node${NODE_ID}/submit" --chunk-tokens "$CHUNK_TOKENS" \
+  --network-profile physical --timeout 300
+```
+
+任一机器都可以运行协调器；它等待两个上传变成 COMMITTED，获取 P，并输出
+完整 JSON 和两个 CSV（`result.json`, `result.csv`, `metrics.csv`）：
+
+```bash
+"$PY" -m experiments.kv_ec.physical_two_node_rs coordinator \
+  --remote-host "$REMOTE_HOST" --remote-port "$REMOTE_PORT" \
+  --stripe-id "$STRIPE_ID" --output "$RUN/coordinator" \
+  --chunk-tokens "$CHUNK_TOKENS" --network-profile physical --timeout 300
+```
+
+逻辑整节点故障注入必须从仍持有幸存 Node Block 的机器发起，服务端不会使用
+已经释放的原始块。下面例子在 Node B 上用 D1 恢复 D0；`--expected` 可选，
+若原始 D0 在同一台机器则会额外做 byte-exact 比较，否则服务端 manifest 的
+SHA256/metadata 校验仍会给出 `byte_exact=true`：
+
+```bash
+"$PY" -m experiments.kv_ec.physical_two_node_rs coordinator \
+  --remote-host "$REMOTE_HOST" --remote-port "$REMOTE_PORT" \
+  --stripe-id "$STRIPE_ID" --missing-node 0 \
+  --survivor "$RUN/node1/export/node.bin" \
+  --output "$RUN/recover-node0" --timeout 300
+```
+
+同理，使用 Node A 的 D0、`--missing-node 1` 恢复 D1。双 Node 同时丢失、Parity
+缺失、Stripe 未 COMMITTED、过期 Stripe、损坏 survivor 或 payload SHA256 不
+匹配都会拒绝；这些拒绝路径由 CPU fixture 和远端服务单测覆盖。RS(2,1) 的
+矩阵仍为 `[[1,0],[0,1],[1,1]]`，P 就是 D0 XOR D1，没有超出普通 XOR 的
+纠删码能力。
+
+物理验收时同时保存两台机器的 `git rev-parse HEAD`、GPU UUID/PCIe 拓扑、
+请求与 snapshot 身份、chunk/layer layout、local XOR/Pack/RS 时间、TCP
+payload 和 stream 字节数、B 的 commit 时延、恢复时间、SHA256、CPU/RSS 和
+网卡计数。当前工具只能报告应用层 TCP 字节（不含 Ethernet/IP/TCP header、
+ACK 和重传），应把 `tc` 的配置带宽、网卡标称速率和测得 goodput 分开记录。
+没有 GPU、两台物理机或非 loopback 网卡时，结果必须标为 `NOT VERIFIED`。
 
 ```bash
 "$PY" -m unittest experiments.kv_ec.test_dual_node_launch experiments.kv_ec.test_parity_manager -v

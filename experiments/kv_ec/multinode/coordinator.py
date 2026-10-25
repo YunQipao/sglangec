@@ -30,7 +30,10 @@ def request_json(host, port, request):
 
 def run(args):
     if args.transport == "rdma":
-        transport = RDMATransport(device=args.rdma_device)
+        transport = RDMATransport(
+            device=args.rdma_device, gid_index=args.rdma_gid_index,
+            port_num=args.rdma_port_num, timeout=args.timeout,
+        )
     else:
         transport = TCPTransport()
     health_deadline = time.monotonic() + args.timeout
@@ -61,16 +64,25 @@ def run(args):
                     transfer_errors.append(tcp_receive_file(args.return_bind_host,
                                                             args.return_port, return_path))
                 else:
-                    rdma_receive_file(args.return_port, return_path, device=args.rdma_device,
-                                      bind_host=args.return_bind_host)
-                    transfer_errors.append(0.0)
+                    stats = rdma_receive_file(
+                        args.return_port, return_path, device=args.rdma_device,
+                        bind_host=args.return_bind_host,
+                        gid_index=args.rdma_gid_index, port_num=args.rdma_port_num,
+                        timeout=args.timeout, return_stats=True,
+                    )
+                    transfer_errors.append(stats)
             except Exception as exc:
                 transfer_errors.append(exc)
 
         receiver = threading.Thread(target=receive_reverse, daemon=True)
         receiver.start()
         try:
-            transfer_seconds = transport.send(args.node_b, args.data_port, d0)
+            if args.transport == "rdma":
+                transfer_stats = transport.send_with_stats(args.node_b, args.data_port, d0)
+                transfer_seconds = transfer_stats["elapsed_s"]
+            else:
+                transfer_stats = None
+                transfer_seconds = transport.send(args.node_b, args.data_port, d0)
         except Exception:
             # Let this run's receive helper hit its bounded timeout and exit;
             # do not leave a temporary listener/helper behind on failure.
@@ -117,7 +129,9 @@ def run(args):
                   total_transferred_bytes=len(d0) + len(d1),
                   total_wall_ms=(time.perf_counter() - started) * 1000,
                   protection_completion_ms=(time.perf_counter() - started) * 1000,
-                  shared_node_failure_recovery=False)
+                  shared_node_failure_recovery=False,
+                  rdma_send=transfer_stats,
+                  rdma_reverse=(result.get("rdma_return") if args.transport == "rdma" else None))
     result["stripe_metadata"][0].update(experiment_id=experiment_id, stripe_id=stripe_id,
                                         checkpoint_version=checkpoint_version,
                                         chunk_id=args.chunk_id,
@@ -149,6 +163,8 @@ def main():
     parser.add_argument("--return-bind-host", default="0.0.0.0")
     parser.add_argument("--return-port", type=int, default=19472)
     parser.add_argument("--rdma-device", default="-")
+    parser.add_argument("--rdma-gid-index", type=int)
+    parser.add_argument("--rdma-port-num", type=int, default=1)
     parser.add_argument("--d0-bytes", type=int, required=True)
     parser.add_argument("--d1-bytes", type=int, required=True)
     parser.add_argument("--seed", type=int, default=20261025)

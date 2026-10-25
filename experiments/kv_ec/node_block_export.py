@@ -1,7 +1,8 @@
-"""Offline real capture -> CPU-owned TP2 node block. No GPU/allocator access.
+"""Offline real capture -> CPU-owned TP2/TP4 node block. No GPU/allocator access.
 
-Pack: magic KVNODE01, uint32 BE JSON length, canonical UTF-8 JSON, rank0,
-rank1; ranks use ascending layer / K / V / logical token order from capture.
+Pack: magic KVNODE01, uint32 BE JSON length, canonical UTF-8 JSON, followed by
+rank payloads in ascending TP rank order. Ranks use ascending layer / K / V /
+logical token order from capture.
 No online export hook is installed. One offline node is processed at a time,
 bounded by MAX_NODE_BYTES; no service-critical source ownership is extended.
 """
@@ -14,7 +15,20 @@ from pathlib import Path
 import struct
 import time
 
-from .rs_codec import xor
+from .rs_codec import xor as _xor_pair
+
+
+def xor(*blocks):
+    """Return the byte-wise local parity for a complete TP2/TP4 node."""
+    if len(blocks) not in (2, 4) or any(not isinstance(b, (bytes, bytearray)) for b in blocks):
+        raise ValueError("local XOR requires two or four byte rank blocks")
+    width = len(blocks[0])
+    if width == 0 or any(len(b) != width for b in blocks):
+        raise ValueError("equal non-empty rank lengths required")
+    result = bytes(blocks[0])
+    for block in blocks[1:]:
+        result = _xor_pair(result, bytes(block))
+    return result
 
 MAGIC = b"KVNODE01"
 MAX_NODE_BYTES = 160 * 1024**2
@@ -81,9 +95,11 @@ def validate_rank(raw, meta, rank, *, allow_fixture=False):
     for key in IDENTITY:
         if key not in meta or meta[key] is None or meta[key] == "":
             raise ValueError("missing identity: " + key)
+    tp_size = meta.get("tp_size")
     if (
-        meta["tp_size"] != 2
+        tp_size not in (2, 4)
         or meta["tp_rank"] != rank
+        or not 0 <= rank < tp_size
         or meta["dtype"] != "torch.bfloat16"
         or meta["format"] != "kv-ec-rank-bin-v1"
         or meta.get("snapshot_completion_status") != "complete"
@@ -140,10 +156,10 @@ def validate_rank(raw, meta, rank, *, allow_fixture=False):
                 raise ValueError("invalid segment layout")
             if meta["provenance"] == "sglang_request" and (
                 count not in (128, 256, 512)
-                or shape[1:] != [4, 128]
+                or shape[1:] != [8 // tp_size, 128]
                 or not 0 <= r["layer_id"] < 36
             ):
-                raise ValueError("Qwen3-8B TP2 capture geometry required")
+                raise ValueError("Qwen3-8B BF16 TP2/TP4 capture geometry required")
             segment = raw[offset : offset + n]
             if sha(segment) != r[kind + "_sha256"]:
                 raise ValueError("segment checksum mismatch")
@@ -157,18 +173,21 @@ def validate_rank(raw, meta, rank, *, allow_fixture=False):
 
 def validate_meta_pair(ranks):
     if (
-        len(ranks) != 2
-        or any(ranks[0].get(k) != ranks[1].get(k) for k in IDENTITY)
-        or layout(ranks[0]) != layout(ranks[1])
+        len(ranks) not in (2, 4)
+        or any(r.get("tp_size") != len(ranks) or r.get("tp_rank") != i
+               for i, r in enumerate(ranks))
+        or any(any(ranks[0].get(k) != r.get(k) for k in IDENTITY)
+               or layout(ranks[0]) != layout(r) for r in ranks[1:])
     ):
         raise ValueError("mixed rank request/chunk/version/layout")
 
 
 def pack(node, blocks, ranks, *, allow_fixture=False):
-    if type(node) is not int or node not in (0, 1) or len(blocks) != 2:
-        raise ValueError("exactly two ranks per node")
+    if (type(node) is not int or node not in (0, 1)
+            or len(blocks) not in (2, 4) or len(blocks) != len(ranks)):
+        raise ValueError("node requires a complete TP2 or TP4 rank set")
     validate_meta_pair(ranks)
-    for i in range(2):
+    for i in range(len(blocks)):
         validate_rank(blocks[i], ranks[i], i, allow_fixture=allow_fixture)
     header = canonical(
         {
@@ -202,13 +221,17 @@ def unpack(block, *, allow_fixture=False):
         raise ValueError("noncanonical node metadata")
     lengths = meta["rank_lengths"]
     if (
-        len(lengths) != 2
+        len(lengths) not in (2, 4)
         or any(type(n) is not int or n <= 0 for n in lengths)
         or 12 + n + sum(lengths) != len(block)
     ):
         raise ValueError("invalid node lengths")
     start = 12 + n
-    blocks = (block[start : start + lengths[0]], block[start + lengths[0] :])
+    blocks = []
+    for length in lengths:
+        blocks.append(block[start : start + length])
+        start += length
+    blocks = tuple(blocks)
     validate_meta_pair(meta["ranks"])
     for rank, raw in enumerate(blocks):
         validate_rank(raw, meta["ranks"][rank], rank, allow_fixture=allow_fixture)
@@ -229,8 +252,8 @@ def export(directory, node):
         raise ValueError("offline rank byte budget exceeded")
     manifest, arrays = assemble(directory)
     ranks = manifest["ranks"]
-    if manifest["tp_size"] != 2:
-        raise ValueError("TP2 capture required")
+    if manifest["tp_size"] not in (2, 4):
+        raise ValueError("TP2 or TP4 capture required")
     blocks = [a.tobytes() for a in arrays]
     start = time.perf_counter()
     local = xor(*blocks)
@@ -245,6 +268,8 @@ def export(directory, node):
         "xor_ms": xor_ms,
         "pack_ms": pack_ms,
         "local_parity_sha256": sha(local),
+        "tp_size": manifest["tp_size"],
+        "local_parity_bytes": len(local),
         "descriptor": descriptor(block),
     }
 
@@ -261,6 +286,14 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     with (args.output / "node.bin").open("xb") as f:
         f.write(block)
+    # Keep the complete rank payload in node.bin and persist the independent
+    # local XOR parity as a separate CPU-owned artifact. Recompute from the
+    # already validated snapshot; no GPU slot is touched by this command.
+    from .rank_snapshot import assemble
+    _, arrays = assemble(args.snapshot)
+    local = xor(*(a.tobytes() for a in arrays))
+    with (args.output / "local_parity.bin").open("xb") as f:
+        f.write(local)
     save_report(args.output / "export", report)
     print(json.dumps({"output": str(args.output), "sha256": sha(block)}))
 

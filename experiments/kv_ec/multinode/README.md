@@ -46,9 +46,9 @@ ibstat
 ls -l /dev/infiniband
 ```
 
-The current development container has `libibverbs`, `librdmacm`, and headers,
-but `ibv_devinfo` reports no IB devices and `/dev/infiniband` is absent. The
-real verbs path has not been exercised here. Check firewall and route access
+The current development container does not provide the verbs headers or an
+active HCA (`/dev/infiniband` is absent), so the native path is **NOT VERIFIED**
+here. Check firewall and route access
 for TCP ports 19470, 19471, and 19472 with the cluster administrator.
 
 ## Paired two-node commands
@@ -62,6 +62,7 @@ PYTHONPATH="$PWD" python -m experiments.kv_ec.multinode.worker \
   --transport rdma --control-host 0.0.0.0 --control-port 19470 \
   --data-host 0.0.0.0 --data-port 19471 \
   --return-host NODE_A_IP --return-port 19472 --rdma-device mlx5_0 \
+  --rdma-gid-index 3 --rdma-port-num 1 \
   --d0-bytes 1048576 --d1-bytes 1048576 \
   --experiment-id rs21-exp-001 --stripe-id stripe-0001 \
   --checkpoint-version cp-001 --output /data/rs21/node-b/run-001
@@ -74,6 +75,7 @@ cd /path/to/sglangec
 PYTHONPATH="$PWD" python -m experiments.kv_ec.multinode.coordinator \
   --transport rdma --node-b NODE_B_IP --control-port 19470 --data-port 19471 \
   --return-bind-host 0.0.0.0 --return-port 19472 --rdma-device mlx5_0 \
+  --rdma-gid-index 5 --rdma-port-num 1 \
   --d0-bytes 1048576 --d1-bytes 1048576 \
   --experiment-id rs21-exp-001 --stripe-id stripe-0001 \
   --checkpoint-version cp-001 --output /data/rs21/node-a/run-001
@@ -122,6 +124,7 @@ each size once with TCP and once with RDMA. Set both `--d0-bytes` and
 | 1 MiB | 1048576 |
 | 4 MiB | 4194304 |
 | 16 MiB | 16777216 |
+| 32 MiB | 33554432 |
 | 64 MiB | 67108864 |
 
 Output directories must be unique. `verify_stripe` rejects missing data,
@@ -135,7 +138,10 @@ raw `D0.bin`, padded RS buffers `D0.padded.bin` and `D1.padded.bin`, and `P.bin`
 It fsyncs the three padded blocks before publishing the committed JSON. JSON includes transport,
 global stripe identity, per-block source/role/length/padding/codec/checksum,
 checkpoint state, placement, erasure proofs, latency, transferred bytes,
-process CPU, and Host DRAM/RSS.
+process CPU, and Host DRAM/RSS. RDMA rows additionally include the selected
+device/GID/port, local and remote QP numbers, CQ completion status, device/QP/MR
+setup timings, exchange/completion timing, and helper-reported payload bytes;
+TCP control bytes are not counted as RDMA payload.
 
 - `rs_encode_ms`: Node B CPU RS encode wall time.
 - `rs_decode_ms`: maximum of the three individual CPU erasure check intervals.
