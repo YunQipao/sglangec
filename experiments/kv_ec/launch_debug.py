@@ -62,6 +62,7 @@ def main():
     p.add_argument("--tp", type=int, choices=(1, 2, 4), required=True)
     p.add_argument("--gpus", required=True, help="PCI ordered GPU indices, e.g. 0 or 0,1,2,3")
     p.add_argument("--port", type=int, default=30281)
+    p.add_argument("--host", default="127.0.0.1", help="inference HTTP bind address")
     p.add_argument("--model", default="/media/sda1/iic_data/luotao/models/Qwen3-8B")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--snapshot-id", required=True)
@@ -124,7 +125,7 @@ def main():
         p.error("snapshot directory exists; use a new snapshot-id (never overwrite evidence)")
     # Read-only readiness check: not an authorization to take over this port.
     try:
-        port_status = check_port(args.port)
+        port_status = check_port(args.port, args.host)
     except (OSError, ValueError) as exc:
         p.error(str(exc))
     print(f"Port {args.port}: {port_status}", flush=True)
@@ -176,7 +177,7 @@ def main():
     # Both protected modes use identical inference settings; only protection
     # validation/transport work differs. FAST_PARITY remains experimental.
     argv = [sys.executable, "-m", "sglang.launch_server", "--model-path", args.model,
-            "--host", "127.0.0.1", "--port", str(args.port), "--tp-size", str(args.tp),
+            "--host", args.host, "--port", str(args.port), "--tp-size", str(args.tp),
             "--mem-fraction-static", str(args.mem_fraction_static),
             "--context-length", str(args.context_length), "--dtype", "bfloat16",
             "--kv-cache-dtype", "auto", "--page-size", "1", "--attention-backend", "triton",

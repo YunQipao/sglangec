@@ -1,0 +1,680 @@
+{
+  "utc": "2026-10-24T12:50:38.832767+00:00",
+  "environment": {
+    "git": {
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "returncode": 0,
+      "stdout": "cf7a3ee35eb3c02349b59d9003b274e4cdd13de1\n",
+      "stderr": ""
+    },
+    "git_status": {
+      "argv": [
+        "git",
+        "status",
+        "--porcelain"
+      ],
+      "returncode": 0,
+      "stdout": " M experiments/kv_ec/launch_debug.py\n?? experiments/kv_ec/DUAL_NODE_REMOTE_RS.md\n?? experiments/kv_ec/dual_node_check.py\n?? experiments/kv_ec/dual_node_rs.py\n?? experiments/kv_ec/node_block_export.py\n?? experiments/kv_ec/remote_rs_client.py\n?? experiments/kv_ec/remote_rs_protocol.py\n?? experiments/kv_ec/remote_rs_server.py\n?? experiments/kv_ec/rs_codec.py\n?? experiments/kv_ec/rs_experiment.py\n?? experiments/kv_ec/rs_fault_recovery.py\n?? experiments/kv_ec/rs_stripe_builder.py\n?? experiments/kv_ec/serving_impact.py\n?? experiments/kv_ec/test_dual_node_launch.py\n?? experiments/kv_ec/test_remote_rs.py\n?? experiments/kv_ec/test_rs_experiments.py\n?? experiments/kv_ec/validate_remote_rs.py\n",
+      "stderr": ""
+    },
+    "tracked_diff_sha256": "a142482beb2be31778be99c805fa01568dab9bc16d9754d31c770fbed822a3a2",
+    "implementation_sha256": {
+      "__init__.py": "30477fbc489efb597dcc30c2c197188d245b90a74993c0eba5cd57e3d960be53",
+      "accept_m3.py": "c6bc601aebc508a113f3ebd50353404dc389a0f1a47561270896c08565605996",
+      "accept_pause.py": "cf62ebdec52088c08677047db3ffcc96626c27a600773ec9dadc0995c4af88f3",
+      "accept_scratch.py": "5b2146cd635c1c9f42f546620f547d9b0354be2ce7e4267334d24429f43ad7ff",
+      "async_protection.py": "035bdc8954b680b8b071c8f6116fa83071ed1c5753310f7dd48059c24b1b5f57",
+      "benchmark.py": "081f3aa4797fea85b8367931f5c9879b3464fdb65ac7e9907cee125aaf77cf28",
+      "capture_plan.py": "4b909d16d0c2339833a1a2327e1a38c505b943ee212ba7c9928f062a6ebd4b99",
+      "capture_timing.py": "3022c74eaccfeb3a2195042f3c7844375bfaffda6e317b561a727e3f5162a709",
+      "checkpoint_protocol.py": "1583ccf28b538d7d7cd6e2c7fde3e38f3a8a3b0114b2008b6a212faf234962d1",
+      "chunk_protection.py": "3f1329e93f929adc0bef3c92889c2ef1c96a65e68ae703c2d084b459b3aa5033",
+      "complete_prefill.py": "a87e12917f2fa665b8e38ccd9ef9eb077203a2914a94b63e6255bf9fb0a92ff1",
+      "cross_rank_control.py": "14569c0bb556a979d0c7b2524c6f9d1f768cd4c098049e3ba0fa06d2dbae574f",
+      "cross_rank_lease.py": "c7f5e9552e7a56be3e09ad3983292011dd967c16f9c4a9af291a2e6e38e6c843",
+      "cross_rank_worker.py": "bb6009bab66ea85e537090ed33f87118fe13bbc28773ea4c93625983544474fc",
+      "debug_capture.py": "c4479acc1d19531e7eb571dea7ddc4fd7bbbde0c9cc2debb598bf955d798c5a5",
+      "dual_node_check.py": "ec7049a59daeef21dcfc70d6cce413cb9313d9aa64c888450e6ecb7d5245cc62",
+      "dual_node_rs.py": "9937a000b03b38aee949b4f805211067776e0f70907bb0cdd61eb4251bcf7d17",
+      "gateway_client.py": "7af2cc058b620e10aa83806efed89694ee95e6c17efaed5563e74716ebacfe53",
+      "gateway_pipeline.py": "8472fd7047b37fd9805f31eb26cd23cbf6ab4176e27a51c845266cf6a3421b4d",
+      "gateway_protocol.py": "fad2d420e953b49952bcb8a44ea13e831f84ade75b9ce6c99494b8ede6470f24",
+      "gateway_server.py": "a3bab150b233da2de9be04c828be860d41ee7570bbbed03b9f2cec17e809071b",
+      "gpu_memory_budget.py": "64ee118c71eb36d33050b77e829d858bbda5fc60ad07a1502b671d4bd6620abf",
+      "gpu_scratch_restore.py": "453ae90114d3c31e47fc10a578e6d94bb2d5d06dcc78a4f1ac189d41b0e5fa90",
+      "kv_pool_audit.py": "e7a2a6cf1dd4d299695eeefc41304f2e2ce9a9ee05d37bc9b09b90942cf51585",
+      "launch_debug.py": "4f6abe6da5ffcda468a5288b2f0a35beb5b719bac86154ea92afd9be0e9e2e5f",
+      "logical_nodes.py": "2f7299ab5b97fe7c23a50dda26eb7f20f846a1d4ef46c0cec240318e689d6627",
+      "m3_performance.py": "c0fa3e80e9acfe14c672c79ccce9d633e3dd79640f87b17e3d1bbe730753301b",
+      "m3_recovery.py": "7e03364c5029ab969aeccb6404106a7b3346542cc4c9fe4ad279156bbe9716dd",
+      "m4_abcd.py": "f6121647d9728c4f8143742efaab775c3cab3f4d7393dfc7fafa39ddcea32db1",
+      "m4_analysis.py": "fb911b0c718a514e5d6b2b4f9d5654dbc7f3d377549c32731c22aaa68feb0f2e",
+      "m4_trials.py": "df8452189265a60029085b1543db048e40cd36dfae82e62ed4083698e7d82e68",
+      "m5_analysis.py": "a8a81a7a4de3037f3eab314a22dc2f9c35c792f9a0ee8c0ebde8dcd7420af380",
+      "m5_capture_profile.py": "11994bff9e94184aa9cddbac5317925b6c496e1a989fd189ffeba7b5a62629b9",
+      "m5_compare.py": "053950b73ff350174d1ba4cf2fd3506c0c8d7e4cb524128b523cc1912758ecb0",
+      "m6_abe.py": "77501b03279838300bb69e817780f6971cae0ec492ea3914153b890de802ab05",
+      "m6_acceptance.py": "19cafb482285bcb13f9e23b93b916c8cc70ccd096c140647fecf5beec610b004",
+      "node_block_export.py": "6b727f5af476ebe943e98a37fa78531648e10531e8d2383c4bcf6cf63ffe1f81",
+      "parity_manager.py": "bc035cf3854b1538cc5b58a657e3e8ed059e29b9c7d97f439d6db164a7b730e0",
+      "pause_control.py": "503be4d624c48e8ea90bbc57483debf49c2ee9a7dc3e5711e69e411df521a6f7",
+      "post_resume_recovery.py": "81ee71dcaa80b59c84cd9e26e8c679d49fdddff09c17de776f6663a37ce1d461",
+      "prepare_scratch.py": "9a9c2af39684aeec1e879067e195224b164651e6880f11cbdf7e595652dd476f",
+      "profile_requests.py": "5b9dcd0f28e5986ba3e92631c4849e47e8ac3d183337491f72d0e64d68d5f43f",
+      "rank_snapshot.py": "2dfab370e46c6256486a0278b8ef2f59188699c8ee1a0a0c3a2021c085ca32b8",
+      "recovery_lease.py": "00487b30070dcd53d5b7ac422a25b07a81ec92302097353b207d8f991821cead",
+      "recovery_policy.py": "99b16021858783f2d00f2423c7a5918bf6264ab810420bdc53843ba97cdf6f44",
+      "remote_rs_client.py": "ac5ff79aca9ce7319f8239f2ff0f98eee5793832c43ee58dd3b32ff605a38da6",
+      "remote_rs_protocol.py": "94d402e1a786a4146e33c901958601aa58fb9b1cf9f54c631ef134b2f513b543",
+      "remote_rs_server.py": "d6f11004c1ca3f7c6fa12d78c9b7a61f356b9bb4ffa0d0a1d97fd454674fba01",
+      "request_debug.py": "decb703d257e08eae2afc4300342debe62e717cb6a12066061ec2db118b1aa04",
+      "rs_codec.py": "8df232306925f4cd3fc8faec061f1f1086197cd240212df490e1504dfd4304d8",
+      "rs_experiment.py": "3a762906b72ac72b4cb9ee655ca267af1886a50aec4ef2ba8eedbd9b8d320abb",
+      "rs_fault_recovery.py": "3edf7f8865041a5c72806f7b0ad399eea792329bb718cde9536fe4d273a441fa",
+      "rs_stripe_builder.py": "ef2eeb1b09b0e352de879cffade4c18b0b440f5ee16758cd102916e2d90553b4",
+      "scheduler_async.py": "ae5f4bd83189db34fc674e25af54ac664846b3298cec10fc3e7f2208e61afa88",
+      "scheduler_pause.py": "0dcb853a208c201a25f37f7de84acae34fa44af728debbce5e0d4daacb252ee8",
+      "scheduler_recovery_guard.py": "005a504ea5c7ae6294775652badb997157af419edd3571a1aeb925738f1b968f",
+      "scheduler_retry.py": "de23bf4d78597b246b7308adebddabfbdd9c2413edd577ae2f9b7f95ad7adc3e",
+      "scheduler_shadow.py": "c033e39ec13e2b324a5f8791f1d10320c9c77be21548caf3ae72bd0172b7c986",
+      "serving_impact.py": "286f82313b257143660a5e60a9cf5c221018eae58281b22163a8f97992f2e17c",
+      "snapshot.py": "dfce2930699d0e1cb7b021aff81906e0390109dc3bb5677f2735438f67594a8a",
+      "study_audit.py": "5e1bac994a41f00db7101a3e022cfbf96fce210cd93fbdcf280a5830cf51c132",
+      "study_validation.py": "334ce2bc654c77d009b7012597f3ff5f6af35965509468d82280f5c74592f4ad",
+      "summarize_online.py": "9027b7173119bebc3848eab8ddbc08aed25074045beefdbd05ff5f7e21ba2acc",
+      "test_accept_m3.py": "6323c149891a92fda086b25ebe9e12beb8c13e88f045ddb48b0b7dc3a78d5c63",
+      "test_accept_pause.py": "792412b84f9ed135c458ada3d50c998a36257c27130806e6582c467f95ab091b",
+      "test_capture_profiling.py": "6a99d344d99d901d881c7d3f8bdc3d504d5d15d6797e3994c32fd51b26aee3c2",
+      "test_chunk_protection.py": "10a37ca584e35ef6994cc37f66e9389bae227b4a4feb4857f89ffeb337a8ee9f",
+      "test_cross_rank_control.py": "0830533dfa4701a287e11bc17bda30c0b3d8486b5fca96e36f2f5c8fe0d0a546",
+      "test_cross_rank_lease.py": "4e72f302d43ed6519589b949501f136e9f2b0d7056be2ba2ca4b71a745cef8a2",
+      "test_debug_capture.py": "7c4253da1a0f7373c7d7a303def3aede14608bd7f9534b1726bdbfc844c43739",
+      "test_dual_node_launch.py": "db854f76f60c18621040cb068f33ced466edabb82633b3d7f08729c4e2f2c1b1",
+      "test_gateway_prototype.py": "a8e118b03cc04d0b117db9ea38210fc12d12906e3246667f97604a203ceb6b12",
+      "test_gpu_memory_budget.py": "3525990d39fad5d8d0a9c124b44699b4a2b75007a4be0f96f11c94c22fba9d00",
+      "test_gpu_scratch_restore.py": "2d1e0b23ea2d035f6f676d94612d43bd6e79011b8a9365cee6bf59b8dbdce5c8",
+      "test_kv_ec.py": "bd500f0d20ff0a80048b1a834c47782231e1b7c4d1410ffd98215e83bcebd7ae",
+      "test_kv_pool_audit.py": "4569d9d5f99369995e6f70017171f016353760457ca6898b7aa45b98fbaf7176",
+      "test_logical_nodes.py": "39f6c0a795c2fe4a9f68d426e8d165bec214c64f64f553ef2063f195355db7fb",
+      "test_m3_online.py": "bfd22ac289b38d0eab640a384a266ab58a68dbaa03731bc0f0973dcda545e160",
+      "test_m3_performance.py": "bb53ec08f9547657fd6f7b6b9f0f7c79032186e7d1c1a81a426440f1fcc310dc",
+      "test_m3_recovery.py": "eaff72b32544686cbe84c814c3264a27227e0176a555e5744bfd511df46a43d2",
+      "test_m4_abcd.py": "421f35954516612f86a08673ab0df6e7d0e88a81a244b667d3901b747d4251ab",
+      "test_m4_analysis.py": "9b69faa214f11e3bd1cc82e59344a17368cb63ba5721c4691780ad11713cb1e6",
+      "test_m5_capture_optimization.py": "4200aac0b7e307f30ffbeba38ee416c323fc7495ac63c02ba447fd262cb5796a",
+      "test_m5_compare.py": "7e8aa59e3b200232651309d932c5a1f912a4203f7ea1a933babd54c38dadad47",
+      "test_m5_profile.py": "b70de64c948c9cb2e820367ecffac9d38391eb51f9026498c2266ba856fe1f8d",
+      "test_m6_abe.py": "fb924c566da70356d48d1f0dc40cc356f424e6bbee9796807535e7534df53ae0",
+      "test_m6_async.py": "c2ed7ddd9d7e66b85a836d5e8e44d52a3c06a41bc1a10f3f03bd408623ca8cd1",
+      "test_m6b2_acceptance.py": "0b1c563180d5df56d0acd75cb8847113bc6e22819549611645d0d1863e8aeee6",
+      "test_online_restore.py": "8d7a9f677c28578a6b22adfdcf947b7c2460d7a9f5cec938e8386d1c9b210ed6",
+      "test_parity_manager.py": "53ee6b084c4e7d81cb2bea91e8905b8b9b51990380969573d3c553537a784b0f",
+      "test_post_resume_recovery.py": "3e2cfb806775634a2601f7e6af0ec94df008ed2353410925bf9200ea4e703f4f",
+      "test_recovery_lease.py": "22ff3ff1c38b3af9b4ee66526e1c84a12fd704684fe7e3472d57ce073e4d389a",
+      "test_recovery_policy.py": "7b21015eaa048a544ec39ac7cbfd8fb20ebc218851425741a287158e92b40884",
+      "test_remote_rs.py": "9ea36a051cf8646aec524fca601415f50eb780405cee7c3df3c225950ba3ef2c",
+      "test_request_debug.py": "78d7dd330ed6b01c26ac26e0d9f8bd445720290f13dc39ea1336d5b20fc7c1d5",
+      "test_rs_experiments.py": "caccf8438db3c1be2afadd6a25b0d2cc57e48172ea1241ef60225e40fe48ee72",
+      "test_scheduler_pause.py": "294c6ed3b7d243070c4cecdef2e656ace3d327b69565d3c3cfbb04206bcbc15b",
+      "test_scheduler_recovery_guard.py": "f4d0994ba1e5b2aca168b4c9a39af91355bd7aa837652c6f103c61169e11cc3a",
+      "test_scheduler_shadow.py": "97fe7a27614b6c585a2571a590ccd5179b7fe52dea95e3cd62f1a7bdf27249c3",
+      "test_scratch_pipeline.py": "bc36aa8daf2092f468d90f67e2c34e4bf619e5de6dc0748eb0d06cc2bfd6e89a",
+      "test_slot_lease_allocator.py": "7f6b3e27600ead13e7501d2ec75790a2f7175341fb7e9d49c743550fd9a3ed08",
+      "test_study_validation.py": "c887618c67e9bdbebed58604d527da36ef389c64db29c2d001fe5ba42c9b0224",
+      "validate_remote_rs.py": "a3d3e6322f37c7b1f3868b4591f393bfe9e2b6af6db43dda7c3bd631954018c9",
+      "verify_logical_rank_logs.py": "95ac1da875d5ce79447ba7865f53445069a4a3294993b75bded22b03ad96ceff",
+      "xor_codec.py": "062217951fdfdaf1b93e8ead55588848d731fa31a2b4fac50384f9916e8753ae"
+    },
+    "gpu": {
+      "argv": [
+        "nvidia-smi",
+        "--query-gpu=index,uuid,pci.bus_id,name,memory.total",
+        "--format=csv"
+      ],
+      "returncode": 9,
+      "stdout": "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running.\n\n",
+      "stderr": ""
+    },
+    "pcie_topology": {
+      "argv": [
+        "nvidia-smi",
+        "topo",
+        "-m"
+      ],
+      "returncode": 9,
+      "stdout": "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running.\n\n",
+      "stderr": ""
+    },
+    "uname": {
+      "argv": [
+        "uname",
+        "-a"
+      ],
+      "returncode": 0,
+      "stdout": "Linux disai-4090-3 6.8.0-146-generic #146-Ubuntu SMP PREEMPT_DYNAMIC Thu Sep  3 16:12:30 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\n",
+      "stderr": ""
+    }
+  },
+  "stages": {
+    "M1": {
+      "argv": [
+        "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+        "-m",
+        "unittest",
+        "experiments.kv_ec.test_dual_node_launch",
+        "experiments.kv_ec.test_parity_manager",
+        "-v"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_host_default_and_memory_fraction_preserved (experiments.kv_ec.test_dual_node_launch.LaunchTests.test_host_default_and_memory_fraction_preserved) ... ok\ntest_port_probe_uses_requested_host (experiments.kv_ec.test_dual_node_launch.LaunchTests.test_port_probe_uses_requested_host) ... ok\ntest_reject_shared_manager_before_io (experiments.kv_ec.test_dual_node_launch.LaunchTests.test_reject_shared_manager_before_io) ... ok\ntest_async_queue_full_is_nonblocking_and_explicit (experiments.kv_ec.test_parity_manager.IpcTests.test_async_queue_full_is_nonblocking_and_explicit) ... ok\ntest_async_queue_owns_data_and_metadata (experiments.kv_ec.test_parity_manager.IpcTests.test_async_queue_owns_data_and_metadata) ... ok\ntest_empty_payload_sends_header_only (experiments.kv_ec.test_parity_manager.IpcTests.test_empty_payload_sends_header_only) ... ok\ntest_nonempty_payload_still_sends_header_and_payload (experiments.kv_ec.test_parity_manager.IpcTests.test_nonempty_payload_still_sends_header_and_payload) ... ok\ntest_protocol_roundtrip_with_partial_reads (experiments.kv_ec.test_parity_manager.IpcTests.test_protocol_roundtrip_with_partial_reads) ... ok\ntest_real_socket_empty_request_fast_response_and_close (experiments.kv_ec.test_parity_manager.IpcTests.test_real_socket_empty_request_fast_response_and_close) ... skipped 'sandbox disallows socketpair writes'\ntest_real_socket_partial_reads_and_early_disconnect (experiments.kv_ec.test_parity_manager.IpcTests.test_real_socket_partial_reads_and_early_disconnect) ... skipped 'sandbox disallows socketpair writes'\ntest_submit_once_normalizes_numpy_and_reuses_owned_bytes (experiments.kv_ec.test_parity_manager.IpcTests.test_submit_once_normalizes_numpy_and_reuses_owned_bytes) ... ok\ntest_unix_socket_service_commits_without_files (experiments.kv_ec.test_parity_manager.IpcTests.test_unix_socket_service_commits_without_files) ... \n  test_unix_socket_service_commits_without_files (experiments.kv_ec.test_parity_manager.IpcTests.test_unix_socket_service_commits_without_files) (tp=2) ... skipped 'sandbox disallows Unix domain sockets'\n  test_unix_socket_service_commits_without_files (experiments.kv_ec.test_parity_manager.IpcTests.test_unix_socket_service_commits_without_files) (tp=4) ... skipped 'sandbox disallows Unix domain sockets'\ntest_corruption_and_layout_mismatch_fail_before_commit (experiments.kv_ec.test_parity_manager.ManagerTests.test_corruption_and_layout_mismatch_fail_before_commit) ... KV_EC parity submission failed (ValueError)\nok\ntest_corruption_fails_existing_pending_checkpoint (experiments.kv_ec.test_parity_manager.ManagerTests.test_corruption_fails_existing_pending_checkpoint) ... KV_EC parity submission failed (ValueError)\nok\ntest_deferred_fast_checksum_corruption_fails_closed (experiments.kv_ec.test_parity_manager.ManagerTests.test_deferred_fast_checksum_corruption_fails_closed) ... KV_EC parity submission failed (ValueError)\nok\ntest_deferred_fast_checksum_is_derived_and_committed (experiments.kv_ec.test_parity_manager.ManagerTests.test_deferred_fast_checksum_is_derived_and_committed) ... ok\ntest_different_snapshot_ids_never_mix (experiments.kv_ec.test_parity_manager.ManagerTests.test_different_snapshot_ids_never_mix) ... ok\ntest_duplicate_rank_and_metadata_mismatch_fail (experiments.kv_ec.test_parity_manager.ManagerTests.test_duplicate_rank_and_metadata_mismatch_fail) ... ok\ntest_four_rank_commit_releases_inputs_and_keeps_only_parity (experiments.kv_ec.test_parity_manager.ManagerTests.test_four_rank_commit_releases_inputs_and_keeps_only_parity) ... ok\ntest_input_mutation_after_submit_does_not_change_owned_copy (experiments.kv_ec.test_parity_manager.ManagerTests.test_input_mutation_after_submit_does_not_change_owned_copy) ... ok\ntest_live_request_epoch_is_bound_to_manager_process (experiments.kv_ec.test_parity_manager.ManagerTests.test_live_request_epoch_is_bound_to_manager_process) ... KV_EC parity submission failed (ValueError)\nok\ntest_missing_rank_expires (experiments.kv_ec.test_parity_manager.ManagerTests.test_missing_rank_expires) ... ok\ntest_pending_capacity_is_explicit (experiments.kv_ec.test_parity_manager.ManagerTests.test_pending_capacity_is_explicit) ... ok\ntest_test_only_oracle_recovers_all_ranks (experiments.kv_ec.test_parity_manager.ManagerTests.test_test_only_oracle_recovers_all_ranks) ... ok\ntest_tp2_commit_and_each_erasure_releases_sources (experiments.kv_ec.test_parity_manager.ManagerTests.test_tp2_commit_and_each_erasure_releases_sources) ... ok\ntest_tp2_duplicates_corruption_and_identity_mismatches (experiments.kv_ec.test_parity_manager.ManagerTests.test_tp2_duplicates_corruption_and_identity_mismatches) ... KV_EC parity submission failed (ValueError)\nok\ntest_tp2_invalid_rank_or_version_never_commits (experiments.kv_ec.test_parity_manager.ManagerTests.test_tp2_invalid_rank_or_version_never_commits) ... KV_EC parity submission failed (ValueError)\nKV_EC parity submission failed (ValueError)\nKV_EC parity submission failed (ValueError)\nKV_EC parity submission failed (ValueError)\nok\ntest_tp2_missing_rank_expires (experiments.kv_ec.test_parity_manager.ManagerTests.test_tp2_missing_rank_expires) ... ok\ntest_tp2_tp4_all_layer_sizes_and_all_erasures (experiments.kv_ec.test_parity_manager.ManagerTests.test_tp2_tp4_all_layer_sizes_and_all_erasures) ... ok\ntest_tp2_tp4_cannot_mix_in_either_order (experiments.kv_ec.test_parity_manager.ManagerTests.test_tp2_tp4_cannot_mix_in_either_order) ... ok\ntest_tp2_wrong_runtime_shape_is_rejected (experiments.kv_ec.test_parity_manager.ManagerTests.test_tp2_wrong_runtime_shape_is_rejected) ... KV_EC parity submission failed (ValueError)\nok\ntest_transient_oracle_releases_full_data (experiments.kv_ec.test_parity_manager.ManagerTests.test_transient_oracle_releases_full_data) ... ok\n\n----------------------------------------------------------------------\nRan 32 tests in 5.286s\n\nOK (skipped=4)\n",
+      "elapsed_s": 7.067674417048693,
+      "state": "PASS",
+      "tests": 32,
+      "skipped": 4
+    },
+    "M2": {
+      "argv": [
+        "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+        "-m",
+        "unittest",
+        "experiments.kv_ec.test_remote_rs",
+        "-v"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_fragmentation_counters_and_checksum (experiments.kv_ec.test_remote_rs.ProtocolTests.test_fragmentation_counters_and_checksum) ... ok\ntest_GF_matrix_padding_and_two_erasures (experiments.kv_ec.test_remote_rs.StoreTests.test_GF_matrix_padding_and_two_erasures) ... ok\ntest_commit_release_exact_recovery_and_idempotence (experiments.kv_ec.test_remote_rs.StoreTests.test_commit_release_exact_recovery_and_idempotence) ... ok\ntest_corrupt_parity_and_survivor_detected (experiments.kv_ec.test_remote_rs.StoreTests.test_corrupt_parity_and_survivor_detected) ... ok\ntest_expiry_releases_and_tombstones (experiments.kv_ec.test_remote_rs.StoreTests.test_expiry_releases_and_tombstones) ... ok\ntest_manifest_mixed_chunk_request_and_reservation (experiments.kv_ec.test_remote_rs.StoreTests.test_manifest_mixed_chunk_request_and_reservation) ... ok\ntest_pack_roundtrip_cpu_ownership_and_real_gate (experiments.kv_ec.test_remote_rs.StoreTests.test_pack_roundtrip_cpu_ownership_and_real_gate) ... ok\ntest_payload_and_version_conflicts_never_pollute_pending (experiments.kv_ec.test_remote_rs.StoreTests.test_payload_and_version_conflicts_never_pollute_pending) ... ok\ntest_reports_never_overwrite (experiments.kv_ec.test_remote_rs.StoreTests.test_reports_never_overwrite) ... ok\ntest_uncommitted_and_missing_parity_refused (experiments.kv_ec.test_remote_rs.StoreTests.test_uncommitted_and_missing_parity_refused) ... ok\ntest_real_tcp_end_to_end_fixtures (experiments.kv_ec.test_remote_rs.TCPIntegrationTests.test_real_tcp_end_to_end_fixtures) ... skipped 'NOT VERIFIED: kernel TCP bind forbidden: [Errno 1] Operation not permitted'\ntest_real_tcp_truncation_timeout_and_retry (experiments.kv_ec.test_remote_rs.TCPIntegrationTests.test_real_tcp_truncation_timeout_and_retry) ... skipped 'NOT VERIFIED: kernel TCP bind forbidden: [Errno 1] Operation not permitted'\n\n----------------------------------------------------------------------\nRan 12 tests in 0.102s\n\nOK (skipped=2)\n",
+      "elapsed_s": 1.8824111088179052,
+      "state": "PASS",
+      "tests": 12,
+      "skipped": 2
+    },
+    "M3_M4": {
+      "argv": [
+        "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+        "-m",
+        "unittest",
+        "experiments.kv_ec.test_rs_experiments",
+        "-v"
+      ],
+      "returncode": 0,
+      "stdout": "PASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\n",
+      "stderr": "test_comparison_requires_exact_request_outputs_and_offline_label (experiments.kv_ec.test_rs_experiments.ExperimentTests.test_comparison_requires_exact_request_outputs_and_offline_label) ... ok\ntest_cpu_usage_and_scoped_process_sampling (experiments.kv_ec.test_rs_experiments.ExperimentTests.test_cpu_usage_and_scoped_process_sampling) ... ok\ntest_no_ec_mock_driver_writes_json_csv_and_null_protection (experiments.kv_ec.test_rs_experiments.ExperimentTests.test_no_ec_mock_driver_writes_json_csv_and_null_protection) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 0.022s\n\nOK\n",
+      "elapsed_s": 0.13139493484050035,
+      "state": "PASS",
+      "tests": 3,
+      "skipped": 0
+    },
+    "full_regression": {
+      "argv": [
+        "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "experiments/kv_ec",
+        "-p",
+        "test_*.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "stdout": "trial-ecwarmup-1 ec_warmup xor_ms= 1.0 commit_ms= 3.0\nrank 0 capture_ms 1.1 unaccounted_ms 0.1 top wall regions [('work', 1.0)]\nrank 1 capture_ms 1.1 unaccounted_ms 0.1 top wall regions [('work', 1.0)]\ntrial-measure-1 measurement xor_ms= 1.0 commit_ms= 3.0\nrank 0 capture_ms 1.1 unaccounted_ms 0.1 top wall regions [('work', 1.0)]\nrank 1 capture_ms 1.1 unaccounted_ms 0.1 top wall regions [('work', 1.0)]\ntrial-measure-2 measurement xor_ms= 1.0 commit_ms= 3.0\nrank 0 capture_ms 1.1 unaccounted_ms 0.1 top wall regions [('work', 1.0)]\nrank 1 capture_ms 1.1 unaccounted_ms 0.1 top wall regions [('work', 1.0)]\n{\n  \"ttft_ms\": {\n    \"median\": 10.0,\n    \"p95\": 10.0,\n    \"n\": 2\n  },\n  \"tpot_ms\": {\n    \"median\": 2.0,\n    \"p95\": 2.0,\n    \"n\": 2\n  },\n  \"request_total_ms\": {\n    \"median\": 40.0,\n    \"p95\": 40.0,\n    \"n\": 2\n  }\n}\nPASS: request plan completed /tmp/tmp4bss7cjf/trial-profile-summary.json\nShared GPU debug memory admission: [{\"gpu_index\": \"0\"}, {\"gpu_index\": \"1\"}, {\"gpu_index\": \"2\"}, {\"gpu_index\": \"3\"}]\nPort 30281: available\nStarting isolated baseline server; shared_gpu_debug= True no existing workers will be stopped or modified.\nPort 30281: available\nKV_EC model fingerprint initialized before server startup: 0.03756396472454071 ms\nStarting isolated parity server; shared_gpu_debug= False no existing workers will be stopped or modified.\nPort 30281: available\nKV_EC model fingerprint initialized before server startup: 0.03898795694112778 ms\nStarting isolated parity server; shared_gpu_debug= False no existing workers will be stopped or modified.\nPort 30281: available\nStarting isolated baseline server; shared_gpu_debug= False no existing workers will be stopped or modified.\nM4_RUN=/tmp/tmpbex537bo/new\nB_protection_only=NOT_IMPLEMENTED D_prefill_retry=NOT_IMPLEMENTED\nM3_AUDIT_PASS=true; starting complete CPU regression\nreason=ValueError: CPU_regression_failed_no_GPU_trial_launched\nM4_AC_PASS=false\nEvidence: /tmp/tmpbex537bo/new\nM4_RUN=/tmp/tmp0c5z0ddt/new\nB_protection_only=NOT_IMPLEMENTED D_prefill_retry=NOT_IMPLEMENTED\nM3_AUDIT_PASS=true; starting complete CPU regression\nCPU_PASS=true\nSTART repeat=1/3 rank=0 tokens=256\nreason=ValueError: GPU_trial_failed:/tmp/tmp0c5z0ddt/new/repeat1-rank0-tokens256:; later_trials_not_run\nM4_AC_PASS=false\nEvidence: /tmp/tmp0c5z0ddt/new\nABCD_PASS=false Evidence: /tmp/tmptwv0wouy/study\nValueError: profiled_smoke_not_performance_admission\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\nPASS: identical artificial input and exact output token sequence/finish reason\n",
+      "stderr": "test_cpu_failure_starts_no_gpu_case (test_accept_m3.M3MatrixTests.test_cpu_failure_starts_no_gpu_case) ... ok\ntest_failure_in_b_never_runs_c_or_remaining_cases (test_accept_m3.M3MatrixTests.test_failure_in_b_never_runs_c_or_remaining_cases) ... ok\ntest_full_order_and_smoke (test_accept_m3.M3MatrixTests.test_full_order_and_smoke) ... ok\ntest_both_ports_checked_before_spawn_and_conflict_kills_nobody (test_accept_pause.AcceptanceTests.test_both_ports_checked_before_spawn_and_conflict_kills_nobody) ... ok\ntest_busy_gpu_never_starts_or_stops_existing_processes (test_accept_pause.AcceptanceTests.test_busy_gpu_never_starts_or_stops_existing_processes) ... ok\ntest_distinct_ports_defaults_alias_and_explicit_values (test_accept_pause.AcceptanceTests.test_distinct_ports_defaults_alias_and_explicit_values) ... ok\ntest_identical_tokens_do_not_allow_sampling_mismatch (test_accept_pause.AcceptanceTests.test_identical_tokens_do_not_allow_sampling_mismatch) ... ok\ntest_incomplete_or_failed_rank_evidence_is_rejected (test_accept_pause.AcceptanceTests.test_incomplete_or_failed_rank_evidence_is_rejected) ... ok\ntest_missing_authorization_allocator_error_and_unbound_response_reject (test_accept_pause.AcceptanceTests.test_missing_authorization_allocator_error_and_unbound_response_reject) ... ok\ntest_offline_cli_never_checks_or_starts_gpu_processes (test_accept_pause.AcceptanceTests.test_offline_cli_never_checks_or_starts_gpu_processes) ... ok\ntest_read_only_audit_accepts_complete_matching_evidence (test_accept_pause.AcceptanceTests.test_read_only_audit_accepts_complete_matching_evidence) ... ok\ntest_real_listener_is_rejected_even_with_reuseaddr (test_accept_pause.AcceptanceTests.test_real_listener_is_rejected_even_with_reuseaddr) ... skipped 'sandbox disallows TCP sockets'\ntest_reuseaddr_probe_preserves_errors_and_does_not_reuseport (test_accept_pause.AcceptanceTests.test_reuseaddr_probe_preserves_errors_and_does_not_reuseport) ... ok\ntest_runtime_failure_categories (test_accept_pause.AcceptanceTests.test_runtime_failure_categories) ... ok\ntest_server_and_client_urls_use_their_own_ports (test_accept_pause.AcceptanceTests.test_server_and_client_urls_use_their_own_ports) ... ok\ntest_shadow_pause_startup_failure_retains_errno_and_only_cleans_owned_children (test_accept_pause.AcceptanceTests.test_shadow_pause_startup_failure_retains_errno_and_only_cleans_owned_children) ... ok\ntest_unavailable_gpu_reports_fail_without_starting_processes (test_accept_pause.AcceptanceTests.test_unavailable_gpu_reports_fail_without_starting_processes) ... ok\ntest_bounded_unique_plan (test_capture_profiling.ProfilingTests.test_bounded_unique_plan) ... ok\ntest_cpu_profile_exclusive_output_is_readable (test_capture_profiling.ProfilingTests.test_cpu_profile_exclusive_output_is_readable) ... ok\ntest_cuda_event_metrics_are_separate_from_wall_accounting (test_capture_profiling.ProfilingTests.test_cuda_event_metrics_are_separate_from_wall_accounting) ... ok\ntest_enqueue_copies_attempted_even_when_full_and_reuses_bytes (test_capture_profiling.ProfilingTests.test_enqueue_copies_attempted_even_when_full_and_reuses_bytes) ... ok\ntest_exclusive_wall_and_thread_cpu (test_capture_profiling.ProfilingTests.test_exclusive_wall_and_thread_cpu) ... ok\ntest_full_capture_cpu_backed_both_transfers_and_validation_modes (test_capture_profiling.ProfilingTests.test_full_capture_cpu_backed_both_transfers_and_validation_modes) ... ok\ntest_pinned_failure_does_not_silently_fallback_or_enqueue (test_capture_profiling.ProfilingTests.test_pinned_failure_does_not_silently_fallback_or_enqueue) ... ok\ntest_request_plan_only_matches_explicit_ids_once (test_capture_profiling.ProfilingTests.test_request_plan_only_matches_explicit_ids_once) ... ok\ntest_request_runner_separates_warmups_and_validates_all_ranks (test_capture_profiling.ProfilingTests.test_request_runner_separates_warmups_and_validates_all_ranks) ... ok\ntest_metadata_only_or_incomplete_chunk_is_not_protected (test_chunk_protection.ChunkProtectionTests.test_metadata_only_or_incomplete_chunk_is_not_protected) ... ok\ntest_mixed_version_checkpoint_and_range_are_rejected (test_chunk_protection.ChunkProtectionTests.test_mixed_version_checkpoint_and_range_are_rejected) ... ok\ntest_three_committed_chunks_form_complete_prefill (test_chunk_protection.ChunkProtectionTests.test_three_committed_chunks_form_complete_prefill) ... ok\ntest_control_dispatches_all_rank_protocol (test_cross_rank_control.CrossRankControlTests.test_control_dispatches_all_rank_protocol) ... ok\ntest_duplicate_and_unknown_messages_are_errors (test_cross_rank_control.CrossRankControlTests.test_duplicate_and_unknown_messages_are_errors) ... ok\ntest_four_worker_client_calls_wait_for_actual_release_acks (test_cross_rank_control.CrossRankControlTests.test_four_worker_client_calls_wait_for_actual_release_acks) ... ok\ntest_live_manager_epoch_change_rejects_control_messages (test_cross_rank_control.CrossRankControlTests.test_live_manager_epoch_change_rejects_control_messages) ... ok\ntest_parallel_epoch_checks_allow_rank_three_to_finish_before_rank_two (test_cross_rank_control.CrossRankControlTests.test_parallel_epoch_checks_allow_rank_three_to_finish_before_rank_two) ... ok\ntest_real_socket_client_disconnect_has_no_uncaught_handler_error (test_cross_rank_control.CrossRankControlTests.test_real_socket_client_disconnect_has_no_uncaught_handler_error) ... skipped 'sandbox disallows Unix domain sockets'\ntest_real_socket_parallel_epoch_checks_do_not_hold_dispatch_lock (test_cross_rank_control.CrossRankControlTests.test_real_socket_parallel_epoch_checks_do_not_hold_dispatch_lock) ... skipped 'sandbox disallows Unix domain sockets'\ntest_real_unix_socket_four_rank_worker_handshake (test_cross_rank_control.CrossRankControlTests.test_real_unix_socket_four_rank_worker_handshake) ... skipped 'sandbox disallows Unix domain sockets'\ntest_socket_handler_dispatches_without_real_socket (test_cross_rank_control.CrossRankControlTests.test_socket_handler_dispatches_without_real_socket) ... ok\ntest_worker_failure_cleans_locally_without_global_success (test_cross_rank_control.CrossRankControlTests.test_worker_failure_cleans_locally_without_global_success) ... ok\ntest_any_rank_failure_blocks_global_release_until_abort_acks (test_cross_rank_lease.CrossRankLeaseTests.test_any_rank_failure_blocks_global_release_until_abort_acks) ... ok\ntest_duplicate_transition_messages_are_idempotent (test_cross_rank_lease.CrossRankLeaseTests.test_duplicate_transition_messages_are_idempotent) ... ok\ntest_full_state_machine_requires_all_ranks (test_cross_rank_lease.CrossRankLeaseTests.test_full_state_machine_requires_all_ranks) ... ok\ntest_global_release_waits_for_four_real_release_acknowledgements (test_cross_rank_lease.CrossRankLeaseTests.test_global_release_waits_for_four_real_release_acknowledgements) ... ok\ntest_incremental_prepare_rejects_mismatch_and_duplicate (test_cross_rank_lease.CrossRankLeaseTests.test_incremental_prepare_rejects_mismatch_and_duplicate) ... ok\ntest_incremental_prepare_uses_one_rank_local_observation (test_cross_rank_lease.CrossRankLeaseTests.test_incremental_prepare_uses_one_rank_local_observation) ... ok\ntest_late_rank_cannot_revive_expired_prepare (test_cross_rank_lease.CrossRankLeaseTests.test_late_rank_cannot_revive_expired_prepare) ... ok\ntest_metadata_mismatch_and_manager_restart_fail_closed (test_cross_rank_lease.CrossRankLeaseTests.test_metadata_mismatch_and_manager_restart_fail_closed) ... ok\ntest_partial_release_failure_never_reports_global_success (test_cross_rank_lease.CrossRankLeaseTests.test_partial_release_failure_never_reports_global_success) ... ok\ntest_timeout_does_not_allow_global_release (test_cross_rank_lease.CrossRankLeaseTests.test_timeout_does_not_allow_global_release) ... ok\ntest_disabled_is_noop_and_only_target_is_captured (test_debug_capture.LifetimeTests.test_disabled_is_noop_and_only_target_is_captured) ... ok\ntest_invalid_lifetimes_and_ranges (test_debug_capture.LifetimeTests.test_invalid_lifetimes_and_ranges) ... ok\ntest_logical_slot_order_and_no_source_mutation (test_debug_capture.LifetimeTests.test_logical_slot_order_and_no_source_mutation) ... ok\ntest_runtime_bridge_failure_is_local_and_does_not_raise (test_debug_capture.LifetimeTests.test_runtime_bridge_failure_is_local_and_does_not_raise) ... KV_EC_DEBUG rejected rank=0 reason=AttributeError; inference continues\nok\ntest_shared_gpu_mode_is_opt_in_and_reaches_launcher_budget_check (test_debug_capture.LifetimeTests.test_shared_gpu_mode_is_opt_in_and_reaches_launcher_budget_check) ... ok\ntest_supported_guard (test_debug_capture.LifetimeTests.test_supported_guard) ... ok\ntest_tp2_launcher_parity_modes_and_baseline (test_debug_capture.LifetimeTests.test_tp2_launcher_parity_modes_and_baseline) ... ok\ntest_unsafe_modes_rejected_before_pool_read (test_debug_capture.LifetimeTests.test_unsafe_modes_rejected_before_pool_read) ... ok\ntest_reject_corruption_and_shape_metadata (test_debug_capture.RankFormatTests.test_reject_corruption_and_shape_metadata) ... ok\ntest_reject_missing_rank_or_mismatched_capture (test_debug_capture.RankFormatTests.test_reject_missing_rank_or_mismatched_capture) ... ok\ntest_tp1_and_tp4_layer0_and_36_layers (test_debug_capture.RankFormatTests.test_tp1_and_tp4_layer0_and_36_layers) ... ok\ntest_actual_prefill_method_continues_after_capture_error (test_debug_capture.RealCallPathTests.test_actual_prefill_method_continues_after_capture_error) ... KV_EC_DEBUG rejected rank=0 reason=test_rejected; inference continues\nok\ntest_chunk_plan_captures_contiguous_independent_snapshots (test_debug_capture.RealCallPathTests.test_chunk_plan_captures_contiguous_independent_snapshots) ... ok\ntest_default_disabled_and_non_target_never_capture (test_debug_capture.RealCallPathTests.test_default_disabled_and_non_target_never_capture) ... ok\ntest_existing_evidence_is_not_overwritten_and_inference_continues (test_debug_capture.RealCallPathTests.test_existing_evidence_is_not_overwritten_and_inference_continues) ... ok\ntest_minimal_original_frozen_slots_failure (test_debug_capture.RealCallPathTests.test_minimal_original_frozen_slots_failure) ... ok\ntest_one_attempt_per_snapshot_request_rank_and_process (test_debug_capture.RealCallPathTests.test_one_attempt_per_snapshot_request_rank_and_process) ... ok\ntest_pdmux_rejected_from_server_args (test_debug_capture.RealCallPathTests.test_pdmux_rejected_from_server_args) ... ok\ntest_real_capture_guard_rejection_is_reported (test_debug_capture.RealCallPathTests.test_real_capture_guard_rejection_is_reported) ... KV_EC_DEBUG rejected rank=0 reason=overlap_not_supported; inference continues\nok\ntest_real_frozen_fields_lifetime_and_success_delegation (test_debug_capture.RealCallPathTests.test_real_frozen_fields_lifetime_and_success_delegation) ... ok\ntest_source_identity_actual_checkout_path (test_debug_capture.RealCallPathTests.test_source_identity_actual_checkout_path) ... ok\ntest_tp1_tp4_failure_sidecars_and_no_retry (test_debug_capture.RealCallPathTests.test_tp1_tp4_failure_sidecars_and_no_retry) ... KV_EC_DEBUG rejected rank=0 reason=test_rejected; inference continues\nKV_EC_DEBUG rejected rank=0 reason=test_rejected; inference continues\nKV_EC_DEBUG rejected rank=1 reason=test_rejected; inference continues\nKV_EC_DEBUG rejected rank=2 reason=test_rejected; inference continues\nKV_EC_DEBUG rejected rank=3 reason=test_rejected; inference continues\nok\ntest_host_default_and_memory_fraction_preserved (test_dual_node_launch.LaunchTests.test_host_default_and_memory_fraction_preserved) ... ok\ntest_port_probe_uses_requested_host (test_dual_node_launch.LaunchTests.test_port_probe_uses_requested_host) ... ok\ntest_reject_shared_manager_before_io (test_dual_node_launch.LaunchTests.test_reject_shared_manager_before_io) ... ok\ntest_a_c_xor_byte_exact_and_c_emits_incrementally (test_gateway_prototype.GatewayPrototypeTest.test_a_c_xor_byte_exact_and_c_emits_incrementally) ... ok\ntest_conflicting_duplicate_is_rejected (test_gateway_prototype.GatewayPrototypeTest.test_conflicting_duplicate_is_rejected) ... skipped 'sandbox denies TCP sockets; run on target Linux host'\ntest_epoch_mismatch_is_rejected (test_gateway_prototype.GatewayPrototypeTest.test_epoch_mismatch_is_rejected) ... skipped 'sandbox denies TCP sockets; run on target Linux host'\ntest_protocol_rejects_oversized_and_inconsistent_chunks (test_gateway_prototype.GatewayPrototypeTest.test_protocol_rejects_oversized_and_inconsistent_chunks) ... ok\ntest_real_loopback_relay_and_idempotent_retry (test_gateway_prototype.GatewayPrototypeTest.test_real_loopback_relay_and_idempotent_retry) ... skipped 'sandbox denies TCP sockets; run on target Linux host'\ntest_stream_aggregator_emits_before_full_checkpoint_arrives (test_gateway_prototype.GatewayPrototypeTest.test_stream_aggregator_emits_before_full_checkpoint_arrives) ... ok\ntest_budget_reports_other_tasks_without_managing_them (test_gpu_memory_budget.GPUMemoryBudgetTests.test_budget_reports_other_tasks_without_managing_them) ... ok\ntest_each_gpu_is_checked_individually_not_by_average (test_gpu_memory_budget.GPUMemoryBudgetTests.test_each_gpu_is_checked_individually_not_by_average) ... ok\ntest_estimate_contains_runtime_and_ec_reserves (test_gpu_memory_budget.GPUMemoryBudgetTests.test_estimate_contains_runtime_and_ec_reserves) ... ok\ntest_parse_per_gpu_memory_rows (test_gpu_memory_budget.GPUMemoryBudgetTests.test_parse_per_gpu_memory_rows) ... ok\ntest_static_fraction_too_low_for_weights_is_rejected (test_gpu_memory_budget.GPUMemoryBudgetTests.test_static_fraction_too_low_for_weights_is_rejected) ... ok\ntest_control_plane_evidence_is_not_a_gpu_snapshot (test_gpu_scratch_restore.ScratchRestoreTests.test_control_plane_evidence_is_not_a_gpu_snapshot) ... ok\ntest_gpu_is_required_and_never_falls_back_to_cpu (test_gpu_scratch_restore.ScratchRestoreTests.test_gpu_is_required_and_never_falls_back_to_cpu) ... ok\ntest_real_manifest_and_all_rank_payloads_validate (test_gpu_scratch_restore.ScratchRestoreTests.test_real_manifest_and_all_rank_payloads_validate) ... ok\ntest_split_rejects_truncated_payload (test_gpu_scratch_restore.ScratchRestoreTests.test_split_rejects_truncated_payload) ... ok\ntest_three_chunk_sequence_requires_contiguous_ranges (test_gpu_scratch_restore.ScratchRestoreTests.test_three_chunk_sequence_requires_contiguous_ranges) ... ok\ntest_tp2_snapshot_load_and_each_scratch_restore_dispatch (test_gpu_scratch_restore.ScratchRestoreTests.test_tp2_snapshot_load_and_each_scratch_restore_dispatch) ... ok\ntest_metadata_and_corruption_rejected (test_kv_ec.SnapshotTests.test_metadata_and_corruption_rejected) ... ok\ntest_roundtrip_and_recovery (test_kv_ec.SnapshotTests.test_roundtrip_and_recovery) ... ok\ntest_all_half_bit_patterns (test_kv_ec.XorTests.test_all_half_bit_patterns) ... ok\ntest_fail_closed (test_kv_ec.XorTests.test_fail_closed) ... ok\ntest_required_sizes_all_erasure_positions (test_kv_ec.XorTests.test_required_sizes_all_erasure_positions) ... ok\ntest_chunk_group_rejects_mixed_version_and_gap (test_kv_pool_audit.KVPoolAuditTests.test_chunk_group_rejects_mixed_version_and_gap) ... ok\ntest_mapping_is_read_only_and_records_row_generation (test_kv_pool_audit.KVPoolAuditTests.test_mapping_is_read_only_and_records_row_generation) ... ok\ntest_mapping_rejects_free_row_duplicate_and_stale_generation (test_kv_pool_audit.KVPoolAuditTests.test_mapping_rejects_free_row_duplicate_and_stale_generation) ... ok\ntest_three_chunks_are_contiguous_and_same_request_version (test_kv_pool_audit.KVPoolAuditTests.test_three_chunks_are_contiguous_and_same_request_version) ... ok\ntest_writeback_is_explicitly_blocked (test_kv_pool_audit.KVPoolAuditTests.test_writeback_is_explicitly_blocked) ... ok\ntest_rejects_partial_or_duplicate_gpu_allocation (test_logical_nodes.LogicalNodeLayoutTest.test_rejects_partial_or_duplicate_gpu_allocation) ... ok\ntest_requested_two_node_global_tp4_mapping (test_logical_nodes.LogicalNodeLayoutTest.test_requested_two_node_global_tp4_mapping) ... ok\ntest_runtime_rank_vote_requires_every_tp_rank_on_expected_node (test_logical_nodes.LogicalNodeLayoutTest.test_runtime_rank_vote_requires_every_tp_rank_on_expected_node) ... ok\ntest_every_rank_and_token_range_executes_live_target_path (test_m3_online.M3LivePathTests.test_every_rank_and_token_range_executes_live_target_path) ... ok\ntest_m3_auditor_requires_each_chunk_and_actual_target_evidence (test_m3_online.M3LivePathTests.test_m3_auditor_requires_each_chunk_and_actual_target_evidence) ... ok\ntest_second_chunk_failure_rolls_back_all_modified_ranges_and_keeps_lease (test_m3_online.M3LivePathTests.test_second_chunk_failure_rolls_back_all_modified_ranges_and_keeps_lease) ... ok\ntest_survivors_never_inject_or_write_for_any_target (test_m3_online.M3LivePathTests.test_survivors_never_inject_or_write_for_any_target) ... ok\ntest_mixed_config_is_rejected (test_m3_performance.M3PerformanceTests.test_mixed_config_is_rejected) ... ok\ntest_same_config_reports_median_and_p95 (test_m3_performance.M3PerformanceTests.test_same_config_reports_median_and_p95) ... ok\ntest_bad_version_generation_or_partial_write_fails_closed (test_m3_recovery.M3RecoveryPlanTests.test_bad_version_generation_or_partial_write_fails_closed) ... ok\ntest_duplicate_missing_and_wrong_target_chunks_are_rejected (test_m3_recovery.M3RecoveryPlanTests.test_duplicate_missing_and_wrong_target_chunks_are_rejected) ... ok\ntest_each_rank_uses_exactly_the_other_three_survivors (test_m3_recovery.M3RecoveryPlanTests.test_each_rank_uses_exactly_the_other_three_survivors) ... ok\ntest_resume_waits_for_all_chunks_and_accepts_out_of_order_proofs (test_m3_recovery.M3RecoveryPlanTests.test_resume_waits_for_all_chunks_and_accepts_out_of_order_proofs) ... ok\ntest_supported_ranges_are_contiguous_and_fixed_size (test_m3_recovery.M3RecoveryPlanTests.test_supported_ranges_are_contiguous_and_fixed_size) ... ok\ntest_B_record_preserves_client_note_and_protection_timing (test_m4_abcd.PerformanceRecordTests.test_B_record_preserves_client_note_and_protection_timing) ... ok\ntest_D_record_preserves_client_note_and_fault_timing (test_m4_abcd.PerformanceRecordTests.test_D_record_preserves_client_note_and_fault_timing) ... ok\ntest_B_four_rank_committed_checkpoint_interlock (test_m4_abcd.ProtectionTests.test_B_four_rank_committed_checkpoint_interlock) ... ok\ntest_B_run_only_revalidates_committed_source_without_recovery (test_m4_abcd.ProtectionTests.test_B_run_only_revalidates_committed_source_without_recovery) ... ok\ntest_default_off_and_invalid_env (test_m4_abcd.ProtectionTests.test_default_off_and_invalid_env) ... ok\ntest_production_commit_rejects_oracle_work_and_bad_hash (test_m4_abcd.ProtectionTests.test_production_commit_rejects_oracle_work_and_bad_hash) ... ok\ntest_handoff_never_releases_an_unvalidated_lease (test_m4_abcd.RetryAllocatorTests.test_handoff_never_releases_an_unvalidated_lease) ... ok\ntest_normal_release_reallocate_and_new_lease_with_actual_allocator (test_m4_abcd.RetryAllocatorTests.test_normal_release_reallocate_and_new_lease_with_actual_allocator) ... ok\ntest_scope_and_stream_history (test_m4_abcd.RetryAllocatorTests.test_scope_and_stream_history) ... ok\ntest_bad_target_fault_or_lease_proof_rejected (test_m4_abcd.RetryCoordinatorTests.test_bad_target_fault_or_lease_proof_rejected) ... ok\ntest_conflicting_modes_and_duplicate_handoff_are_fail_closed (test_m4_abcd.RetryCoordinatorTests.test_conflicting_modes_and_duplicate_handoff_are_fail_closed) ... ok\ntest_four_rank_handoff_and_rebuild_before_external_authorization (test_m4_abcd.RetryCoordinatorTests.test_four_rank_handoff_and_rebuild_before_external_authorization) ... ok\ntest_rebuild_may_not_skip_generation_history_or_kv_checks (test_m4_abcd.RetryCoordinatorTests.test_rebuild_may_not_skip_generation_history_or_kv_checks) ... ok\ntest_B_D_driver_failure_cannot_start_servers_or_claim_validation (test_m4_abcd.StudyTests.test_B_D_driver_failure_cannot_start_servers_or_claim_validation) ... ok\ntest_CPU_failure_starts_no_GPU_mode (test_m4_abcd.StudyTests.test_CPU_failure_starts_no_GPU_mode) ... ok\ntest_four_distinct_modes_and_incomplete_study_rejected (test_m4_abcd.StudyTests.test_four_distinct_modes_and_incomplete_study_rejected) ... ok\ntest_three_repeats_require_successful_smoke (test_m4_abcd.StudyTests.test_three_repeats_require_successful_smoke) ... ok\ntest_missing_matrix_case_rejected (test_m4_analysis.M4SavedGPUAuditTests.test_missing_matrix_case_rejected) ... ok\ntest_real_matrix_reaudits_without_cuda_or_subprocess (test_m4_analysis.M4SavedGPUAuditTests.test_real_matrix_reaudits_without_cuda_or_subprocess) ... ok\ntest_report_has_raw_observations_not_quantiles (test_m4_analysis.M4SavedGPUAuditTests.test_report_has_raw_observations_not_quantiles) ... ok\ntest_saved_performance_tamper_rejected (test_m4_analysis.M4SavedGPUAuditTests.test_saved_performance_tamper_rejected) ... ok\ntest_cpu_failure_starts_no_gpu_acceptance (test_m4_analysis.M4StatisticsTests.test_cpu_failure_starts_no_gpu_acceptance) ... ok\ntest_duplicate_trials_and_config_drift_rejected (test_m4_analysis.M4StatisticsTests.test_duplicate_trials_and_config_drift_rejected) ... ok\ntest_experiments_only_revision_change_requires_identical_measured_files_and_core (test_m4_analysis.M4StatisticsTests.test_experiments_only_revision_change_requires_identical_measured_files_and_core) ... ok\ntest_failed_gpu_trial_stops_remaining_repeats (test_m4_analysis.M4StatisticsTests.test_failed_gpu_trial_stops_remaining_repeats) ... ok\ntest_single_and_pilot_never_claim_stable_median_p95 (test_m4_analysis.M4StatisticsTests.test_single_and_pilot_never_claim_stable_median_p95) ... ok\ntest_ten_runs_require_pilot_before_work (test_m4_analysis.M4StatisticsTests.test_ten_runs_require_pilot_before_work) ... ok\ntest_late_layer_owner_layout_and_capacity_still_checked (test_m5_capture_optimization.CaptureOptimizationTests.test_late_layer_owner_layout_and_capacity_still_checked) ... ok\ntest_mapping_is_revalidated_on_every_capture (test_m5_capture_optimization.CaptureOptimizationTests.test_mapping_is_revalidated_on_every_capture) ... ok\ntest_one_mapping_scan_and_identical_layout_hashes_and_parity (test_m5_capture_optimization.CaptureOptimizationTests.test_one_mapping_scan_and_identical_layout_hashes_and_parity) ... ok\ntest_recovery_buffer_checks_do_not_reuse_capture_validation (test_m5_capture_optimization.CaptureOptimizationTests.test_recovery_buffer_checks_do_not_reuse_capture_validation) ... ok\ntest_configuration_and_profile_mismatch_rejected (test_m5_compare.ComparisonTests.test_configuration_and_profile_mismatch_rejected) ... ok\ntest_nonfinite_timing_and_thresholds_rejected (test_m5_compare.ComparisonTests.test_nonfinite_timing_and_thresholds_rejected) ... ok\ntest_positive_is_only_preliminary_and_sources_can_change (test_m5_compare.ComparisonTests.test_positive_is_only_preliminary_and_sources_can_change) ... ok\ntest_slowdown_and_C_regression_block_repeats (test_m5_compare.ComparisonTests.test_slowdown_and_C_regression_block_repeats) ... ok\ntest_device_times_are_not_host_blocking_times (test_m5_profile.CaptureProfileTests.test_device_times_are_not_host_blocking_times) ... ok\ntest_disabled_has_no_profiler_or_output_and_preserves_exception (test_m5_profile.CaptureProfileTests.test_disabled_has_no_profiler_or_output_and_preserves_exception) ... ok\ntest_enabled_cpu_trace_contains_no_tensor_values (test_m5_profile.CaptureProfileTests.test_enabled_cpu_trace_contains_no_tensor_values) ... USDT:2026-10-24 12:52:23 217:217 SyncActivityProfilerHandler.cpp:52] profiler_start\nUSDT:2026-10-24 12:52:23 217:217 SyncActivityProfilerHandler.cpp:59] profiler_stop\nERROR:2026-10-24 12:52:23 217:217 DeviceProperties.cpp:50] gpuGetDeviceCount failed with code 100\nok\ntest_overlapping_device_intervals_not_added (test_m5_profile.CaptureProfileTests.test_overlapping_device_intervals_not_added) ... ok\ntest_profiled_smoke_cannot_admit_performance_repeats (test_m5_profile.CaptureProfileTests.test_profiled_smoke_cannot_admit_performance_repeats) ... ok\ntest_real_packer_profile_preserves_every_byte_and_metadata (test_m5_profile.CaptureProfileTests.test_real_packer_profile_preserves_every_byte_and_metadata) ... USDT:2026-10-24 12:52:23 217:217 SyncActivityProfilerHandler.cpp:52] profiler_start\nUSDT:2026-10-24 12:52:23 217:217 SyncActivityProfilerHandler.cpp:59] profiler_stop\nok\ntest_relative_directory_rejected_before_function (test_m5_profile.CaptureProfileTests.test_relative_directory_rejected_before_function) ... ok\ntest_B_window_uses_same_prefill_origin_and_rejects_impossible_commit (test_m6_abe.M6StudyTests.test_B_window_uses_same_prefill_origin_and_rejects_impossible_commit) ... ok\ntest_CPU_failure_never_launches_any_GPU_mode (test_m6_abe.M6StudyTests.test_CPU_failure_never_launches_any_GPU_mode) ... ok\ntest_E_dirty_source_is_rejected_before_GPU_probe (test_m6_abe.M6StudyTests.test_E_dirty_source_is_rejected_before_GPU_probe) ... ok\ntest_artificial_delay_cannot_leak_into_performance (test_m6_abe.M6StudyTests.test_artificial_delay_cannot_leak_into_performance) ... ok\ntest_background_completion_is_not_added_to_request_total (test_m6_abe.M6StudyTests.test_background_completion_is_not_added_to_request_total) ... ok\ntest_incomplete_study_rejected_even_when_manifest_says_PASS (test_m6_abe.M6StudyTests.test_incomplete_study_rejected_even_when_manifest_says_PASS) ... ok\ntest_mode_normalization_removes_only_documented_async_settings (test_m6_abe.M6StudyTests.test_mode_normalization_removes_only_documented_async_settings) ... ok\ntest_offline_entry_cannot_launch_CPU_server_or_GPU (test_m6_abe.M6StudyTests.test_offline_entry_cannot_launch_CPU_server_or_GPU) ... ok\ntest_undelayed_performance_requires_smoke_before_CPU_or_GPU (test_m6_abe.M6StudyTests.test_undelayed_performance_requires_smoke_before_CPU_or_GPU) ... ok\ntest_A_B_E_identical_PASS_and_both_comparisons_anchor_A (test_m6_abe.M6SummaryComparisonTests.test_A_B_E_identical_PASS_and_both_comparisons_anchor_A) ... ok\ntest_B_E_equal_but_different_from_A_FAIL (test_m6_abe.M6SummaryComparisonTests.test_B_E_equal_but_different_from_A_FAIL) ... ok\ntest_B_output_different_FAIL (test_m6_abe.M6SummaryComparisonTests.test_B_output_different_FAIL) ... ok\ntest_E_output_different_FAIL (test_m6_abe.M6SummaryComparisonTests.test_E_output_different_FAIL) ... ok\ntest_input_sampling_model_count_finish_reason_still_strict (test_m6_abe.M6SummaryComparisonTests.test_input_sampling_model_count_finish_reason_still_strict) ... ok\ntest_missing_response_in_any_mode_FAIL (test_m6_abe.M6SummaryComparisonTests.test_missing_response_in_any_mode_FAIL) ... ok\ntest_original_summary_failure_reaudits_PASS_preserving_all_artifacts (test_m6_abe.M6SummaryComparisonTests.test_original_summary_failure_reaudits_PASS_preserving_all_artifacts) ... ok\ntest_reaudit_rejects_other_failure_incomplete_modes_or_bad_output (test_m6_abe.M6SummaryComparisonTests.test_reaudit_rejects_other_failure_incomplete_modes_or_bad_output) ... ok\ntest_actual_E_gate_releases_after_snapshot_then_decodes_before_commit (test_m6_async.AsyncGateTests.test_actual_E_gate_releases_after_snapshot_then_decodes_before_commit) ... ok\ntest_coordinator_waits_for_four_snapshot_proofs_but_never_parity (test_m6_async.AsyncGateTests.test_coordinator_waits_for_four_snapshot_proofs_but_never_parity) ... ok\ntest_incomplete_event_holds_real_slot_and_row_leases (test_m6_async.AsyncGateTests.test_incomplete_event_holds_real_slot_and_row_leases) ... ok\ntest_byte_budget_and_single_task_queue_include_inflight_work (test_m6_async.AsyncTests.test_byte_budget_and_single_task_queue_include_inflight_work) ... ok\ntest_cancel_ready_inflight_late_commit_and_after_commit_invalidate (test_m6_async.AsyncTests.test_cancel_ready_inflight_late_commit_and_after_commit_invalidate) ... ok\ntest_checkpoint_changes_between_ranks_fail_manager_not_reused (test_m6_async.AsyncTests.test_checkpoint_changes_between_ranks_fail_manager_not_reused) ... ok\ntest_fault_before_committed_fail_closed_and_rank_timing_skew (test_m6_async.AsyncTests.test_fault_before_committed_fail_closed_and_rank_timing_skew) ... ok\ntest_foreground_returns_while_worker_is_pending_and_commit_metrics_separate (test_m6_async.AsyncTests.test_foreground_returns_while_worker_is_pending_and_commit_metrics_separate) ... ok\ntest_incomplete_copy_wrong_hash_and_missing_generation_rejected (test_m6_async.AsyncTests.test_incomplete_copy_wrong_hash_and_missing_generation_rejected) ... ok\ntest_m7_test_barriers_hold_real_worker_lifecycle_states (test_m6_async.AsyncTests.test_m7_test_barriers_hold_real_worker_lifecycle_states) ... ok\ntest_m7_test_state_barrier_timeout_fails_worker_closed (test_m6_async.AsyncTests.test_m7_test_state_barrier_timeout_fails_worker_closed) ... ok\ntest_manager_error_and_timeout_never_become_recoverable (test_m6_async.AsyncTests.test_manager_error_and_timeout_never_become_recoverable) ... ok\ntest_normal_four_rank_byte_exact_parity_and_every_single_rank_recovery (test_m6_async.AsyncTests.test_normal_four_rank_byte_exact_parity_and_every_single_rank_recovery) ... ok\ntest_postcommit_stale_epoch_checkpoint_row_slots_and_request_rejected (test_m6_async.AsyncTests.test_postcommit_stale_epoch_checkpoint_row_slots_and_request_rejected) ... ok\ntest_snapshot_is_independent_immutable_bytes_and_deep_metadata (test_m6_async.AsyncTests.test_snapshot_is_independent_immutable_bytes_and_deep_metadata) ... ok\ntest_wire_envelopes_are_not_checkpoint_identity (test_m6_async.AsyncTests.test_wire_envelopes_are_not_checkpoint_identity) ... ok\ntest_accepts_real_rank0_restore_with_four_rank_vote (test_m6b2_acceptance.M6B2AcceptanceTests.test_accepts_real_rank0_restore_with_four_rank_vote) ... ok\ntest_rejects_missing_vote_or_byte_exact_proof (test_m6b2_acceptance.M6B2AcceptanceTests.test_rejects_missing_vote_or_byte_exact_proof) ... ok\ntest_rejects_wrong_fault_rank_and_missing_output (test_m6b2_acceptance.M6B2AcceptanceTests.test_rejects_wrong_fault_rank_and_missing_output) ... ok\ntest_coordinator_requires_preexisting_protection_and_all_rank_repair (test_online_restore.OnlineRestoreTests.test_coordinator_requires_preexisting_protection_and_all_rank_repair) ... ok\ntest_incomplete_cuda_fence_never_rolls_back_or_releases (test_online_restore.OnlineRestoreTests.test_incomplete_cuda_fence_never_rolls_back_or_releases) ... ok\ntest_no_preexisting_checkpoint_or_no_cuda_rejects_before_writes (test_online_restore.OnlineRestoreTests.test_no_preexisting_checkpoint_or_no_cuda_rejects_before_writes) ... ok\ntest_online_gpu_unavailable_never_starts_a_service (test_online_restore.OnlineRestoreTests.test_online_gpu_unavailable_never_starts_a_service) ... ok\ntest_online_verifier_requires_actual_target_fault_and_no_rollback_success (test_online_restore.OnlineRestoreTests.test_online_verifier_requires_actual_target_fault_and_no_rollback_success) ... ok\ntest_prepare_commit_then_fault_parity_restore_and_partial_write_rollback (test_online_restore.OnlineRestoreTests.test_prepare_commit_then_fault_parity_restore_and_partial_write_rollback) ... ok\ntest_scatter_and_fault_touch_only_current_mapped_chunk (test_online_restore.OnlineRestoreTests.test_scatter_and_fault_touch_only_current_mapped_chunk) ... ok\ntest_shadow_evidence_is_not_online_success_and_no_flag_is_implicit (test_online_restore.OnlineRestoreTests.test_shadow_evidence_is_not_online_success_and_no_flag_is_implicit) ... ok\ntest_async_queue_full_is_nonblocking_and_explicit (test_parity_manager.IpcTests.test_async_queue_full_is_nonblocking_and_explicit) ... ok\ntest_async_queue_owns_data_and_metadata (test_parity_manager.IpcTests.test_async_queue_owns_data_and_metadata) ... ok\ntest_empty_payload_sends_header_only (test_parity_manager.IpcTests.test_empty_payload_sends_header_only) ... ok\ntest_nonempty_payload_still_sends_header_and_payload (test_parity_manager.IpcTests.test_nonempty_payload_still_sends_header_and_payload) ... ok\ntest_protocol_roundtrip_with_partial_reads (test_parity_manager.IpcTests.test_protocol_roundtrip_with_partial_reads) ... ok\ntest_real_socket_empty_request_fast_response_and_close (test_parity_manager.IpcTests.test_real_socket_empty_request_fast_response_and_close) ... skipped 'sandbox disallows socketpair writes'\ntest_real_socket_partial_reads_and_early_disconnect (test_parity_manager.IpcTests.test_real_socket_partial_reads_and_early_disconnect) ... skipped 'sandbox disallows socketpair writes'\ntest_submit_once_normalizes_numpy_and_reuses_owned_bytes (test_parity_manager.IpcTests.test_submit_once_normalizes_numpy_and_reuses_owned_bytes) ... ok\ntest_unix_socket_service_commits_without_files (test_parity_manager.IpcTests.test_unix_socket_service_commits_without_files) ... \n  test_unix_socket_service_commits_without_files (test_parity_manager.IpcTests.test_unix_socket_service_commits_without_files) (tp=2) ... skipped 'sandbox disallows Unix domain sockets'\n  test_unix_socket_service_commits_without_files (test_parity_manager.IpcTests.test_unix_socket_service_commits_without_files) (tp=4) ... skipped 'sandbox disallows Unix domain sockets'\ntest_corruption_and_layout_mismatch_fail_before_commit (test_parity_manager.ManagerTests.test_corruption_and_layout_mismatch_fail_before_commit) ... KV_EC parity submission failed (ValueError)\nok\ntest_corruption_fails_existing_pending_checkpoint (test_parity_manager.ManagerTests.test_corruption_fails_existing_pending_checkpoint) ... KV_EC parity submission failed (ValueError)\nok\ntest_deferred_fast_checksum_corruption_fails_closed (test_parity_manager.ManagerTests.test_deferred_fast_checksum_corruption_fails_closed) ... KV_EC parity submission failed (ValueError)\nok\ntest_deferred_fast_checksum_is_derived_and_committed (test_parity_manager.ManagerTests.test_deferred_fast_checksum_is_derived_and_committed) ... ok\ntest_different_snapshot_ids_never_mix (test_parity_manager.ManagerTests.test_different_snapshot_ids_never_mix) ... ok\ntest_duplicate_rank_and_metadata_mismatch_fail (test_parity_manager.ManagerTests.test_duplicate_rank_and_metadata_mismatch_fail) ... ok\ntest_four_rank_commit_releases_inputs_and_keeps_only_parity (test_parity_manager.ManagerTests.test_four_rank_commit_releases_inputs_and_keeps_only_parity) ... ok\ntest_input_mutation_after_submit_does_not_change_owned_copy (test_parity_manager.ManagerTests.test_input_mutation_after_submit_does_not_change_owned_copy) ... ok\ntest_live_request_epoch_is_bound_to_manager_process (test_parity_manager.ManagerTests.test_live_request_epoch_is_bound_to_manager_process) ... KV_EC parity submission failed (ValueError)\nok\ntest_missing_rank_expires (test_parity_manager.ManagerTests.test_missing_rank_expires) ... ok\ntest_pending_capacity_is_explicit (test_parity_manager.ManagerTests.test_pending_capacity_is_explicit) ... ok\ntest_test_only_oracle_recovers_all_ranks (test_parity_manager.ManagerTests.test_test_only_oracle_recovers_all_ranks) ... ok\ntest_tp2_commit_and_each_erasure_releases_sources (test_parity_manager.ManagerTests.test_tp2_commit_and_each_erasure_releases_sources) ... ok\ntest_tp2_duplicates_corruption_and_identity_mismatches (test_parity_manager.ManagerTests.test_tp2_duplicates_corruption_and_identity_mismatches) ... KV_EC parity submission failed (ValueError)\nok\ntest_tp2_invalid_rank_or_version_never_commits (test_parity_manager.ManagerTests.test_tp2_invalid_rank_or_version_never_commits) ... KV_EC parity submission failed (ValueError)\nKV_EC parity submission failed (ValueError)\nKV_EC parity submission failed (ValueError)\nKV_EC parity submission failed (ValueError)\nok\ntest_tp2_missing_rank_expires (test_parity_manager.ManagerTests.test_tp2_missing_rank_expires) ... ok\ntest_tp2_tp4_all_layer_sizes_and_all_erasures (test_parity_manager.ManagerTests.test_tp2_tp4_all_layer_sizes_and_all_erasures) ... ok\ntest_tp2_tp4_cannot_mix_in_either_order (test_parity_manager.ManagerTests.test_tp2_tp4_cannot_mix_in_either_order) ... ok\ntest_tp2_wrong_runtime_shape_is_rejected (test_parity_manager.ManagerTests.test_tp2_wrong_runtime_shape_is_rejected) ... KV_EC parity submission failed (ValueError)\nok\ntest_transient_oracle_releases_full_data (test_parity_manager.ManagerTests.test_transient_oracle_releases_full_data) ... ok\ntest_all_committed_ready_ranks_enter_existing_b2_transaction (test_post_resume_recovery.PostResumeSchedulerTests.test_all_committed_ready_ranks_enter_existing_b2_transaction) ... ok\ntest_all_gather_timeout_fails_closed_before_any_lease (test_post_resume_recovery.PostResumeSchedulerTests.test_all_gather_timeout_fails_closed_before_any_lease) ... ok\ntest_changed_checkpoint_is_rejected_by_scheduler_path (test_post_resume_recovery.PostResumeSchedulerTests.test_changed_checkpoint_is_rejected_by_scheduler_path) ... ok\ntest_committed_state_records_unanimous_ec_policy (test_post_resume_recovery.PostResumeSchedulerTests.test_committed_state_records_unanimous_ec_policy) ... ok\ntest_committing_without_fault_continues_decode (test_post_resume_recovery.PostResumeSchedulerTests.test_committing_without_fault_continues_decode) ... ok\ntest_cuda_event_incomplete_fails_closed_and_releases_new_lease (test_post_resume_recovery.PostResumeSchedulerTests.test_cuda_event_incomplete_fails_closed_and_releases_new_lease) ... ok\ntest_default_off_preserves_resumed_scheduler_path (test_post_resume_recovery.PostResumeSchedulerTests.test_default_off_preserves_resumed_scheduler_path) ... ok\ntest_explicit_fault_before_commit_fails_closed_without_parity (test_post_resume_recovery.PostResumeSchedulerTests.test_explicit_fault_before_commit_fails_closed_without_parity) ... ok\ntest_live_manager_epoch_change_still_fails_closed_while_waiting (test_post_resume_recovery.PostResumeSchedulerTests.test_live_manager_epoch_change_still_fails_closed_while_waiting) ... ok\ntest_m7_committed_no_fault_control_continues_decode (test_post_resume_recovery.PostResumeSchedulerTests.test_m7_committed_no_fault_control_continues_decode) ... ok\ntest_m7_controlled_uncommitted_fault_states_fail_closed_without_parity (test_post_resume_recovery.PostResumeSchedulerTests.test_m7_controlled_uncommitted_fault_states_fail_closed_without_parity) ... ok\ntest_m7_fault_intent_disagreement_fails_closed_before_policy_vote (test_post_resume_recovery.PostResumeSchedulerTests.test_m7_fault_intent_disagreement_fails_closed_before_policy_vote) ... ok\ntest_m7_negative_acceptance_rejects_missing_or_inconsistent_proof (test_post_resume_recovery.PostResumeSchedulerTests.test_m7_negative_acceptance_rejects_missing_or_inconsistent_proof) ... ok\ntest_m7_no_fault_completed_request_records_unanimous_normal_completion (test_post_resume_recovery.PostResumeSchedulerTests.test_m7_no_fault_completed_request_records_unanimous_normal_completion) ... ok\ntest_m7_target_state_not_reached_is_explicit_not_pass (test_post_resume_recovery.PostResumeSchedulerTests.test_m7_target_state_not_reached_is_explicit_not_pass) ... ok\ntest_mixed_committing_and_committed_ranks_wait_without_recovery (test_post_resume_recovery.PostResumeSchedulerTests.test_mixed_committing_and_committed_ranks_wait_without_recovery) ... ok\ntest_post_resume_recapture_preserves_async_checkpoint_identity (test_post_resume_recovery.PostResumeSchedulerTests.test_post_resume_recapture_preserves_async_checkpoint_identity) ... ok\ntest_repeated_entry_does_not_create_a_second_lease (test_post_resume_recovery.PostResumeSchedulerTests.test_repeated_entry_does_not_create_a_second_lease) ... ok\ntest_request_cancelled_fails_closed_through_scheduler_tick (test_post_resume_recovery.PostResumeSchedulerTests.test_request_cancelled_fails_closed_through_scheduler_tick) ... ok\ntest_row_generation_change_still_fails_closed_while_waiting (test_post_resume_recovery.PostResumeSchedulerTests.test_row_generation_change_still_fails_closed_while_waiting) ... ok\ntest_scheduler_tick_runs_four_rank_transaction_and_fresh_lease (test_post_resume_recovery.PostResumeSchedulerTests.test_scheduler_tick_runs_four_rank_transaction_and_fresh_lease) ... ok\ntest_begin_blocks_free_and_reuse_until_commit (test_recovery_lease.RecoveryLeaseTests.test_begin_blocks_free_and_reuse_until_commit) ... ok\ntest_cuda_copy_incomplete_and_invalid_tp_are_rejected (test_recovery_lease.RecoveryLeaseTests.test_cuda_copy_incomplete_and_invalid_tp_are_rejected) ... ok\ntest_duplicate_operations_checkpoint_manager_and_copy_guards (test_recovery_lease.RecoveryLeaseTests.test_duplicate_operations_checkpoint_manager_and_copy_guards) ... ok\ntest_manager_epoch_and_checkpoint_version_are_bound (test_recovery_lease.RecoveryLeaseTests.test_manager_epoch_and_checkpoint_version_are_bound) ... ok\ntest_request_release_race_and_generation_change_fail_closed (test_recovery_lease.RecoveryLeaseTests.test_request_release_race_and_generation_change_fail_closed) ... ok\ntest_slot_reuse_and_rank_mismatch_are_rejected (test_recovery_lease.RecoveryLeaseTests.test_slot_reuse_and_rank_mismatch_are_rejected) ... ok\ntest_timeout_and_abort_release_slots (test_recovery_lease.RecoveryLeaseTests.test_timeout_and_abort_release_slots) ... ok\ntest_validated_lease_also_expires_before_commit (test_recovery_lease.RecoveryLeaseTests.test_validated_lease_also_expires_before_commit) ... ok\ntest_cancelled_request_fails_closed (test_recovery_policy.RecoveryPolicyTests.test_cancelled_request_fails_closed) ... ok\ntest_decode_not_observed_prefers_prefill_retry (test_recovery_policy.RecoveryPolicyTests.test_decode_not_observed_prefers_prefill_retry) ... ok\ntest_duplicate_fault_fails_closed (test_recovery_policy.RecoveryPolicyTests.test_duplicate_fault_fails_closed) ... ok\ntest_epoch_change_fails_closed (test_recovery_policy.RecoveryPolicyTests.test_epoch_change_fails_closed) ... ok\ntest_four_protection_states (test_recovery_policy.RecoveryPolicyTests.test_four_protection_states) ... ok\ntest_multi_or_missing_fault_rank_fails_closed (test_recovery_policy.RecoveryPolicyTests.test_multi_or_missing_fault_rank_fails_closed) ... ok\ntest_rank_preparation_divergence_fails_closed (test_recovery_policy.RecoveryPolicyTests.test_rank_preparation_divergence_fails_closed) ... ok\ntest_row_slot_generation_change_fails_closed (test_recovery_policy.RecoveryPolicyTests.test_row_slot_generation_change_fails_closed) ... ok\ntest_uncommitted_parity_never_used_even_if_available (test_recovery_policy.RecoveryPolicyTests.test_uncommitted_parity_never_used_even_if_available) ... ok\ntest_unknown_state_fails_closed (test_recovery_policy.RecoveryPolicyTests.test_unknown_state_fails_closed) ... ok\ntest_unsupported_token_range_fails_closed (test_recovery_policy.RecoveryPolicyTests.test_unsupported_token_range_fails_closed) ... ok\ntest_fragmentation_counters_and_checksum (test_remote_rs.ProtocolTests.test_fragmentation_counters_and_checksum) ... ok\ntest_GF_matrix_padding_and_two_erasures (test_remote_rs.StoreTests.test_GF_matrix_padding_and_two_erasures) ... ok\ntest_commit_release_exact_recovery_and_idempotence (test_remote_rs.StoreTests.test_commit_release_exact_recovery_and_idempotence) ... ok\ntest_corrupt_parity_and_survivor_detected (test_remote_rs.StoreTests.test_corrupt_parity_and_survivor_detected) ... ok\ntest_expiry_releases_and_tombstones (test_remote_rs.StoreTests.test_expiry_releases_and_tombstones) ... ok\ntest_manifest_mixed_chunk_request_and_reservation (test_remote_rs.StoreTests.test_manifest_mixed_chunk_request_and_reservation) ... ok\ntest_pack_roundtrip_cpu_ownership_and_real_gate (test_remote_rs.StoreTests.test_pack_roundtrip_cpu_ownership_and_real_gate) ... ok\ntest_payload_and_version_conflicts_never_pollute_pending (test_remote_rs.StoreTests.test_payload_and_version_conflicts_never_pollute_pending) ... ok\ntest_reports_never_overwrite (test_remote_rs.StoreTests.test_reports_never_overwrite) ... ok\ntest_uncommitted_and_missing_parity_refused (test_remote_rs.StoreTests.test_uncommitted_and_missing_parity_refused) ... ok\ntest_real_tcp_end_to_end_fixtures (test_remote_rs.TCPIntegrationTests.test_real_tcp_end_to_end_fixtures) ... skipped 'NOT VERIFIED: kernel TCP bind forbidden: [Errno 1] Operation not permitted'\ntest_real_tcp_truncation_timeout_and_retry (test_remote_rs.TCPIntegrationTests.test_real_tcp_truncation_timeout_and_retry) ... skipped 'NOT VERIFIED: kernel TCP bind forbidden: [Errno 1] Operation not permitted'\ntest_complete_responses_are_saved_and_comparable (test_request_debug.RequestDebugTests.test_complete_responses_are_saved_and_comparable) ... ok\ntest_failed_request_never_writes_success_record (test_request_debug.RequestDebugTests.test_failed_request_never_writes_success_record) ... ok\ntest_finish_reason_and_meta_info_are_checked (test_request_debug.RequestDebugTests.test_finish_reason_and_meta_info_are_checked) ... ok\ntest_output_must_have_16_integer_tokens (test_request_debug.RequestDebugTests.test_output_must_have_16_integer_tokens) ... ok\ntest_stream_requires_done_and_checks_terminal_event (test_request_debug.RequestDebugTests.test_stream_requires_done_and_checks_terminal_event) ... ok\ntest_transport_failures_are_explicit_and_never_saved (test_request_debug.RequestDebugTests.test_transport_failures_are_explicit_and_never_saved) ... ok\ntest_comparison_requires_exact_request_outputs_and_offline_label (test_rs_experiments.ExperimentTests.test_comparison_requires_exact_request_outputs_and_offline_label) ... ok\ntest_cpu_usage_and_scoped_process_sampling (test_rs_experiments.ExperimentTests.test_cpu_usage_and_scoped_process_sampling) ... ok\ntest_no_ec_mock_driver_writes_json_csv_and_null_protection (test_rs_experiments.ExperimentTests.test_no_ec_mock_driver_writes_json_csv_and_null_protection) ... ok\ntest_changed_observation_and_epoch_rejected (test_scheduler_pause.PauseCoordinatorTests.test_changed_observation_and_epoch_rejected) ... ok\ntest_incomplete_duplicate_failure_and_deadline_are_fail_closed (test_scheduler_pause.PauseCoordinatorTests.test_incomplete_duplicate_failure_and_deadline_are_fail_closed) ... ok\ntest_real_socket_concurrent_handshake_and_disconnect (test_scheduler_pause.PauseCoordinatorTests.test_real_socket_concurrent_handshake_and_disconnect) ... skipped 'sandbox disallows Unix domain sockets'\ntest_actual_event_loop_skips_selection_and_forward (test_scheduler_pause.SchedulerPauseTests.test_actual_event_loop_skips_selection_and_forward) ... ok\ntest_chunk_cache_post_prefill_prefix_is_not_historical_reuse (test_scheduler_pause.SchedulerPauseTests.test_chunk_cache_post_prefill_prefix_is_not_historical_reuse) ... ok\ntest_failures_never_resume_or_reuse (test_scheduler_pause.SchedulerPauseTests.test_failures_never_resume_or_reuse) ... ok\ntest_four_gates_hold_real_allocator_and_request_row_until_authorized (test_scheduler_pause.SchedulerPauseTests.test_four_gates_hold_real_allocator_and_request_row_until_authorized) ... ok\ntest_full_runtime_guard_and_specific_rejection_reasons (test_scheduler_pause.SchedulerPauseTests.test_full_runtime_guard_and_specific_rejection_reasons) ... ok\ntest_historical_or_unknown_prefill_prefix_is_rejected (test_scheduler_pause.SchedulerPauseTests.test_historical_or_unknown_prefill_prefix_is_rejected) ... ok\ntest_lifetime_guards_have_specific_safe_diagnostics (test_scheduler_pause.SchedulerPauseTests.test_lifetime_guards_have_specific_safe_diagnostics) ... ok\ntest_producer_fence_failure_retains_protections (test_scheduler_pause.SchedulerPauseTests.test_producer_fence_failure_retains_protections) ... ok\ntest_producer_fence_precedes_slot_lease_event (test_scheduler_pause.SchedulerPauseTests.test_producer_fence_precedes_slot_lease_event) ... ok\ntest_disabled_guard_is_noop (test_scheduler_recovery_guard.SchedulerRecoveryGuardTests.test_disabled_guard_is_noop) ... ok\ntest_enabled_guard_reports_read_only_block (test_scheduler_recovery_guard.SchedulerRecoveryGuardTests.test_enabled_guard_reports_read_only_block) ... ok\ntest_reads_real_mapping_but_blocks_writeback (test_scheduler_recovery_guard.SchedulerRecoveryGuardTests.test_reads_real_mapping_but_blocks_writeback) ... ok\ntest_scheduler_lease_rejects_generation_change (test_scheduler_recovery_guard.SchedulerRecoveryGuardTests.test_scheduler_lease_rejects_generation_change) ... ok\ntest_scheduler_lease_rejects_manager_epoch_change (test_scheduler_recovery_guard.SchedulerRecoveryGuardTests.test_scheduler_lease_rejects_manager_epoch_change) ... ok\ntest_scheduler_lease_roundtrip_revalidates_generation_and_releases (test_scheduler_recovery_guard.SchedulerRecoveryGuardTests.test_scheduler_lease_roundtrip_revalidates_generation_and_releases) ... ok\ntest_unsupported_runtime_modes_fail_closed (test_scheduler_recovery_guard.SchedulerRecoveryGuardTests.test_unsupported_runtime_modes_fail_closed) ... ok\ntest_committed_parity_reconstructs_from_only_three_survivors (test_scheduler_shadow.ShadowTests.test_committed_parity_reconstructs_from_only_three_survivors) ... ok\ntest_coordinator_requires_all_shadow_acks_before_authorizing (test_scheduler_shadow.ShadowTests.test_coordinator_requires_all_shadow_acks_before_authorizing) ... ok\ntest_four_gates_shadow_then_authorized_decode_preserves_lease_lifetime (test_scheduler_shadow.ShadowTests.test_four_gates_shadow_then_authorized_decode_preserves_lease_lifetime) ... ok\ntest_invalid_mapping_stride_or_owner_is_rejected (test_scheduler_shadow.ShadowTests.test_invalid_mapping_stride_or_owner_is_rejected) ... ok\ntest_m1_evidence_cannot_be_misreported_as_shadow_or_m2 (test_scheduler_shadow.ShadowTests.test_m1_evidence_cannot_be_misreported_as_shadow_or_m2) ... ok\ntest_no_cuda_and_online_switch_never_fall_back_to_live_writes (test_scheduler_shadow.ShadowTests.test_no_cuda_and_online_switch_never_fall_back_to_live_writes) ... ok\ntest_parity_export_is_version_bound_and_owns_bytes (test_scheduler_shadow.ShadowTests.test_parity_export_is_version_bound_and_owns_bytes) ... ok\ntest_parity_socket_handler_exports_payload_without_rank_retention (test_scheduler_shadow.ShadowTests.test_parity_socket_handler_exports_payload_without_rank_retention) ... ok\ntest_real_layout_packing_selects_requested_independent_chunk (test_scheduler_shadow.ShadowTests.test_real_layout_packing_selects_requested_independent_chunk) ... ok\ntest_real_layout_packing_uses_noncontiguous_physical_slot_order (test_scheduler_shadow.ShadowTests.test_real_layout_packing_uses_noncontiguous_physical_slot_order) ... ok\ntest_shadow_acceptance_checks_mapping_consensus_and_gpu_timing (test_scheduler_shadow.ShadowTests.test_shadow_acceptance_checks_mapping_consensus_and_gpu_timing) ... ok\ntest_shadow_driver_failure_reports_m2_false_without_starting_processes (test_scheduler_shadow.ShadowTests.test_shadow_driver_failure_reports_m2_false_without_starting_processes) ... ok\ntest_shadow_failure_keeps_existing_row_and_slot_lease (test_scheduler_shadow.ShadowTests.test_shadow_failure_keeps_existing_row_and_slot_lease) ... ok\ntest_shadow_version_disagreement_is_terminal (test_scheduler_shadow.ShadowTests.test_shadow_version_disagreement_is_terminal) ... ok\ntest_survivor_corruption_and_missing_oracles_rejected (test_scheduler_shadow.ShadowTests.test_survivor_corruption_and_missing_oracles_rejected) ... ok\ntest_deferred_corrupt_missing_and_failed_payloads_rejected (test_scratch_pipeline.ScratchPipelineTests.test_deferred_corrupt_missing_and_failed_payloads_rejected) ... ok\ntest_diagnostics_allowed_but_unknown_sidecar_rejected (test_scratch_pipeline.ScratchPipelineTests.test_diagnostics_allowed_but_unknown_sidecar_rejected) ... ok\ntest_persisted_rank_manifest_cannot_bypass_byte_checks (test_scratch_pipeline.ScratchPipelineTests.test_persisted_rank_manifest_cannot_bypass_byte_checks) ... ok\ntest_prepare_timeout_failure_and_invalid_counts (test_scratch_pipeline.ScratchPipelineTests.test_prepare_timeout_failure_and_invalid_counts) ... ok\ntest_three_chunk_preparation_restore_dispatch_and_acceptance (test_scratch_pipeline.ScratchPipelineTests.test_three_chunk_preparation_restore_dispatch_and_acceptance) ... ok\ntest_clear_rejects_active_lease_and_then_resets_generation (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_clear_rejects_active_lease_and_then_resets_generation) ... ok\ntest_close_is_fail_closed_and_does_not_reuse_protected_slot (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_close_is_fail_closed_and_does_not_reuse_protected_slot) ... ok\ntest_closed_registry_rejects_alloc_and_free (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_closed_registry_rejects_alloc_and_free) ... ok\ntest_completed_event_timeout_still_requires_explicit_abort (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_completed_event_timeout_still_requires_explicit_abort) ... ok\ntest_default_disabled_preserves_allocator (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_default_disabled_preserves_allocator) ... ok\ntest_enabled_path_runs_slot_checks (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_enabled_path_runs_slot_checks) ... ok\ntest_free_group_checks_protected_slots_before_mutating_pool (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_free_group_checks_protected_slots_before_mutating_pool) ... ok\ntest_generation_and_manager_epoch_fail_closed (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_generation_and_manager_epoch_fail_closed) ... ok\ntest_generation_increments_on_real_alloc_and_lease_blocks_free_reuse (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_generation_increments_on_real_alloc_and_lease_blocks_free_reuse) ... ok\ntest_registry_cannot_be_replaced_while_lease_is_active (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_registry_cannot_be_replaced_while_lease_is_active) ... ok\ntest_timeout_does_not_release_before_cuda_event (test_slot_lease_allocator.SlotLeaseAllocatorTests.test_timeout_does_not_release_before_cuda_event) ... ok\ntest_comparison_accepts_reaudit_and_rejects_hand_edited_report (test_study_validation.SavedStudyAuditTests.test_comparison_accepts_reaudit_and_rejects_hand_edited_report) ... ok\ntest_cpu_exit_zero_without_successful_log_rejected (test_study_validation.SavedStudyAuditTests.test_cpu_exit_zero_without_successful_log_rejected) ... ok\ntest_missing_source_history_is_INCONCLUSIVE_not_PASS (test_study_validation.SavedStudyAuditTests.test_missing_source_history_is_INCONCLUSIVE_not_PASS) ... ok\ntest_offline_CLI_never_runs_live_preflight (test_study_validation.SavedStudyAuditTests.test_offline_CLI_never_runs_live_preflight) ... ok\ntest_one_recovery_acceptance_FAIL_rejected (test_study_validation.SavedStudyAuditTests.test_one_recovery_acceptance_FAIL_rejected) ... ok\ntest_only_two_of_three_repeats_rejected (test_study_validation.SavedStudyAuditTests.test_only_two_of_three_repeats_rejected) ... ok\ntest_original_FAIL_reaudits_PASS_without_mutation_or_GPU (test_study_validation.SavedStudyAuditTests.test_original_FAIL_reaudits_PASS_without_mutation_or_GPU) ... ok\ntest_original_failed_manifest_cannot_be_used_as_original_PASS (test_study_validation.SavedStudyAuditTests.test_original_failed_manifest_cannot_be_used_as_original_PASS) ... ok\ntest_evidence_only_commit_and_missing_hashes_supplemented (test_study_validation.SourceProofTests.test_evidence_only_commit_and_missing_hashes_supplemented) ... ok\ntest_fingerprint_covers_all_requested_and_transitive_experiment_modules (test_study_validation.SourceProofTests.test_fingerprint_covers_all_requested_and_transitive_experiment_modules) ... ok\ntest_launch_parameter_changes_and_missing_parameters_rejected (test_study_validation.SourceProofTests.test_launch_parameter_changes_and_missing_parameters_rejected) ... ok\ntest_missing_git_or_dependency_is_inconclusive (test_study_validation.SourceProofTests.test_missing_git_or_dependency_is_inconclusive) ... ok\ntest_missing_recorded_source_anchors_is_not_treated_as_equality (test_study_validation.SourceProofTests.test_missing_recorded_source_anchors_is_not_treated_as_equality) ... ok\ntest_model_input_gpu_sampling_protection_and_software_changes_rejected (test_study_validation.SourceProofTests.test_model_input_gpu_sampling_protection_and_software_changes_rejected) ... ok\ntest_preflight_mismatch_starts_no_CPU_or_GPU_process (test_study_validation.SourceProofTests.test_preflight_mismatch_starts_no_CPU_or_GPU_process) ... ok\ntest_real_runtime_change_rejected_even_when_legacy_anchor_unchanged (test_study_validation.SourceProofTests.test_real_runtime_change_rejected_even_when_legacy_anchor_unchanged) ... ok\ntest_untracked_tracked_and_staged_source_changes_rejected (test_study_validation.SourceProofTests.test_untracked_tracked_and_staged_source_changes_rejected) ... ok\ntest_wrong_recorded_hash_and_non_evidence_diff_rejected (test_study_validation.SourceProofTests.test_wrong_recorded_hash_and_non_evidence_diff_rejected) ... ok\n\n----------------------------------------------------------------------\nRan 359 tests in 145.388s\n\nOK (skipped=14)\n",
+      "elapsed_s": 151.41966071887873,
+      "state": "PASS",
+      "tests": 359,
+      "skipped": 14
+    },
+    "compile": {
+      "argv": [
+        "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+        "-m",
+        "compileall",
+        "-q",
+        "experiments/kv_ec"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "",
+      "elapsed_s": 0.07589461095631123,
+      "state": "PASS",
+      "tests": null,
+      "skipped": 0
+    },
+    "cli_help": {
+      "launch_debug": {
+        "argv": [
+          "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+          "-m",
+          "experiments.kv_ec.launch_debug",
+          "--help"
+        ],
+        "returncode": 0,
+        "stdout": "usage: launch_debug.py [-h] --mode {baseline,capture,parity}\n                       [--parity-socket PARITY_SOCKET]\n                       [--protection-mode {DEBUG_SAFE,FAST_PARITY}] --tp\n                       {1,2,4} --gpus GPUS [--port PORT] [--host HOST]\n                       [--model MODEL] --output OUTPUT --snapshot-id\n                       SNAPSHOT_ID [--request-id REQUEST_ID]\n                       [--token-count {128,256,512}]\n                       [--chunk-size {128,256,512}] [--layers {0,all}]\n                       [--transfer {pinned,blocking}] [--profile-detail]\n                       [--cuda-events] [--cpu-profile]\n                       [--mem-fraction-static MEM_FRACTION_STATIC]\n                       [--context-length CONTEXT_LENGTH]\n                       [--allow-shared-gpu-debug] [--ec-warmups EC_WARMUPS]\n                       [--ec-repeat EC_REPEAT]\n\nForeground isolated baseline/capture server. Never terminates existing\nworkers.\n\noptions:\n  -h, --help            show this help message and exit\n  --mode {baseline,capture,parity}\n  --parity-socket PARITY_SOCKET\n  --protection-mode {DEBUG_SAFE,FAST_PARITY}\n                        parity validation mode; EC remains disabled in\n                        baseline\n  --tp {1,2,4}\n  --gpus GPUS           PCI ordered GPU indices, e.g. 0 or 0,1,2,3\n  --port PORT\n  --host HOST           inference HTTP bind address\n  --model MODEL\n  --output OUTPUT\n  --snapshot-id SNAPSHOT_ID\n  --request-id REQUEST_ID\n  --token-count {128,256,512}\n  --chunk-size {128,256,512}\n                        capture a complete prompt as independent logical\n                        chunks\n  --layers {0,all}\n  --transfer {pinned,blocking}\n                        safe D2H A/B; pinned allocation errors reject capture\n                        rather than silently changing mode\n  --profile-detail      per-layer wall/thread CPU timings (perturbs latency)\n  --cuda-events         diagnostic CUDA stream elapsed times, not additive CPU\n                        costs\n  --cpu-profile         cProfile capture only; diagnostic run, not latency\n                        benchmark\n  --mem-fraction-static MEM_FRACTION_STATIC\n  --context-length CONTEXT_LENGTH\n  --allow-shared-gpu-debug\n                        explicit debug-only mode; read-only per-GPU memory\n                        admission\n  --ec-warmups EC_WARMUPS\n  --ec-repeat EC_REPEAT\n                        explicit bounded capture plan, total warmups+repeat\n                        <=16\n",
+        "stderr": "",
+        "elapsed_s": 0.04699959699064493,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      "dual_node_check": {
+        "argv": [
+          "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+          "-m",
+          "experiments.kv_ec.dual_node_check",
+          "--help"
+        ],
+        "returncode": 0,
+        "stdout": "usage: dual_node_check.py [-h] [--node0-url NODE0_URL] --node0-socket\n                          NODE0_SOCKET --node0-snapshot NODE0_SNAPSHOT\n                          --node0-request NODE0_REQUEST\n                          [--node0-logs [NODE0_LOGS ...]]\n                          [--node1-url NODE1_URL] --node1-socket NODE1_SOCKET\n                          --node1-snapshot NODE1_SNAPSHOT --node1-request\n                          NODE1_REQUEST [--node1-logs [NODE1_LOGS ...]]\n                          [--timeout TIMEOUT] --output OUTPUT\n\nRead-only dual TP2 health/commit check and isolated log collection.\n\noptions:\n  -h, --help            show this help message and exit\n  --node0-url NODE0_URL\n  --node0-socket NODE0_SOCKET\n  --node0-snapshot NODE0_SNAPSHOT\n  --node0-request NODE0_REQUEST\n  --node0-logs [NODE0_LOGS ...]\n  --node1-url NODE1_URL\n  --node1-socket NODE1_SOCKET\n  --node1-snapshot NODE1_SNAPSHOT\n  --node1-request NODE1_REQUEST\n  --node1-logs [NODE1_LOGS ...]\n  --timeout TIMEOUT\n  --output OUTPUT       new evidence directory\n",
+        "stderr": "",
+        "elapsed_s": 1.6661150949075818,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      "node_block_export": {
+        "argv": [
+          "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+          "-m",
+          "experiments.kv_ec.node_block_export",
+          "--help"
+        ],
+        "returncode": 0,
+        "stdout": "usage: node_block_export.py [-h] --snapshot SNAPSHOT --node-id {0,1} --output\n                            OUTPUT\n\nOffline real capture -> CPU-owned TP2 node block. No GPU/allocator access.\nPack: magic KVNODE01, uint32 BE JSON length, canonical UTF-8 JSON, rank0,\nrank1; ranks use ascending layer / K / V / logical token order from capture.\nNo online export hook is installed. One offline node is processed at a time,\nbounded by MAX_NODE_BYTES; no service-critical source ownership is extended.\n\noptions:\n  -h, --help           show this help message and exit\n  --snapshot SNAPSHOT\n  --node-id {0,1}\n  --output OUTPUT      new export directory\n",
+        "stderr": "",
+        "elapsed_s": 0.13589685410261154,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      "remote_rs_server": {
+        "argv": [
+          "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+          "-m",
+          "experiments.kv_ec.remote_rs_server",
+          "--help"
+        ],
+        "returncode": 0,
+        "stdout": "usage: remote_rs_server.py [-h] [--host HOST] [--port PORT] [--ttl TTL]\n                           [--timeout TIMEOUT] [--max-stripes MAX_STRIPES]\n                           [--max-bytes MAX_BYTES]\n\nCPU-only remote RS parity in bounded process DRAM, no SGLang/Torch import.\nCommitted stripes retain parity + full manifest, NEVER original node blocks.\nImmutable UUID handle and manifest hash bind retries to a server incarnation.\nExpired IDs remain tombstoned until restart. Restart invalidates every handle.\nUnauthenticated experimental protocol: bind only on an isolated trusted LAN.\n\noptions:\n  -h, --help            show this help message and exit\n  --host HOST\n  --port PORT\n  --ttl TTL\n  --timeout TIMEOUT\n  --max-stripes MAX_STRIPES\n  --max-bytes MAX_BYTES\n",
+        "stderr": "",
+        "elapsed_s": 0.17096729995682836,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      "remote_rs_client": {
+        "argv": [
+          "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+          "-m",
+          "experiments.kv_ec.remote_rs_client",
+          "--help"
+        ],
+        "returncode": 0,
+        "stdout": "usage: remote_rs_client.py [-h] --remote-host REMOTE_HOST\n                           [--remote-port REMOTE_PORT] [--timeout TIMEOUT]\n                           --op\n                           {health,create_stripe,submit_node_block,get_stripe_status,fetch_parity,reconstruct_missing_node,get_metrics}\n                           [--stripe-id STRIPE_ID] [--manifest MANIFEST]\n                           [--binding BINDING] [--node-id {0,1}]\n                           [--missing-nodes {0,1} [{0,1} ...]]\n                           [--payload PAYLOAD] --output OUTPUT\n\nOne TCP connection per remote operation, verified binary responses.\n\noptions:\n  -h, --help            show this help message and exit\n  --remote-host REMOTE_HOST\n  --remote-port REMOTE_PORT\n  --timeout TIMEOUT\n  --op {health,create_stripe,submit_node_block,get_stripe_status,fetch_parity,reconstruct_missing_node,get_metrics}\n  --stripe-id STRIPE_ID\n  --manifest MANIFEST\n  --binding BINDING     prior create/status JSON or report\n  --node-id {0,1}\n  --missing-nodes {0,1} [{0,1} ...]\n  --payload PAYLOAD\n  --output OUTPUT       new result directory\n",
+        "stderr": "",
+        "elapsed_s": 0.16442402196116745,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      "dual_node_rs": {
+        "argv": [
+          "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+          "-m",
+          "experiments.kv_ec.dual_node_rs",
+          "--help"
+        ],
+        "returncode": 0,
+        "stdout": "usage: dual_node_rs.py [-h] --remote-host REMOTE_HOST\n                       [--remote-port REMOTE_PORT]\n                       [--chunk-tokens {128,256,512}]\n                       [--network-profile {physical,tc,loopback-test}]\n                       --stripe-id STRIPE_ID --node0-block NODE0_BLOCK\n                       --node1-block NODE1_BLOCK [--timeout TIMEOUT] --output\n                       OUTPUT\n\nM2/M3 offline real KV -> physical TCP RS -> logical erasure validation. No\nserving interference claims: remote work starts AFTER inference/capture.\n\noptions:\n  -h, --help            show this help message and exit\n  --remote-host REMOTE_HOST\n  --remote-port REMOTE_PORT\n  --chunk-tokens {128,256,512}\n  --network-profile {physical,tc,loopback-test}\n  --stripe-id STRIPE_ID\n  --node0-block NODE0_BLOCK\n  --node1-block NODE1_BLOCK\n  --timeout TIMEOUT\n  --output OUTPUT       new evidence directory\n",
+        "stderr": "",
+        "elapsed_s": 0.1579557100776583,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      "serving_impact": {
+        "argv": [
+          "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+          "-m",
+          "experiments.kv_ec.serving_impact",
+          "--help"
+        ],
+        "returncode": 0,
+        "stdout": "usage: serving_impact.py [-h] {run,compare} ...\n\nM4 measured dual-instance requests with explicit offline third-arm labeling.\nStart matching launch_debug instances yourself: baseline / parity / capture.\nNo-EC and local-XOR measure live inference. Third arm measures capture\noverhead while serving, THEN offline local XOR + remote RS; it is NOT online\nremote EC.\n\npositional arguments:\n  {run,compare}\n\noptions:\n  -h, --help     show this help message and exit\n",
+        "stderr": "",
+        "elapsed_s": 0.04872806603088975,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      }
+    },
+    "doc_bash_syntax": [
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.002185251098126173,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0016181580722332,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.001695231068879366,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.001725601963698864,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.001425052061676979,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0018310651648789644,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0018761770334094763,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.002075586002320051,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0017358071636408567,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0014465558342635632,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.001806262182071805,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0021060009021312,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0014897789806127548,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.00234536686912179,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.001593083143234253,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.002381749916821718,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.001817523967474699,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0014843710232526064,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0026965930592268705,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.001720305997878313,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0017351279966533184,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0016520200297236443,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      },
+      {
+        "argv": [
+          "bash",
+          "-n"
+        ],
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "elapsed_s": 0.0013560180086642504,
+        "state": "PASS",
+        "tests": null,
+        "skipped": 0
+      }
+    ],
+    "B_no_torch_import": {
+      "argv": [
+        "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+        "-c",
+        "import sys; import experiments.kv_ec.remote_rs_server; assert 'torch' not in sys.modules; print('PASS')"
+      ],
+      "returncode": 0,
+      "stdout": "PASS\n",
+      "stderr": "",
+      "elapsed_s": 0.16245359601452947,
+      "state": "PASS",
+      "tests": null,
+      "skipped": 0
+    }
+  },
+  "verification": {
+    "GPU": "NOT VERIFIED",
+    "physical_TCP_LAN": "NOT VERIFIED",
+    "real_KV_end_to_end": "NOT VERIFIED",
+    "online_remote_RS": "NOT IMPLEMENTED",
+    "real_serving_impact": "NOT VERIFIED"
+  },
+  "state": "PASS",
+  "note": "CPU/Mock only; inspect skipped tests. No random fixture is real KV acceptance."
+}
