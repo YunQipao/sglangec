@@ -18,7 +18,7 @@ from experiments.kv_ec.remote_rs_server import StripeStore, RemoteRSServer, Hand
 from experiments.kv_ec.rs_codec import encode, recover, gf_mul
 from experiments.kv_ec.rs_experiment import save_report
 from experiments.kv_ec.rs_fault_recovery import verify_faults
-from experiments.kv_ec.rs_stripe_builder import build
+from experiments.kv_ec.rs_stripe_builder import build, validate_manifest
 from experiments.kv_ec.test_parity_manager import metadata_and_blocks
 
 
@@ -33,6 +33,82 @@ def node_fixture(node):
             manager_epoch=f"manager-{node}",
         )
     return pack(node, [b.tobytes() for b in arrays], ranks, allow_fixture=True)
+
+
+class ManifestCompatibilityTests(unittest.TestCase):
+    def test_node_local_model_paths_preserved_with_exact_rs_recovery(self):
+        from experiments.kv_ec.test_tp4_physical_rs import tp4_block
+        from experiments.kv_ec.verify_online_rs import verify_blocks
+
+        paths = (
+            "/media/sda1/iic/luotao/models/Qwen3-8B",
+            "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+        )
+        for make_block in (node_fixture, tp4_block):
+            with self.subTest(fixture=make_block.__name__):
+                blocks = []
+                for node in (0, 1):
+                    meta, ranks = unpack(make_block(node), allow_fixture=True)
+                    rank_hashes = [r["sha256"] for r in meta["ranks"]]
+                    for rank in meta["ranks"]:
+                        rank["model_identifier"] = paths[node]
+                    block = pack(node, ranks, meta["ranks"], allow_fixture=True)
+                    preserved, payloads = unpack(block, allow_fixture=True)
+                    self.assertEqual(payloads, ranks)
+                    self.assertEqual([r["sha256"] for r in preserved["ranks"]], rank_hashes)
+                    blocks.append(block)
+                manifest = build("different-local-paths", blocks, allow_fixture=True)
+                before = deepcopy(manifest)
+                validate_manifest(manifest, allow_fixture=True)
+                self.assertEqual(manifest, before)
+                for node in (0, 1):
+                    self.assertEqual(manifest["nodes"][node],
+                                     descriptor(blocks[node], allow_fixture=True))
+                    self.assertTrue(all(r["model_identifier"] == paths[node]
+                                        for r in manifest["nodes"][node]["metadata"]["ranks"]))
+                parity = encode(*blocks)
+                checks = verify_blocks(blocks, parity, manifest, sha(parity), allow_fixture=True)
+                self.assertEqual(set(checks), {"D0", "D1", "P"})
+                self.assertTrue(all(item["byte_exact"] for item in checks.values()))
+
+    def test_cross_node_shared_fields_remain_strict_and_are_named(self):
+        manifest = build("strict-fields", [node_fixture(i) for i in (0, 1)], allow_fixture=True)
+        changes = dict(
+            model_sha256="f" * 64, source_commit="different-source",
+            core_diff_sha256="e" * 64, dtype="torch.float16", tp_size=4,
+            token_start=256, token_count=128, layers=[99],
+        )
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                changed = deepcopy(manifest)
+                for rank in changed["nodes"][1]["metadata"]["ranks"]:
+                    rank[field] = value
+                with self.assertRaisesRegex(ValueError, field):
+                    validate_manifest(changed, allow_fixture=True)
+
+    def test_valid_but_different_rank_layout_is_rejected_with_field(self):
+        blocks = [node_fixture(i) for i in (0, 1)]
+        meta, ranks = unpack(blocks[1], allow_fixture=True)
+        for rank in meta["ranks"]:
+            # Preserve element count, offsets and bytes: both node descriptors
+            # remain individually valid, but their KV shapes are incompatible.
+            for record in rank["layer_records"]:
+                for shape in record["packed_shape"].values():
+                    shape[1], shape[2] = shape[2], shape[1]
+        blocks[1] = pack(1, ranks, meta["ranks"], allow_fixture=True)
+        with self.assertRaisesRegex(ValueError, r"rank=0 layer_records\[0\].packed_shape"):
+            build("different-layouts", blocks, allow_fixture=True)
+
+    def test_layout_diagnostics_include_nonzero_rank_and_record_count(self):
+        manifest = build("layout-diagnostics", [node_fixture(i) for i in (0, 1)], allow_fixture=True)
+        changed = deepcopy(manifest)
+        changed["nodes"][1]["metadata"]["ranks"][1]["layer_records"][0]["v_offset"] += 2
+        with self.assertRaisesRegex(ValueError, r"rank=1 layer_records\[0\].v_offset"):
+            validate_manifest(changed, allow_fixture=True)
+        changed = deepcopy(manifest)
+        changed["nodes"][1]["metadata"]["ranks"][1]["layer_records"].pop()
+        with self.assertRaisesRegex(ValueError, r"rank=1 layer_records.length"):
+            validate_manifest(changed, allow_fixture=True)
 
 
 class StoreTests(unittest.TestCase):

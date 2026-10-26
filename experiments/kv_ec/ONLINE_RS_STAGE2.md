@@ -112,9 +112,23 @@ verbs 数据搬运；Mock 回执明确 `transport=CPU_MOCK`。生产 JSON 配置
 ## 双机 TP4 启动
 
 以下命令供人工执行；本轮不自动启动 GPU 服务、不停止已有进程。先确保两边
-代码相同（包括本轮未提交文件）和相同模型文件、绝对路径，并对比
+代码相同（包括本轮未提交文件）和相同模型文件，并对比
 `git rev-parse HEAD`、`git diff HEAD -- python`、本轮文件 SHA256。不要在配置
 文件中放真实用户提示词。请求使用公开合成 token。
+
+模型安装绝对路径可以不同，例如 232 的
+`/media/sda1/iic/luotao/models/Qwen3-8B` 与 233 的
+`/media/sda1/iic_data/luotao/models/Qwen3-8B`。各节点必须传入自己真实的
+`--model` 路径；不要重写已有快照或统一伪造 `model_identifier`。
+跨节点继续严格比较 `model_sha256`、`source_commit`、`core_diff_sha256`、
+`dtype`、`tp_size`、`token_start`、`token_count`、`layers` 和逐 Rank KV layout。
+节点描述符仍包含原始路径，完整节点块及其 manifest/SHA 校验不变。
+不兼容错误现在附带字段、两节点值；layout 错误附带 Rank 和 record 索引。
+
+复验必须让 RS 接收服务、两边 Manager 和 SGLang 使用修改后的代码启动新实例。
+选择新的全局 run、配对配置、socket、输出目录和可用端口，按下面流程重新请求
+chunk 0/1/2，再运行 `wait` 和完整 `verify`。已有 `FAILED/EXPIRED` 回执不能
+通过修改文件变为成功；历史快照、状态和哈希均应保留。不要停止其他用户服务。
 
 仓库历史物理网络示例为 232 侧 `192.168.2.243 / mlx5_0 / GID 5`，233 侧
 `192.168.2.245 / mlx5_0 / GID 3`；管理 IP 示例是 `10.102.0.232/233`。
@@ -127,8 +141,9 @@ verbs 数据搬运；Mock 回执明确 `transport=CPU_MOCK`。生产 JSON 配置
 ```bash
 cd /media/sda1/iic_data/luotao/sglangec/sglang
 export PYTHONPATH="$PWD/python:$PWD${PYTHONPATH:+:$PYTHONPATH}"
-export MODEL=/media/sda1/iic_data/luotao/models/Qwen3-8B
-export GLOBAL_RUN=online-rs-20261026-trial01  # 两机相同，每轮换新值
+# 232 使用此路径；233 改为 /media/sda1/iic_data/luotao/models/Qwen3-8B
+export MODEL=/media/sda1/iic/luotao/models/Qwen3-8B
+export GLOBAL_RUN=online-rs-pathfix-20261026-trial01  # 两机相同，每轮换新值
 export RS_HOST=192.168.2.245
 export RS_PORT=30300
 export SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0

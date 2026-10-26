@@ -179,7 +179,11 @@ class OnlineRSTests(unittest.TestCase):
             f"status timeout: {path.read_text() if path.exists() else 'no receipt'}"
         )
 
-    def test_tp2_tp4_three_chunks_and_all_independent_recoveries(self):
+    def test_tp2_tp4_three_chunks_with_local_model_paths_and_all_recoveries(self):
+        model_paths = (
+            "/media/sda1/iic/luotao/models/Qwen3-8B",
+            "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+        )
         for tp in (2, 4):
             with self.subTest(tp=tp):
                 # Fresh managers/store and global epoch for each TP layout.
@@ -199,7 +203,9 @@ class OnlineRSTests(unittest.TestCase):
                 pairs = []
                 for chunk in range(3):
                     pairs.append(
-                        [self.submit(managers[i], i, tp, chunk)[0] for i in (0, 1)]
+                        [self.submit(managers[i], i, tp, chunk,
+                                     changes={"model_identifier": model_paths[i]})[0]
+                         for i in (0, 1)]
                     )
                 for directories in pairs:
                     receipts = [self.wait(d) for d in directories]
@@ -213,6 +219,13 @@ class OnlineRSTests(unittest.TestCase):
                     status, parity = self.store.dispatch(
                         dict(op="fetch_parity", **key), b""
                     )
+                    for node, block in enumerate(blocks):
+                        self.assertEqual(status["manifest"]["nodes"][node],
+                                         descriptor(block, allow_fixture=True))
+                        self.assertTrue(all(
+                            r["model_identifier"] == model_paths[node]
+                            for r in status["manifest"]["nodes"][node]["metadata"]["ranks"]
+                        ))
                     checks = verify_blocks(
                         blocks,
                         parity,
