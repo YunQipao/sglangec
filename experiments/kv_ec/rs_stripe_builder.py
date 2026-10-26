@@ -66,6 +66,9 @@ def validate_manifest(manifest, *, allow_fixture=False):
         raise ValueError("cross-node chunk/model/layout mismatch")
     if a["snapshot_id"] == b["snapshot_id"] or a["request_id"] == b["request_id"]:
         raise ValueError("independent node snapshot/request identities required")
+    from .online_rs_identity import validate_online_manifest
+
+    validate_online_manifest(manifest)
 
 
 def build(stripe_id, blocks, *, allow_fixture=False):

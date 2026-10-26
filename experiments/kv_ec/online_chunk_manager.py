@@ -1,4 +1,4 @@
-"""Local CPU-only online TP2/TP4 aggregation and XOR service. No RDMA/RS.
+"""CPU-only online TP2/TP4 aggregation and XOR; optional background RDMA handoff.
 
 The socket is private to one run. Bounded pending groups expire; terminal
 identities are retained in a bounded LRU and on disk. No socket is unlinked or
@@ -43,6 +43,7 @@ class OnlineChunkManager:
         max_pending=8,
         retain_ranks=False,
         test_recovery=False,
+        global_exporter=None,
     ):
         if timeout <= 0 or max_pending < 1 or not run_id:
             raise ValueError("invalid online manager limits")
@@ -52,6 +53,7 @@ class OnlineChunkManager:
         self.output.mkdir(parents=True, exist_ok=False)
         self.timeout, self.max_pending = timeout, max_pending
         self.retain_ranks, self.test_recovery = retain_ranks, test_recovery
+        self.global_exporter = global_exporter
         self.pending, self.terminal = {}, OrderedDict()
 
     def expire(self):
@@ -180,6 +182,27 @@ class OnlineChunkManager:
         with temporary.open("x") as stream:
             json.dump(manifest, stream, indent=2)
         temporary.rename(directory / "manifest.json")
+        # LOCAL commit is authoritative regardless of remote admission/failure.
+        # Only private CPU copies cross this optional boundary. No GPU lifetime
+        # is extended, and no RDMA/remote wait runs in this service thread.
+        if self.global_exporter is not None:
+            try:
+                self.global_exporter.enqueue(directory, entries, blocks)
+            except Exception as exc:
+                error = {
+                    "local_state": "LOCAL_COMMITTED",
+                    "global_state": "FAILED",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                try:
+                    (directory / "global_handoff_error.json").write_text(
+                        json.dumps(error)
+                    )
+                except OSError:
+                    print(
+                        json.dumps(dict(kind="global_handoff_error", **error)),
+                        flush=True,
+                    )
         return self._end(
             key, {"state": "COMMITTED", "snapshot_id": key, "xor_ms": xor_ms}
         )
@@ -242,16 +265,31 @@ def main():
     )
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--max-pending", type=int, default=8)
-    args = parser.parse_args()
-    manager = OnlineChunkManager(
-        args.output,
-        args.run_id,
-        timeout=args.timeout,
-        max_pending=args.max_pending,
-        retain_ranks=args.retain_ranks,
-        test_recovery=args.test_recovery,
+    parser.add_argument(
+        "--global-rs-config",
+        type=Path,
+        help="opt-in immutable request pairing + RDMA worker config",
     )
-    serve(args.socket, manager)
+    args = parser.parse_args()
+    exporter = None
+    if args.global_rs_config:
+        from .online_rs_exporter import OnlineRSExporter
+
+        exporter = OnlineRSExporter.from_config(args.global_rs_config)
+    try:
+        manager = OnlineChunkManager(
+            args.output,
+            args.run_id,
+            timeout=args.timeout,
+            max_pending=args.max_pending,
+            retain_ranks=args.retain_ranks,
+            test_recovery=args.test_recovery,
+            global_exporter=exporter,
+        )
+        serve(args.socket, manager)
+    finally:
+        if exporter is not None:
+            exporter.close()
 
 
 if __name__ == "__main__":
