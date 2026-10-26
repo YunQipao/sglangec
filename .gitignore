@@ -284,3 +284,7 @@ internal-docs/
 
 # Raw debug KV is local-only evidence, never a source artifact.
 rank_*.bin
+
+# Generated KV-EC experiment artifacts
+kv-rdma-*/
+**/rdma-chunk-*/
