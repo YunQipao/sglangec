@@ -8,7 +8,7 @@ import socket
 import threading
 import time
 
-from .remote_rs_protocol import receive, send
+from .remote_rs_protocol import rdma_diagnostic, receive, send
 from .node_block_export import descriptor as describe_node
 from .node_block_export import sha
 
@@ -71,9 +71,15 @@ class RemoteRSClient:
                                port_num=1, timeout=120):
         """Register an RDMA receive on the server, then perform a real Write."""
         block = bytes(block)
+        block_sha256 = sha(block)
+        rdma_diagnostic(
+            "client", stripe_id=stripe_id, node_id=node_id,
+            block_length=len(block), block_sha256=block_sha256,
+            manifest_sha256=manifest_sha256,
+        )
         status, _ = self.call(
             "prepare_rdma", stripe_id=stripe_id, node_id=node_id,
-            payload_length=len(block), payload_sha256=sha(block),
+            payload_length=len(block), node_block_sha256=block_sha256,
             handle=handle, manifest_sha256=manifest_sha256,
         )
         item = self._rdma_item(status, node_id)

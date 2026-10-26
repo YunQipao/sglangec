@@ -5,15 +5,27 @@ Byte counters are exact application TCP stream bytes, NOT Ethernet/IP overhead.
 """
 
 import json
+import os
 import struct
+import sys
 import time
 
 from .node_block_export import canonical, sha, MAX_NODE_BYTES
 
 MAX_HEADER = 2 * 1024**2
+RDMA_NODE_SHA256_FIELD = "node_block_sha256"
+
+
+def rdma_diagnostic(side, **fields):
+    """Opt-in metadata-only diagnostics; never receive or print KV payloads."""
+    if os.environ.get("KV_EC_RS_RDMA_DIAGNOSTICS") == "1":
+        print("KV_EC_RS_RDMA_DIAGNOSTIC " + json.dumps(
+            dict(side=side, **fields), sort_keys=True), file=sys.stderr, flush=True)
 
 
 def send(sock, metadata, payload=b"", observer=None):
+    # protocol/payload_bytes/payload_sha256 describe this TCP frame and are
+    # reserved. RDMA data uses node_block_sha256, never the empty frame's SHA.
     payload = bytes(payload)
     if len(payload) > MAX_NODE_BYTES:
         raise ValueError("payload limit")

@@ -23,7 +23,7 @@ import time
 import uuid
 
 from .node_block_export import descriptor, sha, MAX_NODE_BYTES
-from .remote_rs_protocol import receive, send
+from .remote_rs_protocol import RDMA_NODE_SHA256_FIELD, rdma_diagnostic, receive, send
 from .rs_codec import CODE, encode, recover
 from .rs_stripe_builder import manifest_sha, validate_manifest
 
@@ -303,7 +303,8 @@ class StripeStore:
             if op not in ("submit_node_block", "reconstruct_missing_node") and payload:
                 raise ValueError("unexpected payload")
             if op == "health":
-                return {"state": "READY", "server_epoch": self.epoch}, b""
+                return {"state": "READY", "server_epoch": self.epoch,
+                        "rdma_upload_sha256_field": RDMA_NODE_SHA256_FIELD}, b""
             if op == "get_metrics":
                 from .rs_experiment import process_usage
 
@@ -452,10 +453,24 @@ class StripeStore:
                     raise ValueError("invalid node")
                 expected = s["manifest"]["nodes"][node]
                 length = request.get("payload_length")
-                digest = request.get("payload_sha256")
-                if (type(length) is not int or length != expected["length"]
-                        or not isinstance(digest, str) or digest != expected["sha256"]):
-                    raise ValueError("RDMA payload does not match node manifest")
+                digest = request.get(RDMA_NODE_SHA256_FIELD)
+                mismatches = []
+                if type(length) is not int or length != expected["length"]:
+                    mismatches.append("length")
+                if not isinstance(digest, str) or digest != expected["sha256"]:
+                    mismatches.append("sha256")
+                rdma_diagnostic(
+                    "server", stripe_id=sid, node_id=node,
+                    received_length=length, received_sha256=digest,
+                    expected_length=expected["length"], expected_sha256=expected["sha256"],
+                    manifest_sha256=s["manifest_sha256"], mismatches=mismatches,
+                )
+                if mismatches:
+                    raise ValueError(
+                        "RDMA payload does not match node manifest: "
+                        f"stripe_id={sid} node_id={node} mismatched={','.join(mismatches)}; "
+                        f"RDMA SHA field={RDMA_NODE_SHA256_FIELD}"
+                    )
                 if s["state"] != "PENDING":
                     if node in s["submitted_nodes"]:
                         return self.status(s), b""
@@ -705,6 +720,7 @@ def main():
                     "state": "READY",
                     "address": server.server_address,
                     "epoch": store.epoch,
+                    "rdma_upload_sha256_field": RDMA_NODE_SHA256_FIELD,
                 }
             ),
             flush=True,

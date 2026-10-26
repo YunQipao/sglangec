@@ -11,7 +11,9 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -20,9 +22,11 @@ from .online_chunk_manager import OnlineChunkManager
 from .online_rs_exporter import OnlineRSExporter
 from .online_rs_identity import identity_for, stripe_id
 from .remote_rs_server import StripeStore
+from .remote_rs_client import RemoteRSClient
 from .rs_stripe_builder import build, validate_manifest
 from .test_debug_capture import rank_fixture
 from .test_remote_rs import node_fixture
+from .test_rdma_upload_control import HandlerSocket, mock_rdma_uploads
 from .verify_online_rs import committed, verify_blocks, verify_local
 
 
@@ -263,6 +267,46 @@ class OnlineRSTests(unittest.TestCase):
                     self.assertEqual(len(committed(m.output, 3, 1)), 3)
                 for e in exporters:
                     e.close()
+
+    def test_exporter_sends_exact_persisted_registered_bytes_through_real_framing(self):
+        server = SimpleNamespace(store=self.store, io_timeout=5)
+        sent = []
+
+        def check_upload(sid, node, block):
+            meta, _ = unpack(block, allow_fixture=True)
+            directory = self.root / f"node{node}" / meta["ranks"][0]["snapshot_id"]
+            self.assertEqual((directory / "global_node.bin").read_bytes(), block)
+            with self.store.lock:
+                self.assertEqual(self.store.stripes[sid]["manifest"]["nodes"][node],
+                                 descriptor(block, allow_fixture=True))
+                sent.append((sid, node))
+
+        with patch("experiments.kv_ec.remote_rs_client.socket.create_connection",
+                   side_effect=lambda *args, **kwargs: HandlerSocket(server)), \
+                mock_rdma_uploads(self.store, check_upload):
+            exporters = [self.exporter(i, timeout=10, client_factory=lambda: RemoteRSClient(
+                "cpu-mock", timeout=5)) for i in (0, 1)]
+            managers = [self.manager(i, exporters[i]) for i in (0, 1)]
+            pairs = [[self.submit(managers[i], i, chunk=chunk)[0] for i in (0, 1)]
+                     for chunk in range(3)]
+            for directories in pairs:
+                receipts = [self.wait(d, timeout=10) for d in directories]
+                sid = receipts[0]["stripe_id"]
+                self.assertEqual(sid, receipts[1]["stripe_id"])
+                blocks = [(d / "global_node.bin").read_bytes() for d in directories]
+                stripe = self.store.stripes[sid]
+                checks = verify_blocks(blocks, stripe["parity"], stripe["manifest"],
+                                       stripe["parity_sha256"], allow_fixture=True)
+                self.assertEqual(set(checks), {"D0", "D1", "P"})
+                for d, receipt, block in zip(directories, receipts, blocks):
+                    verify_local(d, receipt, block, allow_fixture=True)
+                    self.assertEqual(receipt["remote_outcome"], "COMMITTED")
+            for exporter in exporters:
+                exporter.close()
+        self.assertEqual(len(sent), 6)
+        self.assertEqual(len(set(sent)), 6)
+        for manager in managers:
+            self.assertEqual(len(committed(manager.output, 3, 1)), 3)
 
     def test_local_commit_never_waits_for_upload_or_implies_global_commit(self):
         gate, entered = threading.Event(), threading.Event()

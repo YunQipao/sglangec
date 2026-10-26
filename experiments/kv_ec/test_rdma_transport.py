@@ -53,7 +53,7 @@ class RDMATransportContractTests(unittest.TestCase):
         binding = {key: status[key] for key in ("stripe_id", "handle", "manifest_sha256")}
         status, _ = store.dispatch({
             "op": "prepare_rdma", "node_id": 0, "payload_length": len(blocks[0]),
-            "payload_sha256": sha(blocks[0]), **binding,
+            "node_block_sha256": sha(blocks[0]), **binding,
         }, b"")
         for _ in range(40):
             item = store.status(store.stripes["rdma-failure"])["rdma"][0]

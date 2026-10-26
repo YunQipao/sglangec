@@ -54,8 +54,8 @@ KV allocator、CUDA capture、已有离线物理节点入口及 RDMA 实现。
 - workers 可并行等待不同 Chunk；全部 worker 都等不到对端时，后续 Chunk
   会排队或被拒绝，而不是阻塞推理；暂不实现公平调度/优先级。
 - 各 rank、各节点必须匹配模型指纹、源码版本、KV layout、token 范围、
-  36 层 BF16、TP2/TP4。当前沿用离线兼容规则，`model_identifier` 绝对路径
-  也要求相同。token 内容和 request ID 可以不同（当前离线规则要求两节点
+  36 层 BF16、TP2/TP4；`model_identifier` 安装绝对路径可以不同。
+  token 内容和 request ID 可以不同（当前离线规则要求两节点
   request ID 与 snapshot ID 不同）。
 - D0/D1 是各节点的完整序列化 `global_node.bin`，在对应源节点文件系统保留。
   本地 `parity.bin` 是 TP rank XOR，远端 P 是 D0/D1 的 RS(2,1) parity，二者
@@ -91,6 +91,7 @@ KV allocator、CUDA capture、已有离线物理节点入口及 RDMA 实现。
 ```bash
 python -m unittest experiments.kv_ec.test_online_rs -v
 python -m unittest \
+  experiments.kv_ec.test_rdma_upload_control \
   experiments.kv_ec.test_online_rs \
   experiments.kv_ec.test_online_chunk \
   experiments.kv_ec.test_debug_capture \
@@ -105,9 +106,43 @@ CPU Mock 使用真实 `StripeStore.dispatch()` 与真实 RS 编码/恢复，只�
 verbs 数据搬运；Mock 回执明确 `transport=CPU_MOCK`。生产 JSON 配置禁止注入
 `allow_fixture/client_factory`，没有 mock 或 TCP payload 开关。
 
-2026-10-26 本地验证：新增 15 项 CPU 测试全部通过；与上述既有回归合计
-104 项，93 项通过、11 项因 CUDA/socket 环境限制跳过；编译、CLI help 和
-文档 Bash 语法检查通过。没有执行真实 GPU/RDMA 双机测试。
+新增控制协议回归经过真实 `RemoteRSClient.call → send/receive → Handler →
+StripeStore.prepare_rdma`，只模拟 socket 和 native verbs；另覆盖真实 Exporter
+的双节点、三 Chunk、六次上传，逐字节比较提交块与保存文件及注册描述符。
+这些 CPU 测试不构成真实 GPU/RDMA 双机验证。
+
+2026-10-26：连同 `test_rs_experiments`、`multinode.tests.test_kv_hierarchical`
+和 `multinode.tests.test_rs_codec` 共运行 145 项，134 项通过、11 项因 CUDA、
+socket 权限或真实 RDMA 显式开关/环境条件跳过；编译与文档 Bash 语法检查通过。
+
+## RDMA 上传 SHA 字段冲突与诊断
+
+本次故障在当前源码可确定复现，并非必须用旧进程或异步串 Stripe 才能解释。
+客户端原来将节点块 SHA 放进 `prepare_rdma.payload_sha256`；协议 `send()`
+将这个保留字段覆盖为 **TCP 帧 payload** 的 SHA。prepare 请求的 TCP payload
+为空，所以服务端收到的哈希恒为 SHA256(empty)，即
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`，
+而长度仍是节点块长度；在原生 RDMA 启动之前就被拒绝。
+这与本地文件、注册描述符、远端 manifest 全部一致并不矛盾。
+
+修复仅将 RDMA 节点 SHA 改为独立的 `node_block_sha256`。
+`payload_sha256/payload_bytes` 继续专用于 TCP 帧，TCP 校验及 RDMA 接收后的
+字节数/SHA 校验均保持严格，不接受旧字段回退。**客户端与 RS Server 要一起
+部署并启动新实例**；旧版与新版混用会失败，不能仅更新磁盘文件。
+
+诊断默认关闭。在 RS Server 与两边 CPU Manager 的启动终端设置
+`export KV_EC_RS_RDMA_DIAGNOSTICS=1`；删除该变量或设为 `0` 即关闭。
+stderr 中每行以 `KV_EC_RS_RDMA_DIAGNOSTIC ` 开头，后跟 JSON：
+
+- 客户端：`stripe_id/node_id/block_length/block_sha256/manifest_sha256`。
+- 服务端：`stripe_id/node_id/received_length/received_sha256/expected_length/`
+  `expected_sha256/manifest_sha256/mismatches`；`mismatches=[]` 为匹配，
+  否则明确包含 `length`、`sha256` 或两者。
+
+不输出原始 KV。服务端 `health` 及启动 READY 新增
+`rdma_upload_sha256_field=node_block_sha256`，这是**运行进程**的协议标记。
+缺少标记说明连到的服务不具备本修复；磁盘 SHA 和 `git rev-parse` 本身不能
+证明已运行进程加载了新代码。下方健康检查会拒绝未修复的服务。
 
 ## 双机 TP4 启动
 
@@ -139,13 +174,17 @@ chunk 0/1/2，再运行 `wait` 和完整 `verify`。已有 `FAILED/EXPIRED` 回�
 ### 两机公共环境（每个终端都设置）
 
 ```bash
-cd /media/sda1/iic_data/luotao/sglangec/sglang
+# 232：按实际仓库根目录设置；必须能直接找到 experiments/kv_ec。
+set -euo pipefail
+cd /media/sda1/iic/luotao/sglangec
+# 233 改为：cd /media/sda1/iic_data/luotao/sglangec/sglang
 export PYTHONPATH="$PWD/python:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 # 232 使用此路径；233 改为 /media/sda1/iic_data/luotao/models/Qwen3-8B
 export MODEL=/media/sda1/iic/luotao/models/Qwen3-8B
-export GLOBAL_RUN=online-rs-pathfix-20261026-trial01  # 两机相同，每轮换新值
+export GLOBAL_RUN=online-rs-rdma-shafix-20261026-t02  # 两机相同，每轮换新值
 export RS_HOST=192.168.2.245
-export RS_PORT=30300
+export RS_PORT=30500 RDMA_PORT_BASE=30600 RETURN_PORT=30690 SERVER_PORT=30383
+export KV_EC_RS_RDMA_DIAGNOSTICS=1
 export SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0
 
 # 232 设置：
@@ -156,22 +195,39 @@ export LOCAL_RUN="${GLOBAL_RUN}-node${NODE_ID}"
 export RID="${GLOBAL_RUN}-request-node${NODE_ID}"
 export RUN="/tmp/kv-online-rs-${GLOBAL_RUN}/node${NODE_ID}"
 export GPUS=0,1,2,3  # 只选择自己确认空闲的四张卡
-mkdir -p "$RUN"
+# 只有现场明确接受共享 GPU 调试时才设置为 (--allow-shared-gpu-debug)。
+SHARED_GPU_ARGS=()
+
+git rev-parse HEAD
+sha256sum experiments/kv_ec/remote_rs_{client,protocol,server}.py
+python - <<'PY'
+from experiments.kv_ec import remote_rs_client, remote_rs_protocol, remote_rs_server
+for module in (remote_rs_client, remote_rs_protocol, remote_rs_server):
+    print(module.__name__, module.__file__)
+PY
 ```
+
+两个仓库的 commit 与三个源码文件 SHA 必须一致，模块路径必须属于预期仓库。
+端口仅为示例，先用 `ss -ltn` 检查；有占用就修改公共环境中的端口，禁止杀进程
+腾端口。新目录创建步骤使用 `mkdir`，已有目录即报错，换新 GLOBAL_RUN 后重试。
 
 ### 233：先启动独立 RS 接收服务（终端 1）
 
-使用空闲 TCP 控制端口及 rendezvous 端口池 30400..30431；验收返回端口
-30490 同样必须可达。233 上传 D1 也经过原生 RDMA，涉及同一主机 HCA 路径，
+使用空闲 TCP 控制端口及 rendezvous 端口池 30600..30631；验收返回端口
+30690 同样必须可达。233 上传 D1 也经过原生 RDMA，涉及同一主机 HCA 路径，
 其可用性需要现场验证，不能用 TCP 替代冒充通过。
 
 ```bash
+export RS_RUN="/tmp/kv-online-rs-${GLOBAL_RUN}/rs"
+mkdir -p "/tmp/kv-online-rs-${GLOBAL_RUN}"
+mkdir "$RS_RUN" || exit 1
+set -o pipefail
 python -u -m experiments.kv_ec.remote_rs_server \
   --host "$RS_HOST" --port "$RS_PORT" --timeout 30 --ttl 1800 \
   --max-stripes 8 --max-bytes 536870912 \
-  --rdma-device mlx5_0 --rdma-gid-index 3 --rdma-port-num 1 \
-  --rdma-port-base 30400 --rdma-timeout 120 \
-  --rdma-directory "/tmp/kv-online-rs-${GLOBAL_RUN}/rs-rdma"
+  --rdma-device mlx5_0 --rdma-gid-index "$GID" --rdma-port-num 1 \
+  --rdma-port-base "$RDMA_PORT_BASE" --rdma-timeout 120 \
+  --rdma-directory "$RS_RUN/rdma" 2>&1 | tee "$RS_RUN/server.log"
 ```
 
 ### 两机：各生成自己的配对配置并启动 CPU Manager（终端 2）
@@ -181,6 +237,17 @@ python -u -m experiments.kv_ec.remote_rs_server \
 是**全局**身份，和 Manager 的 `--run-id`（节点本地身份）分开。
 
 ```bash
+python - <<'PY'
+import os
+from experiments.kv_ec.remote_rs_client import RemoteRSClient
+status, _ = RemoteRSClient(os.environ["RS_HOST"], int(os.environ["RS_PORT"]),
+                           timeout=10).call("health")
+print(status)
+assert status["state"] == "READY"
+assert status.get("rdma_upload_sha256_field") == "node_block_sha256", "old RS server"
+PY
+mkdir -p "/tmp/kv-online-rs-${GLOBAL_RUN}"
+mkdir "$RUN" || exit 1
 python - <<'PY'
 import hashlib, json, os
 from pathlib import Path
@@ -197,10 +264,11 @@ config = dict(
 with (Path(e["RUN"]) / "global-rs.json").open("x") as f:
     json.dump(config, f, indent=2)
 PY
+set -o pipefail
 python -u -m experiments.kv_ec.online_chunk_manager \
   --socket "$RUN/manager.sock" --output "$RUN/local" --run-id "$LOCAL_RUN" \
   --timeout 60 --max-pending 8 --retain-ranks --test-recovery \
-  --global-rs-config "$RUN/global-rs.json"
+  --global-rs-config "$RUN/global-rs.json" 2>&1 | tee "$RUN/manager.log"
 ```
 
 省略 `--global-rs-config` 就是原有单节点在线 XOR，默认无跨节点行为。
@@ -209,21 +277,24 @@ python -u -m experiments.kv_ec.online_chunk_manager \
 
 ```bash
 python -u -m experiments.kv_ec.launch_online \
-  --model "$MODEL" --gpus "$GPUS" --tp 4 --port 30381 \
+  --model "$MODEL" --gpus "$GPUS" --tp 4 --port "$SERVER_PORT" \
   --socket "$RUN/manager.sock" --run-id "$LOCAL_RUN" \
-  --capacity 4 --prefill-chunk-size 256 --mem-fraction-static 0.35
+  --capacity 4 --prefill-chunk-size 256 --mem-fraction-static 0.35 \
+  "${SHARED_GPU_ARGS[@]}"
 ```
 
-launcher 只监听各自 `127.0.0.1:30381`，两机不是同一分布式推理作业。
+launcher 只监听各自 `127.0.0.1:$SERVER_PORT`，两机不是同一分布式推理作业。
+`--mem-fraction-static 0.35` 是示例，须按现场显存预算调整；共享调试标志不保证
+显存足够，也不会自动停止其他进程。正常验收优先使用空闲卡。
 单机 TP2 开发将 `--tp 4 --gpus 0,1,2,3` 改为 `--tp 2 --gpus 0,1`；两节点
 配对时两边 TP 必须相同。仅测试原有单节点 XOR 时省略全局配置。
 
 ### 两机：都健康后，各发送请求并等待独立全局回执（终端 4）
 
 ```bash
-curl --fail http://127.0.0.1:30381/health
+curl --fail "http://127.0.0.1:$SERVER_PORT/health"
 python -m experiments.kv_ec.online_chunk_smoke \
-  --url http://127.0.0.1:30381 --model "$MODEL" --request-id "$RID" \
+  --url "http://127.0.0.1:$SERVER_PORT" --model "$MODEL" --request-id "$RID" \
   --prompt-tokens 768 --new-tokens 16 --manager-output "$RUN/local" \
   --output "$RUN/request.json" --timeout 240
 python -m experiments.kv_ec.verify_online_rs wait \
@@ -241,15 +312,22 @@ python -m experiments.kv_ec.verify_online_rs wait \
 
 ```bash
 # REMOTE_SSH 自行设为已授权的 SSH 目标；不在脚本中假定用户名。
+test ! -e "$RUN/node1-evidence" || exit 1
 scp -r "${REMOTE_SSH}:/tmp/kv-online-rs-${GLOBAL_RUN}/node1/local" \
   "$RUN/node1-evidence"
 python -m experiments.kv_ec.verify_online_rs verify \
   --node0-root "$RUN/local" --node1-root "$RUN/node1-evidence" \
   --expected-chunks 3 --remote-host "$RS_HOST" --remote-port "$RS_PORT" \
   --rdma-device mlx5_0 --rdma-gid-index "$GID" --rdma-port-num 1 \
-  --rdma-return-host "$NODE_RDMA_HOST" --rdma-return-port 30490 \
+  --rdma-return-host "$NODE_RDMA_HOST" --rdma-return-port "$RETURN_PORT" \
   --output "$RUN/acceptance" --timeout 120
 ```
+
+诊断对账：两边 `manager.log` 中各三条 client 记录，与 233 `server.log`
+中的六条 server 记录按 `(stripe_id,node_id)` 对齐。每条必须满足
+`block_length == received_length == expected_length`、
+`block_sha256 == received_sha256 == expected_sha256`、两端 `manifest_sha256`
+相同且 `mismatches=[]`。如重试产生重复记录，逐次核对，不按日志行号配对。
 
 验收成功条件：
 
