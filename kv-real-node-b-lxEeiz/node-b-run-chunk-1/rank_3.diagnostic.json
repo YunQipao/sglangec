@@ -1,0 +1,8 @@
+{
+  "snapshot_id": "node-b-run-chunk-1",
+  "tp_rank": 3,
+  "diagnostic_write_ms": 0.283613,
+  "info_log_ms": 0.149022,
+  "scheduler_through_diagnostics_ms": 140.521469,
+  "tail_record_own_write_included": false
+}
