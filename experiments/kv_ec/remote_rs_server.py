@@ -671,6 +671,12 @@ class Handler(socketserver.BaseRequestHandler):
                 from .rs_experiment import network_observation
 
                 result["network_B"] = network_observation(self.client_address[0])
+            # RDMA state uses integer node IDs internally and string operation
+            # names (for example, parity_download). JSON object keys must have
+            # one comparable type while canonical() sorts them.
+            rdma = result.get("rdma")
+            if isinstance(rdma, dict):
+                result["rdma"] = {str(key): value for key, value in rdma.items()}
             result = dict(result, ok=True, server_receive_ms=metrics["receive_ms"])
         except Exception as exc:
             with store.lock:

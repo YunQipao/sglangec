@@ -14,9 +14,11 @@ from unittest.mock import patch
 
 from .node_block_export import descriptor, pack, sha, unpack
 from .remote_rs_client import RemoteRSClient, binding
+from .remote_rs_protocol import receive, send
 from .remote_rs_server import Handler, StripeStore
 from .test_remote_rs import MemorySocket
 from .test_tp4_physical_rs import tp4_block
+from .multinode import rdma_transport
 
 
 class RPCBuffer(MemorySocket):
@@ -85,8 +87,8 @@ def mock_rdma_uploads(store, before_send=None):
         return {"transport": "CPU_MOCK"}
 
     tx = SimpleNamespace(send_with_stats=send, close=lambda: None)
-    with patch.object(store, "_rdma_receive_worker"), patch(
-        "experiments.kv_ec.multinode.rdma_transport.RDMATransport", return_value=tx
+    with patch.object(store, "_rdma_receive_worker"), patch.object(
+        rdma_transport, "RDMATransport", return_value=tx
     ):
         yield
 
@@ -150,6 +152,60 @@ class RDMAUploadControlTests(unittest.TestCase):
                 )
                 self.assertEqual(disposition, "completed")
         self.assertEqual(status["state"], "COMMITTED")
+
+    def test_rdma_control_status_keys_serialize_on_tcp_boundary(self):
+        blocks, key = self.register("rdma-control-json-keys")
+        with mock_rdma_uploads(self.store):
+            for node, block in enumerate(blocks):
+                self.client.rdma_submit_node_block(
+                    key["stripe_id"], node, block, handle=key["handle"],
+                    manifest_sha256=key["manifest_sha256"], device="cpu-mock", gid_index=0,
+                )
+
+        stripe = self.store.stripes[key["stripe_id"]]
+        self.assertEqual(set(stripe["rdma"]), {0, 1})
+        # Suppress only the asynchronous verbs worker. The dispatch and framed
+        # TCP response below execute the production control path.
+        class UnstartedThread:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+        with patch("experiments.kv_ec.remote_rs_server.threading.Thread", UnstartedThread):
+            status, _ = self.client.call(
+                "fetch_parity", transport="rdma", rdma_host="cpu-mock",
+                rdma_port=30490, **key,
+            )
+            self.assertEqual(status["state"], "COMMITTED")
+            self.assertEqual(RemoteRSClient._rdma_item(status, 0)["state"], "COMPLETED")
+            self.assertEqual(RemoteRSClient._rdma_item(status, 1)["state"], "COMPLETED")
+            self.assertEqual(RemoteRSClient._rdma_item(status, "parity_download")["state"], "SENDING")
+
+            for missing in (0, 1):
+                recovery, _ = self.client.call(
+                    "prepare_rdma_recovery", missing_nodes=[missing],
+                    transport="rdma", rdma_host="cpu-mock", rdma_return_port=30491,
+                    survivor_length=len(blocks[1 - missing]),
+                    survivor_sha256=sha(blocks[1 - missing]), **key,
+                )
+                recovery_key = f"recovery_{missing}"
+                self.assertEqual(
+                    RemoteRSClient._rdma_item(recovery, recovery_key)["state"],
+                    "RECEIVING_SURVIVOR",
+                )
+
+        # Exercise the exact canonical TCP frame encoder/decoder on the full
+        # response returned by fetch_parity, including all three RDMA entries.
+        frame = MemorySocket()
+        send(frame, status)
+        decoded, _, _ = receive(MemorySocket(frame.data), 5)
+        for key_id in (0, 1, "parity_download"):
+            self.assertIn(str(key_id), decoded["rdma"])
+        self.assertEqual(RemoteRSClient._rdma_item(decoded, 0)["state"], "COMPLETED")
+        self.assertEqual(RemoteRSClient._rdma_item(decoded, 1)["state"], "COMPLETED")
+        self.assertEqual(RemoteRSClient._rdma_item(decoded, "parity_download")["state"], "SENDING")
 
     def test_mismatch_is_rejected_before_receiver_without_changing_manifest(self):
         blocks, key = self.register("negative-upload")
