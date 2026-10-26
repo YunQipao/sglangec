@@ -5,12 +5,36 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 
 from .checkpoint_protocol import recv_message, send_message
 from .debug_capture import source_identity
-from .gpu_memory_budget import read_gpu_tasks
+from .gpu_memory_budget import check_shared_gpu_budget, read_gpu_memory, read_gpu_tasks
 from .launch_debug import check_port
+
+
+def check_gpu_resources(args):
+    """Read-only admission using physical indices, independent of parent CVD."""
+    gpus = args.gpus.split(",")
+    tasks = read_gpu_tasks()
+    rows = read_gpu_memory()
+    for gpu in gpus:
+        if gpu not in rows:
+            raise ValueError(f"GPU index={gpu} reason=GPU_NOT_FOUND")
+    if not args.allow_shared_gpu_debug:
+        selected = {rows[gpu]["uuid"] for gpu in gpus}
+        if selected.intersection(tasks):
+            raise ValueError(
+                "selected GPU is busy; choose free GPUs (no process was stopped)"
+            )
+    return check_shared_gpu_budget(
+        gpus, args.model, args.tp, 4096, args.mem_fraction_static,
+        memory_rows=rows, tasks_by_uuid=tasks,
+        report=lambda admission: print(
+            "GPU memory admission (bytes; required is additional memory; "
+            "adjust --mem-fraction-static):", json.dumps(admission), flush=True),
+    )
 
 
 def server_argv(args):
@@ -60,7 +84,10 @@ def main():
         action="store_true",
         help="same serving flags with protection disabled",
     )
-    parser.add_argument("--gpus", required=True)
+    parser.add_argument(
+        "--gpus", required=True,
+        help="physical nvidia-smi GPU indices; overrides CUDA_VISIBLE_DEVICES",
+    )
     parser.add_argument("--tp", type=int, choices=(2, 4), required=True)
     parser.add_argument("--socket", type=Path, required=True)
     parser.add_argument(
@@ -79,6 +106,11 @@ def main():
         help="-1 disables chunked prefill",
     )
     parser.add_argument("--mem-fraction-static", type=float, default=0.60)
+    parser.add_argument(
+        "--allow-shared-gpu-debug", action="store_true",
+        help="debug only: allow existing GPU tasks after read-only memory admission; "
+        "set SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0 explicitly if needed",
+    )
     args = parser.parse_args()
     gpus = args.gpus.split(",")
     if (
@@ -95,19 +127,10 @@ def main():
         parser.error(
             "invalid GPU selection, socket, capacity, run id or memory/prefill limits"
         )
-    # Reuse the existing read-only task inventory; no process management calls.
-    tasks = read_gpu_tasks()
-    if tasks:
-        # Inventory is UUID-based; resolve selected GPU UUIDs, rather than
-        # rejecting jobs on unrelated GPUs.
-        from .gpu_memory_budget import read_gpu_memory
-
-        rows = read_gpu_memory()
-        selected = {rows[g]["uuid"] for g in gpus}
-        if selected.intersection(tasks):
-            parser.error(
-                "selected GPU is busy; choose free GPUs (no process was stopped)"
-            )
+    try:
+        check_gpu_resources(args)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        parser.error(str(exc))
     check_port(args.port)
     if not args.baseline:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -118,6 +141,8 @@ def main():
         if ready.get("state") != "READY" or ready.get("run_id") != args.run_id:
             parser.error("online manager is not ready for this run id")
     identity = source_identity(args.model) if not args.baseline else {}
+    # execv inherits the caller's environment, including an explicit
+    # SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0. Never disable it implicitly.
     os.environ.update(
         CUDA_VISIBLE_DEVICES=args.gpus,
         CUDA_DEVICE_ORDER="PCI_BUS_ID",

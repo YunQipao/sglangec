@@ -126,6 +126,83 @@ skips without CUDA; with CUDA it tests real streams, D2H events and immediate
 source-buffer reuse for all TP2/TP4 shard shapes. It uses synthetic tensors on
 one GPU, so it does not prove model serving or TP collectives.
 
+## Shared-GPU debugging (TP2/TP4, Online/Baseline)
+
+`launch_online` rejects selected GPUs with compute tasks by default. Explicit
+`--allow-shared-gpu-debug` permits those tasks after read-only per-GPU memory
+admission. It never stops, pauses or changes another process. `--gpus` names
+physical `nvidia-smi` indices in rank order and replaces any inherited
+`CUDA_VISIBLE_DEVICES`; unrelated GPUs do not trigger the busy check.
+
+Before starting SGLang, both modes report total/used/free bytes and estimated
+**additional** memory for every selected GPU. Admission reuses
+`gpu_memory_budget.py`: local safetensors weight size divided by TP, a 20%
+weight-loading margin, conservative BF16 context KV for 4096 tokens, existing
+CUDA/compute/EC runtime reserves, and `total_bytes * mem_fraction_static`.
+The estimate is the larger of the model/runtime estimate and static allocation
+plus runtime reserves. Each GPU must pass independently; ample memory on other
+GPUs cannot compensate for an insufficient card. A static allocation too small
+for weights plus context KV is also rejected. Local `config.json` and
+safetensors weights/index are required for this estimate; missing budget data
+fails closed. These are conservative estimates, not reservations: another job
+can still consume memory after the check.
+
+Use the installed server environment on this host. Set the following in **each
+terminal**, choosing a fresh run ID, available port and the physical GPUs for
+your experiment:
+
+```bash
+cd /media/sda1/iic_data/luotao/sglangec/sglang
+export PATH="/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin:$PATH"
+export PYTHONPATH="$PWD/python:$PWD${PYTHONPATH:+:$PYTHONPATH}"
+export MODEL=/media/sda1/iic_data/luotao/models/Qwen3-8B
+export TP=4 GPUS=0,1,2,3 PORT=30381
+# For TP2 instead: export TP=2 GPUS=0,1 PORT=30382
+export RUN=online-shared-tp4-20261026-trial01
+export SOCK="/tmp/${RUN}.sock" OUT="/tmp/${RUN}"
+export MEM_FRACTION=0.35
+```
+
+Terminal A, Online only (wait for `READY`):
+
+```bash
+python -u -m experiments.kv_ec.online_chunk_manager \
+  --socket "$SOCK" --output "$OUT" --run-id "$RUN" \
+  --max-pending 8 --retain-ranks --test-recovery
+```
+
+Terminal B, Online server:
+
+```bash
+SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0 \
+python -u -m experiments.kv_ec.launch_online \
+  --model "$MODEL" --gpus "$GPUS" --tp "$TP" --port "$PORT" \
+  --socket "$SOCK" --run-id "$RUN" --capacity 4 \
+  --prefill-chunk-size 256 --mem-fraction-static "$MEM_FRACTION" \
+  --allow-shared-gpu-debug
+```
+
+For a separate Baseline run, use a fresh run ID/port and the same server command
+with `--baseline` appended; no manager is required (the socket/run-id arguments
+remain required by the CLI). The explicit environment assignment is inherited
+by SGLang and disables only its TP memory-imbalance check. Neither normal nor
+shared mode disables that check automatically. For normal exclusive-GPU runs,
+omit both the shared flag and the environment assignment (unset an inherited
+`SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK` if necessary).
+
+`MEM_FRACTION=0.35` is a starting configuration, not a claim about current free
+memory. Adjust it using the printed per-card budget; lowering it can reduce
+the static pool, but cannot bypass model/runtime minimums. Do not launch if
+`nvidia-smi` cannot query the driver. Check readiness in another terminal:
+
+```bash
+curl --fail "http://127.0.0.1:${PORT}/health"
+```
+
+For the existing two-node RS procedure, keep its manager/RS configuration and
+commands, and append `--allow-shared-gpu-debug` to each `launch_online` command
+only when sharing GPUs intentionally. The transport/protection path is unchanged.
+
 ## Single-machine TP2 acceptance
 
 Use **free, explicitly chosen** GPUs and ports. Commands are foreground and do

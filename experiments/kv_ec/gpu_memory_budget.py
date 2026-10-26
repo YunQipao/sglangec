@@ -92,7 +92,12 @@ def estimate_required_bytes(model, tp, context_length, total_bytes, mem_fraction
 
 
 def check_shared_gpu_budget(gpus, model, tp, context_length, mem_fraction_static,
-                            *, memory_rows=None, tasks_by_uuid=None):
+                            *, memory_rows=None, tasks_by_uuid=None, report=None):
+    """Inspect physical nvidia-smi indices; optionally report before admission.
+
+    ``report`` receives all selected GPUs, including their estimates, before
+    any memory rejection. No CUDA initialization or process control is used.
+    """
     memory_rows = read_gpu_memory() if memory_rows is None else memory_rows
     tasks_by_uuid = read_gpu_tasks() if tasks_by_uuid is None else tasks_by_uuid
     accepted = []
@@ -102,21 +107,30 @@ def check_shared_gpu_budget(gpus, model, tp, context_length, mem_fraction_static
             raise ValueError(f"INSUFFICIENT_GPU_MEMORY GPU index={index} reason=GPU_NOT_FOUND")
         required, details = estimate_required_bytes(
             model, tp, context_length, row["total_bytes"], mem_fraction_static)
+        accepted.append(dict(
+            gpu_index=str(index), gpu_uuid=row["uuid"],
+            total_memory_bytes=row["total_bytes"],
+            used_memory_bytes=row["total_bytes"] - row["free_bytes"],
+            free_memory_bytes=row["free_bytes"], required_estimated_memory_bytes=required,
+            other_tasks=tasks_by_uuid.get(row["uuid"], []), estimate=details))
+    if report is not None:
+        report(accepted)
+    for item in accepted:
+        index = item["gpu_index"]
+        details = item["estimate"]
+        required = item["required_estimated_memory_bytes"]
+        free = item["free_memory_bytes"]
         if details["mem_fraction_static_reserve_bytes"] < details[
                 "minimum_static_for_weights_and_context_bytes"]:
             raise ValueError(
                 "INSUFFICIENT_GPU_MEMORY "
-                f"GPU index={index} free_memory_bytes={row['free_bytes']} "
+                f"GPU index={index} free_memory_bytes={free} "
                 f"required_estimated_memory_bytes={details['minimum_static_for_weights_and_context_bytes']} "
                 "rejection_reason=mem_fraction_static_below_weights_plus_context_kv")
-        if row["free_bytes"] < required:
+        if free < required:
             raise ValueError(
                 "INSUFFICIENT_GPU_MEMORY "
-                f"GPU index={index} free_memory_bytes={row['free_bytes']} "
+                f"GPU index={index} free_memory_bytes={free} "
                 f"required_estimated_memory_bytes={required} "
                 "rejection_reason=per_gpu_free_memory_below_estimate")
-        accepted.append(dict(
-            gpu_index=str(index), gpu_uuid=row["uuid"],
-            free_memory_bytes=row["free_bytes"], required_estimated_memory_bytes=required,
-            other_tasks=tasks_by_uuid.get(row["uuid"], []), estimate=details))
     return accepted
