@@ -1157,6 +1157,11 @@ class Scheduler(
         self.forward_sleep_time = None
         self._engine_paused = False
         self._kv_ec_pause_gate = None
+        self._kv_ec_online = None
+        if os.environ.get("SGLANG_KV_EC_ONLINE") == "1":
+            from sglang.srt.debug_utils.kv_ec import create_online_protector
+
+            self._kv_ec_online = create_online_protector(self)
         if os.environ.get("SGLANG_KV_EC_PAUSE_RESUME") == "1":
             from sglang.srt.debug_utils.kv_ec import create_pause_gate
 
@@ -1725,10 +1730,14 @@ class Scheduler(
         """A normal scheduler loop."""
         while True:
             if self.gracefully_exit:
+                if self._kv_ec_online is not None:
+                    self._kv_ec_online.close()
                 break
 
             # Receive requests
             recv_reqs = self.request_receiver.recv_requests()
+            if self._kv_ec_online is not None:
+                self._kv_ec_online.before_inputs(recv_reqs)
             if self._kv_ec_pause_gate is not None:
                 # Abort requests may mark to_finish; all other mutations are
                 # forbidden during this isolated experiment's ownership window.
@@ -1751,11 +1760,17 @@ class Scheduler(
             # Launch the current batch
             if batch:
                 result = self.run_batch(batch)
+                if self._kv_ec_online is not None:
+                    self._kv_ec_online.after_forward(batch)
                 self.process_batch_result(batch, result)
             else:
                 # When the server is idle, do self-check and re-init some states.
                 self._sched_idled = True
                 self.on_idle()
+
+            if self._kv_ec_online is not None:
+                # Also retire aborted requests when no further forward runs.
+                self._kv_ec_online.after_result(batch)
 
             # Update last_batch
             self.last_batch = batch
