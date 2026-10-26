@@ -16,15 +16,16 @@ import time
 
 import numpy as np
 
-from ..rank_snapshot import assemble, validate_payload
+from ..rank_snapshot import (COMMON, KV_LAYOUT_FIELDS, assemble, capture_compatibility,
+                             rank_manifest, validate_model_identity, validate_payload)
 from ..xor_codec import encode as xor_encode, recover as xor_recover
 from .rs_codec import CODEC, CODEC_VERSION, encode as rs_encode, recover as rs_recover
 from .rdma_transport import RDMATransport, receive_file as rdma_receive_file
 from .tcp_transport import TCPTransport, receive_file as tcp_receive_file
 
 MAGIC = b"KVECNODE1"
-ALIGNMENT_KEYS = ("model_identifier", "model_sha256", "dtype", "tp_size", "layers",
-                  "token_start", "token_count", "pool_class", "source_commit", "core_diff_sha256")
+ALIGNMENT_KEYS = ("format", "model_sha256", "dtype", "tp_size", "layers",
+                  "token_start", "token_count", "pool_class", "packed_byte_count", "core_diff_sha256")
 
 
 def _sha(data):
@@ -35,17 +36,29 @@ def _checkpoint_version(manifest):
     return manifest["ranks"][0].get("checkpoint_version", manifest["snapshot_id"])
 
 
-def _load_node(directory, node_id):
-    manifest, blocks = assemble(directory)
+def _validate_node_manifest(manifest):
+    derived = rank_manifest(manifest["ranks"])
+    for key in COMMON:
+        if manifest.get(key) != derived[key]:
+            raise ValueError(f"node snapshot metadata mismatch: {key}")
+    validate_model_identity(manifest)
     if manifest["tp_size"] != 4 or manifest["dtype"] != "torch.bfloat16":
         raise ValueError("only verified Qwen3-8B BF16 TP=4 snapshots are supported")
     if (manifest["token_count"] != 256 or len(manifest["layers"]) != 36
             or manifest["layers"] != list(range(36))):
         raise ValueError("only complete 36-layer Qwen3-8B 256-token chunks are supported")
-    if "qwen3-8b" not in manifest["model_identifier"].lower():
-        raise ValueError("model identifier must name Qwen3-8B")
-    if manifest["pool_class"].split(".")[-1] != "MHATokenToKVPool":
+    if manifest["pool_class"] != "sglang.srt.mem_cache.memory_pool.MHATokenToKVPool":
         raise ValueError("only the ordinary MHATokenToKVPool is supported")
+    for meta in manifest["ranks"]:
+        if any(record["packed_shape"] != {"k": [256, 2, 128], "v": [256, 2, 128]}
+               for record in meta["layer_records"]):
+            raise ValueError("unsupported Qwen3-8B TP=4 rank KV layout")
+    return capture_compatibility(manifest)
+
+
+def _load_node(directory, node_id):
+    manifest, blocks = assemble(directory)
+    compatibility = _validate_node_manifest(manifest)
     for payload, metadata in zip(blocks, manifest["ranks"]):
         validate_payload(payload, metadata)
     xor_started = time.perf_counter()
@@ -66,6 +79,7 @@ def _load_node(directory, node_id):
         "request_id": manifest["request_id"], "snapshot_id": manifest["snapshot_id"],
         "chunk_id": manifest["snapshot_id"],
         "model_fingerprint": manifest["model_sha256"], "checkpoint_version": _checkpoint_version(manifest),
+        "capture_compatibility": compatibility,
         "tp_size": 4, "dtype": manifest["dtype"], "layers": manifest["layers"],
         "layer_range": [min(manifest["layers"]), max(manifest["layers"]) + 1],
         "token_range": [manifest["token_start"], manifest["token_start"] + manifest["token_count"]],
@@ -94,13 +108,34 @@ def _decode_node(data):
         raise ValueError("truncated node-block header")
     header = json.loads(bytes(view[offset:offset + hlen]))
     offset += hlen
-    if header.get("format") != "kv-ec-node-block-v1" or header.get("tp_size") != 4:
+    if (header.get("format") != "kv-ec-node-block-v1" or
+            type(header.get("tp_size")) is not int or header["tp_size"] != 4):
         raise ValueError("unsupported or incomplete node-block metadata")
     if (not header.get("node_id") or not header.get("request_id")
             or not header.get("model_fingerprint") or not header.get("checkpoint_version")
             or len(header.get("rank_blocks", [])) != 4
             or len(header.get("rank_metadata", [])) != 4):
         raise ValueError("incomplete node-block identity or TP metadata")
+    manifest = rank_manifest(header["rank_metadata"])
+    compatibility = _validate_node_manifest(manifest)
+    expected_header = {
+        "model_fingerprint": manifest["model_sha256"], "tp_size": manifest["tp_size"],
+        "dtype": manifest["dtype"], "layers": manifest["layers"],
+        "request_id": manifest["request_id"], "snapshot_id": manifest["snapshot_id"],
+        "chunk_id": manifest["snapshot_id"], "checkpoint_version": _checkpoint_version(manifest),
+        "layer_range": [0, 36],
+        "token_range": [manifest["token_start"], manifest["token_start"] + manifest["token_count"]],
+    }
+    for key, expected in expected_header.items():
+        if header.get(key) != expected:
+            raise ValueError(f"node-block header/rank metadata mismatch: {key}")
+    for key in ("layers", "layer_range", "token_range"):
+        if any(type(value) is not int for value in header[key]):
+            raise ValueError(f"node-block header integer range required: {key}")
+    # Old v1 envelopes have no profile field. Derive it from their unmodified
+    # provenance too; a received compatibility claim cannot widen this policy.
+    if header.get("capture_compatibility", compatibility) != compatibility:
+        raise ValueError("node-block capture compatibility profile mismatch")
     blocks = []
     for rank in range(4):
         if offset + 8 > len(view):
@@ -112,8 +147,13 @@ def _decode_node(data):
         block = np.frombuffer(view[offset:offset + length], dtype=np.uint8).copy()
         offset += length
         record = header["rank_blocks"][rank]
-        if record.get("tp_rank") != rank or record.get("length") != length or _sha(block.tobytes()) != record.get("source_checksum"):
+        if (type(record.get("tp_rank")) is not int or record["tp_rank"] != rank or
+                type(record.get("length")) is not int or record["length"] != length or
+                _sha(block.tobytes()) != record.get("source_checksum")):
             raise ValueError("rank payload checksum/metadata mismatch")
+        if (record.get("kv_head_range") != [rank * 2, (rank + 1) * 2] or
+                record.get("layer_records") != header["rank_metadata"][rank]["layer_records"]):
+            raise ValueError("rank KV layout/header mismatch")
         validate_payload(block, header["rank_metadata"][rank])
         blocks.append(block)
     if offset != len(view):
@@ -122,15 +162,20 @@ def _decode_node(data):
 
 
 def _compatible(a, b):
+    left_profile = _validate_node_manifest(a)
+    right_profile = _validate_node_manifest(b)
     for key in ALIGNMENT_KEYS:
         if a.get(key) != b.get(key):
             raise ValueError(f"incompatible node snapshots: {key}")
+    if left_profile != right_profile:
+        raise ValueError("source_commit compatibility not proven; recapture both nodes at a common reviewed source")
     for rank in range(4):
         left, right = a["ranks"][rank]["layer_records"], b["ranks"][rank]["layer_records"]
-        fields = ("layer_id", "dtype", "packed_shape", "k_offset", "k_nbytes", "v_offset", "v_nbytes")
+        fields = KV_LAYOUT_FIELDS
         if [{key: item.get(key) for key in fields} for item in left] != [
                 {key: item.get(key) for key in fields} for item in right]:
             raise ValueError("incompatible node snapshots: rank KV layout")
+    return left_profile
 
 
 def _persist(directory, name, data):
@@ -180,15 +225,8 @@ def run_receive(args):
         transfer_seconds = rdma_receive_stats["elapsed_s"]
     remote_envelope = remote_path.read_bytes()
     remote_header, remote_blocks = _decode_node(remote_envelope)
-    _compatible({**local_manifest, "ranks": local_manifest["ranks"]},
-                {**local_manifest, "ranks": remote_header["rank_metadata"],
-                 "layers": remote_header["layers"], "model_identifier": remote_header["rank_metadata"][0]["model_identifier"],
-                 "model_sha256": remote_header["model_fingerprint"], "dtype": remote_header["dtype"],
-                 "tp_size": remote_header["tp_size"], "token_start": remote_header["token_range"][0],
-                 "token_count": remote_header["token_range"][1] - remote_header["token_range"][0],
-                 "pool_class": remote_header["rank_metadata"][0]["pool_class"],
-                 "source_commit": remote_header["rank_metadata"][0]["source_commit"],
-                 "core_diff_sha256": remote_header["rank_metadata"][0]["core_diff_sha256"]})
+    remote_manifest = rank_manifest(remote_header["rank_metadata"])
+    compatibility = _compatible(local_manifest, remote_manifest)
     if remote_header["node_id"] == args.node_id:
         raise ValueError("node IDs must be distinct")
     d0raw, d1raw = remote_envelope, local_envelope
@@ -223,6 +261,14 @@ def run_receive(args):
         "chunk_id": global_chunk_id, "transport": args.transport,
         "shared_node_failure_recovery": False,
         "encoding_object": "complete_serialized_four_rank_node_snapshot",
+        "snapshot_compatibility": {
+            "format": local_manifest["format"], "profile": compatibility,
+            "model_sha256": local_manifest["model_sha256"],
+            "sources": [{"node_id": node_id, **{key: manifest[key] for key in
+                         ("model_identifier", "source_commit", "core_diff_sha256")}}
+                        for node_id, manifest in ((args.node_id, local_manifest),
+                                                  (remote_header["node_id"], remote_manifest))],
+        },
         "local_xor": {"node_id": args.node_id, "parity_sha256": _sha(local_parity.tobytes()),
                       "rank_recovery_checks": xor_checks},
         "stripe": {**stripe_common, "codec": CODEC, "codec_version": CODEC_VERSION,

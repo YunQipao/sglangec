@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import time
 
 import numpy as np
@@ -22,10 +23,74 @@ else:
     from xor_codec import encode, recover
 
 FORMAT = "kv-ec-rank-bin-v1"
+LAYOUT = "ascending_layer_then_K_then_V_logical_token_order"
+# Audited with git diff c78be46f d058fb3: only synthetic multinode TCP
+# worker/coordinator/transport/tests differ. debug_capture.py, rank_snapshot.py,
+# snapshot.py and the entire python/ tree (including MHATokenToKVPool and the
+# capture hook) have identical Git objects. This is NOT a general clean-tree
+# compatibility rule. Unknown revisions must be recaptured at a common source.
+# Shared objects: python tree 473f4b710c74268c4502a01a35d2ccf47e24a596,
+# debug_capture blob d2c6b464f9af7e3764a8089c72c67af631dd2054,
+# rank_snapshot blob 2519e2960c0ed3ce4b83e5994599cda46e4c060c.
+AUDITED_V1_SOURCES = frozenset({
+    "c78be46f66b40bac78e01304040576effe9c3eca",
+    "d058fb3a791dd57489c6efe31d594f56e8f68981",
+})
+AUDITED_V1_PROFILE = "qwen3-mha-rank-bin-v1-c78be46f-d058fb3"
+EMPTY_DIFF_SHA256 = hashlib.sha256(b"").hexdigest()
+KV_LAYOUT_FIELDS = ("layer_id", "dtype", "packed_shape", "k_offset", "k_nbytes", "v_offset", "v_nbytes")
 COMMON = ("format", "provenance", "snapshot_id", "request_id", "request_id_encoding",
           "model_identifier", "model_sha256", "source_commit", "core_diff_sha256",
           "tp_size", "layers", "token_start", "token_count", "token_ids_sha256",
           "dtype", "packed_byte_count", "pool_class", "lifetime", "completion_dependency")
+
+
+def validate_model_identity(meta):
+    # The capture hashes config.json and sorted weight filenames/bytes, never
+    # the absolute root. The root remains provenance, not model identity.
+    value = meta.get("model_sha256")
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError("invalid model_sha256")
+    if not isinstance(meta.get("model_identifier"), str) or not meta["model_identifier"]:
+        raise ValueError("missing model_identifier provenance")
+
+
+def capture_compatibility(meta):
+    """Derive a versioned profile from provenance; never trust a wire claim."""
+    if meta.get("format") != FORMAT:
+        raise ValueError("unsupported rank snapshot format; recapture required")
+    commit, diff = meta.get("source_commit"), meta.get("core_diff_sha256")
+    if (not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None or
+            not isinstance(diff, str) or re.fullmatch(r"[0-9a-f]{64}", diff) is None):
+        raise ValueError("invalid source provenance; recapture required")
+    if commit in AUDITED_V1_SOURCES and diff == EMPTY_DIFF_SHA256:
+        return AUDITED_V1_PROFILE
+    return f"{FORMAT}:exact-source:{commit}:{diff}"
+
+
+def rank_manifest(entries):
+    """Validate one node's complete rank identity/layout without changing it."""
+    if not entries:
+        raise ValueError("missing rank metadata")
+    first = entries[0]
+    tp = first.get("tp_size")
+    if type(tp) is not int or tp not in (1, 2, 4) or len(entries) != tp:
+        raise ValueError("missing or invalid TP ranks")
+    for rank, meta in enumerate(entries):
+        if (type(meta.get("tp_size")) is not int or
+                type(meta.get("tp_rank")) is not int or meta["tp_rank"] != rank or
+                any(k not in meta or meta[k] != first.get(k) for k in COMMON)):
+            raise ValueError("incompatible rank/model/request/range/capture")
+        if meta.get("checksum_deferred"):
+            raise ValueError("offline snapshots require recorded, non-deferred checksums")
+        if ([{key: item.get(key) for key in KV_LAYOUT_FIELDS} for item in meta["layer_records"]] !=
+                [{key: item.get(key) for key in KV_LAYOUT_FIELDS} for item in first["layer_records"]]):
+            raise ValueError("unequal rank KV layout; no padding supported")
+    manifest = {k: first[k] for k in COMMON}
+    manifest.update(snapshot_completion_status="complete", ranks=entries,
+                    provenance_is_not_independently_attested=True, layout=LAYOUT,
+                    note="Physical slots, PID, device and request row generations are rank-local.")
+    return manifest
 
 
 def write_rank_files(directory, payload, metadata):
@@ -53,21 +118,29 @@ def _validate_payload(payload, meta, *, verify_checksums, compute_checksums):
         raise ValueError("incomplete or unsupported rank snapshot")
     if meta["provenance"] not in ("sglang_request", "synthetic_fixture"):
         raise ValueError("unknown provenance")
+    if (type(meta.get("tp_size")) is not int or meta["tp_size"] not in (1, 2, 4) or
+            type(meta.get("tp_rank")) is not int or not 0 <= meta["tp_rank"] < meta["tp_size"]):
+        raise ValueError("invalid TP rank metadata")
     if meta["dtype"] not in ("torch.float16", "torch.bfloat16") or meta["source_unchanged"] is not True:
         raise ValueError("unsupported dtype or missing read-only verification")
-    if payload.dtype != np.uint8 or payload.ndim != 1 or payload.size != meta["packed_byte_count"]:
+    if (type(meta["packed_byte_count"]) is not int or meta["packed_byte_count"] <= 0 or
+            payload.dtype != np.uint8 or payload.ndim != 1 or payload.size != meta["packed_byte_count"]):
         raise ValueError("rank payload length/type mismatch")
     payload_sha256 = digest(payload) if compute_checksums else None
     if verify_checksums and payload_sha256 != meta["sha256"]:
         raise ValueError("rank payload checksum mismatch")
     if len(meta["physical_slots"]) != meta["token_count"] or meta["req_pool_idx"] <= 0 or meta["req_generation"] <= 0:
         raise ValueError("invalid request/slot metadata")
-    if meta["token_start"] < 0 or meta["token_count"] < 1:
+    if (type(meta["token_start"]) is not int or type(meta["token_count"]) is not int or
+            meta["token_start"] < 0 or meta["token_count"] < 1):
         raise ValueError("invalid logical range")
-    if len(set(meta["physical_slots"])) != meta["token_count"] or any(s <= 0 for s in meta["physical_slots"]):
+    if (len(set(meta["physical_slots"])) != meta["token_count"] or
+            any(type(s) is not int or s <= 0 for s in meta["physical_slots"])):
         raise ValueError("invalid physical slots")
     records = meta["layer_records"]
-    if not records or [r["layer_id"] for r in records] != meta["layers"] or meta["layers"] != sorted(set(meta["layers"])):
+    if (not records or any(type(layer) is not int or layer < 0 for layer in meta["layers"]) or
+            any(type(record["layer_id"]) is not int for record in records) or
+            [r["layer_id"] for r in records] != meta["layers"] or meta["layers"] != sorted(set(meta["layers"]))):
         raise ValueError("layer order mismatch")
     offset = 0
     hashes = {"k": hashlib.sha256(), "v": hashlib.sha256()} if compute_checksums else None
@@ -79,10 +152,12 @@ def _validate_payload(payload, meta, *, verify_checksums, compute_checksums):
         for kind in ("k", "v"):
             shape = record["packed_shape"][kind]
             nbytes = record[kind + "_nbytes"]
-            if (len(shape) != 3 or any(not isinstance(d, int) or d <= 0 for d in shape)
-                    or shape[0] != meta["token_count"] or math.prod(shape) * 2 != nbytes):
+            if (len(shape) != 3 or any(type(d) is not int or d <= 0 for d in shape)
+                    or type(nbytes) is not int or nbytes <= 0 or
+                    shape[0] != meta["token_count"] or math.prod(shape) * 2 != nbytes):
                 raise ValueError("packed shape/byte count mismatch")
-            if record[kind + "_offset"] != offset or offset + nbytes > payload.size:
+            if (type(record[kind + "_offset"]) is not int or
+                    record[kind + "_offset"] != offset or offset + nbytes > payload.size):
                 raise ValueError("noncanonical offsets or truncated data")
             segment = payload[offset:offset + nbytes]
             segment_sha256 = digest(segment) if compute_checksums else None
@@ -152,21 +227,13 @@ def assemble(directory):
     entries, blocks = [], []
     for rank in range(tp):
         meta = json.loads((directory / f"rank_{rank}.json").read_text())
-        if meta["tp_rank"] != rank or any(meta[k] != first[k] for k in COMMON):
-            raise ValueError("incompatible rank/model/request/range/capture")
-        if [r["packed_shape"] for r in meta["layer_records"]] != [r["packed_shape"] for r in first["layer_records"]]:
-            raise ValueError("unequal shard shapes; no padding supported")
         payload = np.fromfile(directory / f"rank_{rank}.bin", dtype=np.uint8)
         if meta.get("checksum_deferred"):
             raise ValueError("offline snapshots require recorded, non-deferred checksums")
         validate_payload(payload, meta)
         entries.append(meta)
         blocks.append(payload)
-    manifest = {k: first[k] for k in COMMON}
-    manifest.update(snapshot_completion_status="complete", ranks=entries,
-                    provenance_is_not_independently_attested=True,
-                    layout="ascending_layer_then_K_then_V_logical_token_order",
-                    note="Physical slots, PID, device and request row generations are rank-local.")
+    manifest = rank_manifest(entries)
     return manifest, blocks
 
 
