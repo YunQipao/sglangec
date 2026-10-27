@@ -273,7 +273,9 @@ class GPUColdResumeHook(GPUResumeHook):
 
     def _observe_tx(self, phase, tx):
         if phase == 'VERIFIED':
-            self.evidence.update(verified=True, new_slots=list(tx.new_slots),
+            # coordinated_restore calls this only after restore_to_gpu returns
+            # VERIFIED: CUDA writes, per-layer byte readback and fences completed.
+            self.evidence.update(cuda_executed=True, verified=True, new_slots=list(tx.new_slots),
                 slots_disjoint=not tx.old_slots, stats=asdict(tx.stats))
         self._event(phase, tx)
 

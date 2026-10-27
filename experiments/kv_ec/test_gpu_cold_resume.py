@@ -3,13 +3,15 @@
 from copy import deepcopy
 from array import array
 import ast
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -308,6 +310,117 @@ class InitialInstallTransactionTests(unittest.TestCase):
             RestoreStats('cpu-fixture', 0, 0, 2, 0, 2, 2, 0), state='VERIFIED',
             savepoint=journal, initial_install=True,
             prior_mapping=tuple(rp.req_to_token[row, :2].tolist()))
+
+    def cold_hook(self, rank=0, inject_rank_failure=None):
+        # CPU observer/coordinator tests only: a mocked restore_to_gpu return
+        # exercises evidence recording, never establishes actual CUDA execution.
+        scheduler, req = self.fixture()
+        tx = self.transaction(scheduler, req)
+        hook = GPUColdResumeHook.__new__(GPUColdResumeHook)
+        hook.cold_mode, hook.rank = 'restore', rank
+        hook.scheduler, hook.req, hook.tx = scheduler, req, None
+        hook.source, hook.source_name = object(), 'cpu-mocked-verified-return'
+        hook.cfg = dict(inject_rank_failure=inject_rank_failure)
+        hook.evidence = dict(cuda_executed=False, verified=False, committed=False,
+            local_cold_resume_complete=False, resume_decode_forward_count=0)
+        hook._event = Mock()
+        return hook, tx
+
+    def test_verified_callback_records_cuda_evidence_after_prepare_returns(self):
+        from .gpu_restore_hook import coordinated_restore
+        hook, tx = self.cold_hook()
+        def prepare(*args, **kwargs):
+            self.assertFalse(hook.evidence['cuda_executed'])
+            self.assertFalse(hook.evidence['verified'])
+            return tx
+        with patch('experiments.kv_ec.gpu_cold_resume_hook.restore_to_gpu', side_effect=prepare) as restore:
+            result = coordinated_restore(hook._prepare_restore, lambda phase, ready: ready, hook._observe_tx)
+        restore.assert_called_once_with(hook.scheduler, hook.req, hook.source,
+            initial_install=True, source_name=hook.source_name)
+        self.assertIs(result, tx)
+        self.assertTrue(hook.evidence['cuda_executed'])
+        self.assertTrue(hook.evidence['verified'])
+        self.assertEqual([call.args[0] for call in hook._event.call_args_list],
+                         ['VERIFIED', 'MAPPED', 'COMMITTED', 'FINISHED'])
+
+    def test_byte_verification_failure_never_records_cuda_evidence(self):
+        from .gpu_restore_hook import coordinated_restore
+        hook, tx = self.cold_hook()
+        def fail(*args, **kwargs):
+            tx.abort()  # restore_to_gpu owns rollback before raising
+            raise RestoreRejected('gpu_kv_writeback_byte_mismatch')
+        with patch('experiments.kv_ec.gpu_cold_resume_hook.restore_to_gpu', side_effect=fail):
+            with self.assertRaisesRegex(RestoreRejected, 'tp_restore_verified_failed'):
+                coordinated_restore(hook._prepare_restore, lambda phase, ready: ready, hook._observe_tx)
+        self.assertFalse(hook.evidence['cuda_executed'])
+        self.assertFalse(hook.evidence['verified'])
+        hook._event.assert_not_called()
+        self.assertEqual(tx.state, 'ABORTED')
+        self.assertEqual(tx.allocator.available_size(), tx.allocator.size)
+
+    def test_unverified_transaction_is_rejected_before_observer(self):
+        from .gpu_restore_hook import coordinated_restore
+        hook, tx = self.cold_hook()
+        tx.state = 'PREPARED'
+        with patch('experiments.kv_ec.gpu_cold_resume_hook.restore_to_gpu', return_value=tx):
+            with self.assertRaisesRegex(RestoreRejected, 'tp_restore_verified_failed'):
+                coordinated_restore(hook._prepare_restore, lambda phase, ready: ready, hook._observe_tx)
+        self.assertFalse(hook.evidence['cuda_executed'])
+        hook._event.assert_not_called()
+        self.assertEqual(tx.state, 'ABORTED')
+
+    def test_commit_failure_keeps_local_verified_fact_without_claiming_success(self):
+        from .gpu_restore_hook import coordinated_restore
+        hook, tx = self.cold_hook()
+        with patch('experiments.kv_ec.gpu_cold_resume_hook.restore_to_gpu', return_value=tx), \
+                patch.object(tx, 'commit', side_effect=RuntimeError('injected_commit_failure')):
+            with self.assertRaisesRegex(RestoreRejected, 'tp_restore_committed_failed'):
+                coordinated_restore(hook._prepare_restore, lambda phase, ready: ready, hook._observe_tx)
+        # CUDA verification is a local completed fact, not global COMMIT/PASS.
+        self.assertTrue(hook.evidence['cuda_executed'])
+        self.assertTrue(hook.evidence['verified'])
+        self.assertFalse(hook.evidence['committed'])
+        self.assertFalse(hook.evidence['local_cold_resume_complete'])
+        self.assertEqual(tx.state, 'ABORTED')
+        self.assertEqual(tx.allocator.available_size(), tx.allocator.size)
+
+    def test_single_rank_injection_records_only_peer_verification_and_aborts_both(self):
+        from .gpu_restore_hook import coordinated_restore
+        pairs = [self.cold_hook(rank, inject_rank_failure=1) for rank in (0, 1)]
+        prepared = {id(hook.scheduler): tx for hook, tx in pairs}
+        barrier, votes = threading.Barrier(2, timeout=10), {}
+        def run(rank):
+            hook, tx = pairs[rank]
+            def vote(phase, ready):
+                votes[rank] = ready
+                barrier.wait()
+                unanimous = all(votes.values())
+                barrier.wait()
+                return unanimous
+            with self.assertRaisesRegex(RestoreRejected, 'tp_restore_verified_failed'):
+                coordinated_restore(hook._prepare_restore, vote, hook._observe_tx)
+        with patch('experiments.kv_ec.gpu_cold_resume_hook.restore_to_gpu',
+                   side_effect=lambda scheduler, *args, **kwargs: prepared[id(scheduler)]):
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                list(workers.map(run, (0, 1)))
+        self.assertTrue(pairs[0][0].evidence['cuda_executed'])
+        self.assertFalse(pairs[1][0].evidence['cuda_executed'])
+        pairs[1][0]._event.assert_not_called()
+        for hook, tx in pairs:
+            self.assertFalse(hook.evidence['committed'])
+            self.assertFalse(hook.evidence['local_cold_resume_complete'])
+            self.assertEqual(hook.evidence['resume_decode_forward_count'], 0)
+            self.assertEqual(tx.state, 'ABORTED')
+            self.assertEqual(tx.allocator.available_size(), tx.allocator.size)
+
+    def test_other_transaction_events_do_not_infer_cuda_from_decode_or_commit(self):
+        hook, tx = self.cold_hook()
+        hook.evidence['resume_decode_forward_count'] = 16
+        for phase in ('MAPPED', 'COMMITTED', 'FINISHED'):
+            hook._observe_tx(phase, NS(state='COMMITTED'))
+            self.assertFalse(hook.evidence['cuda_executed'])
+            self.assertFalse(hook.evidence['verified'])
+        tx.abort()
 
     def test_first_install_commits_without_fabricating_or_freeing_old_slots(self):
         scheduler, req = self.fixture()
