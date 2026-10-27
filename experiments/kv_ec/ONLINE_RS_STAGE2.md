@@ -385,24 +385,22 @@ PYTHONPATH="$PWD/python:$PWD${PYTHONPATH:+:$PYTHONPATH}" \
 
 真实服务器上必须在每个 TP Rank 所属进程执行同一个受控恢复请求，使用已经通过
 `verify_online_rs verify` 的新证据目录；不能将 Rank 0 文件交给 Rank 1。恢复
-调用应发生在 Scheduler 的 pre-forward 实验钩子中，此时请求行已分配但尚未执行
-Prefix Prefill：
+调用必须发生在已经完成 Forward、请求行及旧 KV Slots 仍有效的边界，不能
+在普通请求尚未执行 Prefix Prefill 时调用。阶段 A 的实际 Scheduler Hook 与
+启动 / 提交 / 双 Rank 验收命令见 [GPU_RESTORE_STAGE_A.md](GPU_RESTORE_STAGE_A.md)：
 
-```python
-from experiments.kv_ec.gpu_kv_restore import LocalCheckpointSource, restore_to_gpu
-tx = restore_to_gpu(scheduler, req,
-    LocalCheckpointSource("/tmp/kv-online-rs-${GLOBAL_RUN}/node${NODE_ID}/local/<snapshot>/global_node.bin"),
-    token_start=0, source_name="local-or-rs-recovered")
-assert tx.state == "VERIFIED" and tx.stats.loaded_kv_tokens == 256
-tx.commit()
+```bash
+python -m experiments.kv_ec.verify_gpu_restore --help
+# 按 GPU_RESTORE_STAGE_A.md 在新目录执行 launch / submit / check。
+# 不要在单个 Rank 上直接 commit 来代替双 Rank 全局提交协议。
 ```
 
-保存 `RestoreStats` 和事务状态到全新 `RUN/restore-stage-a.json`。PASS 条件是
-两 Rank 都 `VERIFIED/COMMITTED`、实际加载 256（或 512/768）Token、写入字节数
+保存 `RestoreStats` 和事务状态到全新结果目录的 `rank_0.json / rank_1.json`。
+本阶段 PASS 条件是两 Rank 都 `VERIFIED/COMMITTED`、各实际加载 256 Token、写入字节数
 等于 Rank Checkpoint 长度、GPU 读回逐字节一致、旧请求行 generation 未变化且
-新 Slot 在事务后可正常释放。当前仓库没有把这个调用自动接入 Scheduler：普通
-HTTP 请求没有恢复点/请求对象注入接口，贸然接入会在 Prefix Prefill 后重复执行
-Token。必须先使用显式实验钩子或后续阶段 B 的受控请求入口。
+新 Slot 在事务后可正常释放。2026-10-27 新增默认关闭的阶段 A Hook：正常
+Prefill 256 Token 后写回并验证，完成一个正常采样输出后释放请求，不进行 Decode
+接续。它不会绕过 Prefix Prefill；不能把该实验当作阶段 B 的请求恢复协议。
 
 阶段 A 尚未在本机 GPU 验证：当前环境 `torch.cuda.is_available()` 为 false。
 因此不能声称真实 GPU 写回 PASS；CPU 回归只证明解析、TP Rank/Chunk、XOR 重建、

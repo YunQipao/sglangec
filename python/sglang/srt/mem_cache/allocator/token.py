@@ -78,13 +78,17 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             return
 
         if self.is_not_in_free_group:
+            # Build the replacement before publishing any allocator state.
+            # A failed CUDA allocation must leave the free list unchanged.
+            target = self.release_pages if self.need_sort else self.free_pages
+            updated = torch.cat((target, free_index))
             registry = self.slot_lease_registry
             if registry.enabled or registry.closed:
                 registry.on_free(free_index.tolist())
             if self.need_sort:
-                self.release_pages = torch.cat((self.release_pages, free_index))
+                self.release_pages = updated
             else:
-                self.free_pages = torch.cat((self.free_pages, free_index))
+                self.free_pages = updated
         else:
             self.free_group.append(self._copy_for_free_group(free_index))
 

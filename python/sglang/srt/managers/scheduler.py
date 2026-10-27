@@ -1158,6 +1158,11 @@ class Scheduler(
         self._engine_paused = False
         self._kv_ec_pause_gate = None
         self._kv_ec_online = None
+        self._kv_ec_gpu_restore = None
+        if os.environ.get("SGLANG_KV_EC_GPU_RESTORE") == "1":
+            from sglang.srt.debug_utils.kv_ec import create_gpu_restore_hook
+
+            self._kv_ec_gpu_restore = create_gpu_restore_hook(self)
         if os.environ.get("SGLANG_KV_EC_ONLINE") == "1":
             from sglang.srt.debug_utils.kv_ec import create_online_protector
 
@@ -1736,6 +1741,8 @@ class Scheduler(
 
             # Receive requests
             recv_reqs = self.request_receiver.recv_requests()
+            if self._kv_ec_gpu_restore is not None:
+                self._kv_ec_gpu_restore.before_inputs(recv_reqs)
             if self._kv_ec_online is not None:
                 self._kv_ec_online.before_inputs(recv_reqs)
             if self._kv_ec_pause_gate is not None:
@@ -1762,7 +1769,13 @@ class Scheduler(
                 result = self.run_batch(batch)
                 if self._kv_ec_online is not None:
                     self._kv_ec_online.after_forward(batch)
+                if self._kv_ec_gpu_restore is not None:
+                    # Completed forward, live row/slots, BEFORE result cleanup.
+                    # Blocks this scheduler thread on fixed-order TP votes.
+                    self._kv_ec_gpu_restore.after_forward(batch)
                 self.process_batch_result(batch, result)
+                if self._kv_ec_gpu_restore is not None:
+                    self._kv_ec_gpu_restore.after_result(batch)
             else:
                 # When the server is idle, do self-check and re-init some states.
                 self._sched_idled = True

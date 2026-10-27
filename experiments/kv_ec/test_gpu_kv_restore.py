@@ -11,10 +11,11 @@ import unittest
 from types import SimpleNamespace as NS
 
 import torch
+from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 
 from .gpu_kv_restore import (
     BytesCheckpointSource, LocalCheckpointSource, RestoreRejected,
-    RestoreTransaction, _validate_segments,
+    RestoreTransaction, _validate_segments, allocate_restore_slots,
 )
 from .node_block_export import pack, unpack, xor
 from .test_debug_capture import rank_fixture
@@ -93,29 +94,36 @@ class GPUKVRestoreValidationTests(unittest.TestCase):
         req_pool = NS(device="cpu", free_slots=[], req_generation=torch.tensor([0, 7]),
                       req_to_token=torch.zeros((2, 4), dtype=torch.int32))
         req = NS(req_pool_idx=1)
-        freed = []
-        allocator = NS(device="cpu", free=lambda slots: freed.extend(slots.tolist()))
-        tx = RestoreTransaction(allocator, req_pool, req, 1, 7, (4, 5), (8, 9),
-                                0, 2, NS(), state="VERIFIED")
+        allocator = TokenToKVPoolAllocator(16, torch.bfloat16, "cpu", NS(), need_sort=False)
+        old = tuple(allocator.alloc(2).tolist())
+        req_pool.req_to_token[1, :2] = torch.tensor(old)
+        new, journal = allocate_restore_slots(allocator, 2, old)
+        tx = RestoreTransaction(allocator, req_pool, req, 1, 7, old, new,
+                                0, 2, NS(), state="VERIFIED", savepoint=journal)
         tx.commit()
-        self.assertEqual(req_pool.req_to_token[1].tolist()[:2], [8, 9])
+        self.assertEqual(req_pool.req_to_token[1].tolist()[:2], list(new))
         self.assertEqual(tx.state, "COMMITTED")
-        self.assertEqual(freed[:2], [4, 5])
-        tx2 = RestoreTransaction(allocator, req_pool, req, 1, 7, (8, 9), (10, 11),
-                                 2, 2, NS())
+        self.assertTrue(set(old).issubset(allocator.free_pages.tolist()))
+        self.assertFalse(set(new).intersection(allocator.free_pages.tolist()))
+        before = allocator.free_pages.tolist()
+        newer, journal2 = allocate_restore_slots(allocator, 2, new)
+        tx2 = RestoreTransaction(allocator, req_pool, req, 1, 7, new, newer,
+                                 2, 2, NS(), savepoint=journal2)
         tx2.abort()
-        self.assertEqual(freed, [4, 5, 10, 11])
+        self.assertEqual(allocator.free_pages.tolist(), before)
 
     def test_transaction_rejects_mapping_generation_change(self):
         req_pool = NS(device="cpu", free_slots=[], req_generation=torch.tensor([0, 7]),
                       req_to_token=torch.zeros((2, 4), dtype=torch.int32))
         req = NS(req_pool_idx=1)
-        allocator = NS(device="cpu", free=lambda slots: None)
-        tx = RestoreTransaction(allocator, req_pool, req, 1, 7, (), (8, 9), 0, 2,
-                                NS(), state="VERIFIED")
+        allocator = TokenToKVPoolAllocator(16, torch.bfloat16, "cpu", NS(), need_sort=False)
+        new, journal = allocate_restore_slots(allocator, 2, ())
+        tx = RestoreTransaction(allocator, req_pool, req, 1, 7, (), new, 0, 2,
+                                NS(), state="VERIFIED", savepoint=journal)
         req_pool.req_generation[1] = 8
         with self.assertRaisesRegex(RestoreRejected, "request_generation_changed"):
             tx.commit()
+        self.assertEqual(allocator.available_size(), 16)
 
 
 if __name__ == "__main__":

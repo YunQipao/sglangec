@@ -92,9 +92,11 @@ class SlotLeaseRegistry:
         self._expire()
         if any(slot in self._owners for slot in values):
             raise SlotLeaseRejected("protected_slot_reuse")
+        if len(set(values)) != len(values) or any(
+            slot <= 0 or slot >= self._generation.numel() for slot in values
+        ):
+            raise SlotLeaseRejected("slot_out_of_bounds_or_duplicate")
         for slot in values:
-            if slot <= 0 or slot >= self._generation.numel():
-                raise SlotLeaseRejected("slot_out_of_bounds")
             self._generation[slot] += 1
 
     def on_free(self, slots: Iterable[int]) -> None:
