@@ -8,6 +8,7 @@ every subsequent step. There is no model-only forward or synthetic old owner.
 
 from dataclasses import asdict
 import json
+import logging
 import os
 from pathlib import Path
 import time
@@ -23,6 +24,48 @@ from .gpu_kv_restore import (BytesCheckpointSource, RestoreRejected, _require,
 from .gpu_restore_hook import coordinated_restore
 from .gpu_resume_hook import GPUResumeHook, token_digest
 from .node_block_export import canonical, pack, sha
+
+logger = logging.getLogger(__name__)
+
+
+def state_field(fields, name, actual, expected, matches=None):
+    fields[name] = dict(actual=actual, expected=expected,
+        matches=actual == expected if matches is None else matches)
+
+
+def decode_scheduler_state(req, batch, state, step, phase='READY'):
+    """Native eager Decode state, after prepare and before/after result.
+
+    prepare_for_decode advances both counters and lengths *before* the CUDA
+    forward. The fill-ID array is an append-lazy prefill/admission cache; Decode
+    result processing appends output_ids without refreshing that array.
+    """
+    fields = {}
+    ids = list(req.origin_input_ids) + list(req.output_ids)
+    cached = list(req.full_untruncated_fill_ids)
+    minimum = len(state['origin_input_ids']) + len(state['output_ids'])
+    state_field(fields, 'step', step, dict(min=1, max=state['decode_steps']),
+                1 <= step <= state['decode_steps'])
+    state_field(fields, 'forward_mode', batch.forward_mode.name, 'DECODE')
+    state_field(fields, 'extend_batch_idx', req.extend_batch_idx, state['extend_batch_idx'])
+    state_field(fields, 'decode_batch_idx', req.decode_batch_idx, state['decode_batch_idx'] + step)
+    state_field(fields, 'output_ids_len', len(req.output_ids), step + int(phase == 'RESULT'))
+    state_field(fields, 'origin_ids_sha256', token_digest(req.origin_input_ids), state['input_ids_sha256'])
+    state_field(fields, 'sampled_seed', list(req.output_ids[:len(state['output_ids'])]), state['output_ids'])
+    # Keep checking every cached token and its bounds; do not force a native
+    # lazy cache to contain tokens that only the result processor has appended.
+    state_field(fields, 'cached_fill_len', len(cached), dict(min=minimum, max=len(ids)),
+                minimum <= len(cached) <= len(ids))
+    state_field(fields, 'cached_fill_sha256', token_digest(cached), token_digest(ids[:len(cached)]))
+    state_field(fields, 'seq_lens_cpu', batch.seq_lens_cpu.tolist(), [256 + step])
+    state_field(fields, 'kv_committed_len_scheduled', req.kv_committed_len, 256 + step)
+    return dict(phase=phase, step=step, fields=fields)
+
+
+def require_decode_state(report):
+    failures = {k: v for k, v in report['fields'].items() if not v['matches']}
+    _require(not failures, 'cold_decode_scheduler_state_mismatch:' +
+             json.dumps(dict(phase=report['phase'], step=report['step'], fields=failures), sort_keys=True))
 
 
 def pool_cleanup(scheduler, req, row, generation):
@@ -94,14 +137,9 @@ def seed_request_from_state(req, state):
 
 
 def validate_decode_scheduler_state(req, batch, state, step):
-    _require(1 <= step <= state['decode_steps'] and
-             batch.forward_mode.name == 'DECODE' and
-             req.extend_batch_idx == state['extend_batch_idx'] and
-             req.decode_batch_idx == step and len(req.output_ids) == step and
-             list(req.full_untruncated_fill_ids) ==
-             list(req.origin_input_ids) + list(req.output_ids) and
-             int(batch.seq_lens_cpu[0]) == req.kv_committed_len == 256 + step,
-             'cold_decode_scheduler_state_mismatch')
+    report = decode_scheduler_state(req, batch, state, step)
+    require_decode_state(report)
+    return report
 
 
 class GPUColdResumeHook(GPUResumeHook):
@@ -257,12 +295,46 @@ class GPUColdResumeHook(GPUResumeHook):
             n = self.evidence['resume_decode_forward_count'] + 1
             _require(self.admitted and not self.done and self.evidence['committed'] and
                      self.evidence['scheduler_injected'], 'cold_decode_not_globally_committed')
-            validate_decode_scheduler_state(self.req, batch, self.state, n)
+            self._validate_decode_state(batch, n, 'READY')
             self._live(batch)
         self._barrier('READY_' + str(self.evidence['resume_decode_forward_count'] + 1), check)
 
+    def _validate_decode_state(self, batch, step, phase):
+        report = decode_scheduler_state(self.req, batch, self.state, step, phase)
+        fields = report['fields']
+        completed = self.evidence['resume_decode_forward_count']
+        state_field(fields, 'observed_decode_forwards', completed,
+                    step - int(phase == 'READY'))
+        observations = self.evidence['forward_observations']
+        materialized = observations[-1]['kv_length'] if observations else self.state['materialized_kv_tokens']
+        state_field(fields, 'kv_materialized_len_observed', materialized, 256 + completed)
+        state_field(fields, 'kv_allocated_len', self.req.kv.kv_allocated_len, 256 + step)
+        state_field(fields, 'row', self.req.req_pool_idx, self.row)
+        state_field(fields, 'generation', int(self.scheduler.req_to_token_pool.req_generation[self.row]), self.generation)
+        if phase != 'FORWARD_COMPLETE':
+            # READY: relay contains the input token with no KV yet. RESULT:
+            # relay contains the next sampled token, also not materialized.
+            state_field(fields, 'future_map_pending_token',
+                int(self.scheduler.future_map.output_tokens_buf[self.row]), int(self.req.output_ids[-1]))
+        else:
+            # run_batch has already overwritten the relay with the next sample;
+            # the synchronized model observer retains the actual consumed input.
+            state_field(fields, 'forward_input_ids', observations[-1]['input_ids'], [int(self.req.output_ids[-1])])
+            state_field(fields, 'forward_positions', observations[-1]['positions'], [255 + step])
+        report.update(tp_rank=self.rank, forward_ct=self.scheduler.forward_ct)
+        failed = any(not field['matches'] for field in fields.values())
+        if step <= 3 or failed:
+            self.evidence.setdefault('decode_state_diagnostics', []).append(report)
+            with (self.output / f'rank_{self.rank}.decode_state.jsonl').open('a') as handle:
+                handle.write(json.dumps(report, sort_keys=True) + '\n')
+            logger.info('STAGE_D_DECODE_STATE %s', json.dumps(report, sort_keys=True))
+        require_decode_state(report)
+
     def after_forward(self, batch):
         if self.cold_mode == 'restore':
+            self._barrier('COLD_FORWARD_STATE_' + str(self.evidence['resume_decode_forward_count']),
+                lambda: self._validate_decode_state(batch,
+                    self.evidence['resume_decode_forward_count'], 'FORWARD_COMPLETE'))
             return
         if not self.prefill_seen:
             def stage():
@@ -352,6 +424,10 @@ class GPUColdResumeHook(GPUResumeHook):
         def check():
             outputs = list(self.req.output_ids)
             count = self.evidence['resume_decode_forward_count']
+            # Final result processing releases the Req row and KV, so inspect
+            # live runtime fields only while the request still owns them.
+            if not self.req.finished():
+                self._validate_decode_state(batch, count, 'RESULT')
             _require(len(outputs) == count + 1 and outputs[0] == self.sampled_seed and
                      self.req.extend_batch_idx == self.state['extend_batch_idx'],
                      'cold_result_or_prefill_mismatch')

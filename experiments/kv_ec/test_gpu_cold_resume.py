@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from array import array
+import ast
 import hashlib
 import json
 import tempfile
@@ -20,10 +21,24 @@ from .cold_resume_state import (SAMPLING, claim_restore, require_new_process,
 from .gpu_kv_restore import (RestoreRejected, RestoreStats, RestoreTransaction,
     allocate_restore_slots, validate_initial_ownership)
 from .gpu_cold_resume_hook import (seed_request_from_state,
-    validate_decode_scheduler_state)
+    validate_decode_scheduler_state, GPUColdResumeHook)
 from .gpu_resume_hook import token_digest
 from . import verify_gpu_cold_resume as cold_cli
 from .verify_gpu_resume import compare_outputs
+
+
+def native_methods(relative_path, class_name, names, namespace):
+    """Execute unmodified native methods without importing CUDA-only modules."""
+    path = Path(__file__).resolve().parents[2] / relative_path
+    nodes = ast.parse(path.read_text()).body
+    if class_name:
+        nodes = next(n for n in nodes if isinstance(n, ast.ClassDef) and n.name == class_name).body
+    methods = [n for n in nodes if isinstance(n, ast.FunctionDef) and n.name in names]
+    assert {n.name for n in methods} == set(names)
+    module = ast.Module(body=ast.parse('from __future__ import annotations').body + methods,
+                        type_ignores=[])
+    exec(compile(module, str(path), 'exec'), namespace)
+    return {name: namespace[name] for name in names}
 
 
 class ColdStateProtocolTests(unittest.TestCase):
@@ -130,6 +145,146 @@ class ColdStateProtocolTests(unittest.TestCase):
         req.extend_batch_idx = 0
         with self.assertRaisesRegex(RestoreRejected, 'cold_decode_scheduler_state_mismatch'):
             validate_decode_scheduler_state(req, batch, self.state, 1)
+
+    def test_three_native_decode_rounds_preserve_lazy_fill_and_pending_relay(self):
+        # These are the actual Req, allocator, prepare, FutureMap and result
+        # methods, not a simulation that manually increments scheduler counters.
+        from .test_scheduler_pause import request_pool_class
+        base = 'python/sglang/srt/'
+        ns = dict(torch=torch, _is_npu=False, _is_cuda=False, _is_hip=False,
+            _DEBUG_ASSERT=False, ForwardMode=NS(DECODE=NS(name='DECODE')),
+            Range=lambda start, end: NS(start=start, end=end),
+            mamba_extra_buffer_enabled=lambda: False,
+            get_observability=lambda: NS(enable_metrics=False),
+            evict_from_tree_cache=lambda cache, count: None)
+        native_methods(base + 'mem_cache/allocation.py', None,
+                       ['alloc_for_decode', 'alloc_token_slots', '_alloc_page_size'], ns)
+        req_methods = native_methods(base + 'managers/schedule_batch.py', 'Req',
+            ['_refresh_fill_ids', 'set_extend_range', 'finished', 'update_finish_state'], ns)
+        native_methods(base + 'managers/schedule_batch.py', 'ScheduleBatch', ['prepare_for_decode'], ns)
+        relay_methods = native_methods(base + 'managers/overlap_utils.py', 'FutureMap', ['stash'], ns)
+        native_methods(base + 'managers/overlap_utils.py', None, ['resolve_forward_inputs'], ns)
+        processor_methods = native_methods(base + 'managers/scheduler_components/batch_result_processor.py',
+            'SchedulerBatchResultProcessor', ['process_batch_result_decode', '_normalize_decode_outputs'], ns)
+        req = type('NativeReq', (), req_methods)()
+        req.rid, req.origin_input_ids = self.state['request_id'], array('q', self.state['origin_input_ids'])
+        req.output_ids, req.full_untruncated_fill_ids = array('q'), array('q')
+        req.kv_committed_len = 0
+        req.finished_reason = req.to_finish = req.grammar = None
+        req.sampling_params = NS(max_new_tokens=17)
+        # Unsupported stop policies are already rejected by the Stage D gate.
+        req._check_vocab_boundary_finish = req._check_token_based_finish = lambda tokens: False
+        req._check_str_based_finish = lambda count: False
+        req.time_stats = NS(set_last_decode_finish_time=lambda: None)
+        req.return_logprob = req.return_sampling_mask = req.return_hidden_states = False
+        seed_request_from_state(req, self.state)
+        allocator = TokenToKVPoolAllocator(512, torch.bfloat16, 'cpu', NS(), need_sort=False)
+        pool = request_pool_class().__new__(request_pool_class())
+        pool.req_to_token = torch.zeros((2, 512), dtype=torch.int32)
+        pool.req_generation = torch.tensor([0, 1])
+        pool.free_slots = []
+        req.req_pool_idx = 1
+        req.is_retracted = False
+        # Initial committed install: real CPU slots, no model forward claimed.
+        pool.req_to_token[1, :256] = allocator.alloc(256).to(torch.int32)
+        req.kv_committed_len, req.kv = 256, NS(kv_allocated_len=256)
+        spec = NS(is_none=lambda: True, is_ngram=lambda: False)
+        batch = NS(reqs=[req], spec_algorithm=spec, model_config=NS(is_encoder_decoder=False),
+            sampling_info=NS(penalizer_orchestrator=NS(is_required=False)),
+            seq_lens=torch.tensor([256]), seq_lens_cpu=torch.tensor([256]),
+            orig_seq_lens=torch.tensor([256]), req_pool_indices=torch.tensor([1]),
+            req_to_token_pool=pool, tree_cache=NS(page_size=1, token_to_kv_pool_allocator=allocator),
+            maybe_evict_swa=lambda: None, hisparse_coordinator=None,
+            prefill_input_ids_cpu=None, input_ids=None, enable_overlap=False, return_logprob=False)
+        relay = type('NativeFutureMap', (), relay_methods)()
+        relay.spec_algo, relay.output_tokens_buf = spec, torch.full((2,), -1, dtype=torch.int64)
+        relay._forward_buf_initialized = True
+        relay.need_topk = relay.need_hidden_states = False
+        relay.draft_probs_buf = relay.dsa_topk_indices_buf = None
+        relay._maybe_init_dsa_topk_indices_buf = lambda payload: None
+        relay.stash(batch.req_pool_indices, NS(bonus_tokens=torch.tensor([self.state['pending_token_id']])))
+        processor = type('NativeResultProcessor', (), processor_methods)()
+        processor.enable_overlap = processor.enable_overlap_mlx = False
+        processor.token_to_kv_pool_allocator = allocator
+        processor.metrics_reporter = NS(num_generated_tokens=0, forward_ct_decode=0,
+            report_decode_stats=lambda *args, **kwargs: None)
+        processor._maybe_update_reasoning_tokens = lambda *args: None
+        processor._handle_finish_state_updated_req = lambda *args: None
+        processor.output_streamer = NS(stream_output=lambda *args: None)
+        with tempfile.TemporaryDirectory() as temp:
+            hook = GPUColdResumeHook.__new__(GPUColdResumeHook)
+            hook.req, hook.state, hook.row, hook.generation, hook.rank = req, self.state, 1, 1, 0
+            hook.cold_mode, hook.admitted, hook.done, hook.timeout = 'restore', True, False, 120
+            hook.sampled_seed, hook.meta = self.state['pending_token_id'], self.meta
+            hook.prefix_slots = tuple(pool.req_to_token[1, :256].tolist())
+            hook.output = Path(temp)
+            hook.scheduler = NS(req_to_token_pool=pool, future_map=relay, forward_ct=0,
+                                token_to_kv_pool_allocator=allocator)
+            hook.evidence = dict(resume_decode_forward_count=0, forward_observations=[],
+                                 committed=True, scheduler_injected=True)
+            phases = []
+            def barrier(phase, action):
+                phases.append(phase)
+                return action()  # collectives are tested separately, not GPU evidence
+            hook._barrier = barrier
+            for step in range(1, 4):
+                pending = req.output_ids[-1]
+                ns['prepare_for_decode'](batch)
+                hook.before_forward(batch)
+                self.assertEqual(req.decode_batch_idx, step)
+                self.assertEqual(req.kv_committed_len, 256 + step)  # scheduled, not materialized yet
+                self.assertEqual(hook.evidence['resume_decode_forward_count'], step - 1)
+                ns['resolve_forward_inputs'](batch, relay)
+                self.assertEqual(batch.input_ids.tolist(), [pending])
+                # CPU model stand-in completes one forward and samples a token.
+                # The actual CUDA observer is separately required by GPU acceptance.
+                sampled = batch.input_ids + 1
+                hook.scheduler.forward_ct += 1
+                hook.evidence['resume_decode_forward_count'] += 1
+                hook.evidence['forward_observations'].append(dict(kv_length=int(batch.seq_lens_cpu[0]),
+                    input_ids=batch.input_ids.tolist(), positions=[int(batch.seq_lens_cpu[0]) - 1]))
+                relay.stash(batch.req_pool_indices, NS(bonus_tokens=sampled))
+                batch.input_ids = None  # native run_batch relay contract
+                hook.after_forward(batch)
+                result = NS(copy_done=None, routed_experts_output=None, indexer_topk_output=None,
+                    logits_output=None, next_token_ids=sampled, can_run_cuda_graph=False,
+                    num_correct_drafts=0)
+                processor.process_batch_result_decode(batch, result)
+                hook.after_result(batch)
+                self.assertEqual(list(req.output_ids), list(range(7, 8 + step)))
+                self.assertEqual(len(req.full_untruncated_fill_ids), 257)
+                self.assertNotEqual(list(req.full_untruncated_fill_ids),
+                    list(req.origin_input_ids) + list(req.output_ids))  # old assertion is invalid
+                self.assertFalse(req.finished())
+            entries = [json.loads(line) for line in (Path(temp) / 'rank_0.decode_state.jsonl').read_text().splitlines()]
+            self.assertEqual(len(entries), 9)
+            self.assertTrue(all(f['matches'] for e in entries for f in e['fields'].values()))
+            for index, step in enumerate(range(1, 4)):
+                self.assertEqual(phases[index * 3:index * 3 + 3], [f'READY_{step}',
+                    f'COLD_FORWARD_STATE_{step}', 'RESULT_' + token_digest(req.output_ids[:step + 1])])
+            # A poisoned relay must fail with the actual and expected token.
+            relay.output_tokens_buf[1] = -1
+            with self.assertRaisesRegex(RestoreRejected, 'future_map_pending_token.*actual.*-1.*expected.*10'):
+                hook._validate_decode_state(batch, 3, 'RESULT')
+
+    def test_lazy_fill_is_still_validated_and_wrong_counters_are_named(self):
+        req = NS(extend_batch_idx=1, decode_batch_idx=2, output_ids=[7, 8],
+            origin_input_ids=self.state['origin_input_ids'],
+            full_untruncated_fill_ids=self.state['origin_input_ids'] + [7], kv_committed_len=258)
+        batch = NS(forward_mode=NS(name='DECODE'), seq_lens_cpu=torch.tensor([258]))
+        validate_decode_scheduler_state(req, batch, self.state, 2)
+        for field, value, diagnostic in (
+            ('decode_batch_idx', 1, 'decode_batch_idx'),
+            ('kv_committed_len', 257, 'kv_committed_len_scheduled'),
+            ('output_ids', [7], 'output_ids_len'),
+            ('full_untruncated_fill_ids', self.state['origin_input_ids'] + [9], 'cached_fill_sha256'),
+            ('full_untruncated_fill_ids', self.state['origin_input_ids'], 'cached_fill_len'),
+        ):
+            with self.subTest(field=field, value=value):
+                broken = deepcopy(req)
+                setattr(broken, field, value)
+                with self.assertRaisesRegex(RestoreRejected, 'cold_decode_scheduler_state_mismatch:.*' + diagnostic):
+                    validate_decode_scheduler_state(broken, batch, self.state, 2)
 
 
 class InitialInstallTransactionTests(unittest.TestCase):

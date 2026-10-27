@@ -57,6 +57,81 @@ both journals; no Decode may start. A completed Decode uses the target's
 actual Triton `kv_indices` and new row mapping, and final ChunkCache / Req Pool
 cleanup is checked on both ranks.
 
+## Second-Decode Assertion Fix (2026-10-27)
+
+The failed run `/tmp/kv-cold-d-20261027.98GQbM` contains one completed CUDA
+Decode observation on each rank, with input `20443`, position `256`, and 257
+KV indices. The old READY assertion incorrectly required
+`full_untruncated_fill_ids == origin_input_ids + output_ids` on every Decode.
+Native `Req._refresh_fill_ids` is called on admission/extend preparation, not
+from `ScheduleBatch.prepare_for_decode` or the Decode result processor. After
+the restored seed, the cache remains 257 tokens long while `output_ids` grows.
+The second READY therefore rejects a valid native state. This is an experiment
+assertion error, not an incorrect `decode_batch_idx` seed or a missing input
+token. No native Req counters or scheduler transitions need to be rewritten.
+
+For the first three Decode rounds the correct READY state is:
+
+| Decode step | decode_batch_idx | output_ids length | cached fill length | kv_committed_len / seq_lens_cpu | KV materialized before Forward | FutureMap input / position |
+|---|---:|---:|---:|---:|---:|---|
+| 1 | 1 | 1 | 257 | 257 | 256 | y0 / 256 |
+| 2 | 2 | 2 | 257 | 258 | 257 | y1 / 257 |
+| 3 | 3 | 3 | 257 | 259 | 258 | y2 / 258 |
+
+`extend_batch_idx` stays 1. Native `prepare_for_decode` allocates a new output
+Slot and increments `decode_batch_idx`, `kv_committed_len`, and batch lengths
+before the Forward; that increment is not proof of materialization. The
+synchronized model observer is the proof of completed CUDA execution. Before
+result processing, `run_batch` has already put the newly sampled token in
+FutureMap. The result processor then appends that token to `output_ids` without
+refreshing the fill cache. Its KV is pending until the next Decode.
+
+The corrected invariant checks all cached tokens against the corresponding
+prefix of the logical original-plus-output sequence, enforces cache bounds
+(at least the sealed seed, at most the current logical sequence), and keeps
+the original input digest, sampled seed, counters, lengths, ownership and GPU
+attention checks. It does not refresh the native cache just to satisfy an
+experimental assertion. No GPU write/readback or transaction logic changes.
+
+Stage D restore mode writes `rank_0.decode_state.jsonl` and
+`rank_1.decode_state.jsonl`, also logged as `STAGE_D_DECODE_STATE`, at READY,
+FORWARD_COMPLETE and RESULT for steps 1–3, and on any later mismatch. Every
+checked field has `actual`, `expected`, and `matches`. These include lazy fill
+bounds/digest, output length, extend/decode counters, scheduled and observed
+materialized KV lengths, allocation length, sequence length, Row/Generation,
+pending FutureMap token, and observed input/position. FORWARD_COMPLETE checks
+the consumed input from the synchronized observer: the relay then already
+contains the *next* sample, which is checked after RESULT instead. Both ranks
+vote through a Stage D-only `COLD_FORWARD_STATE_<step>` gate before result
+processing; the D checker requires that gate in the event sequence. Existing
+A/B/C gates and formats are unchanged. A mismatch remains fail-closed with a
+field-specific JSON error in the failure chain.
+
+The CPU regression executes the actual native Req methods, Decode allocator,
+`prepare_for_decode`, FutureMap `stash` / `resolve_forward_inputs`, and Decode
+result processor across three rounds. Only the CUDA model and unsupported
+features are stubbed. The old full-equality assertion is demonstrably false
+while these native transitions remain valid. Poisoned relay, corrupted cache,
+wrong counters and lengths still fail. CPU success does not establish GPU PASS.
+
+Local verification for this fix: baseline 100 tests (99 passed, one Unix-socket
+sandbox skip); after the fix 102 tests (101 passed, the same skip). Command:
+
+```bash
+PYTHONPATH=python:. python -m unittest \
+  experiments.kv_ec.test_gpu_cold_resume \
+  experiments.kv_ec.test_gpu_resume \
+  experiments.kv_ec.test_gpu_restore_hook \
+  experiments.kv_ec.test_gpu_kv_restore \
+  experiments.kv_ec.test_scheduler_pause \
+  experiments.kv_ec.test_rdma_upload_control \
+  experiments.kv_ec.test_rs_recovery_source -q
+```
+
+The local NVIDIA driver is unavailable, so this fix has not yet been rerun
+through real TP2 CUDA acceptance. The old run proves only its first Decode;
+neither that artifact nor the CPU suite establishes `pass_stage_d=true`.
+
 ## 233 Procedure
 
 Use a new shell on 233. Check GPU availability first; the launcher only chooses
@@ -68,11 +143,12 @@ only if its identity/input digest matches the supplied `INPUT_IDS`.
 cd /media/sda1/iic_data/luotao/sglangec/sglang
 source /media/sda1/iic_data/anaconda3/etc/profile.d/conda.sh
 conda activate sglang-ec
+set -o pipefail
 export PYTHONPATH="$PWD/python:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export MODEL=/media/sda1/iic_data/luotao/models/Qwen3-8B
 export TEMPLATE=/tmp/kv-online-rs-online-rs-tp2-shafix-t01/node1/local/5695c8b23b7b66cd11158fd11cb01b970185b44ad57436f99929f294e40a0c3b/global_node.bin
-export RUN=/tmp/kv-cold-d-20261027-01
-mkdir -p "$RUN"
+export RUN="$(mktemp -d /tmp/kv-cold-d-fix-20261027.XXXXXX)"
+printf 'Use this RUN in the other terminal: %s\n' "$RUN"
 export INPUT_IDS="$RUN/input_ids.json"
 export BUNDLE="$RUN/capture_bundle"
 export REF="$RUN/capture-reference"
@@ -90,7 +166,7 @@ export PORT=30485
 python -u -m experiments.kv_ec.verify_gpu_cold_resume capture \
   --model "$MODEL" --template-checkpoint "$TEMPLATE" --input-ids "$INPUT_IDS" \
   --bundle "$BUNDLE" --output "$REF/evidence" --gpus 1,3 --port "$PORT" \
-  --mem-fraction-static 0.60 --timeout 120
+  --mem-fraction-static 0.60 --timeout 120 2>&1 | tee "$RUN/capture-server.log"
 ```
 
 In a second terminal, submit the normal 17-token request and inspect the
@@ -101,12 +177,14 @@ cd /media/sda1/iic_data/luotao/sglangec/sglang
 source /media/sda1/iic_data/anaconda3/etc/profile.d/conda.sh
 conda activate sglang-ec
 export PYTHONPATH="$PWD/python:$PWD${PYTHONPATH:+:$PYTHONPATH}"
-export RUN=/tmp/kv-cold-d-20261027-01
+# Set RUN to the exact fresh path printed in the first terminal.
+export RUN=/tmp/kv-cold-d-fix-20261027.REPLACE_WITH_PRINTED_SUFFIX
 python -m experiments.kv_ec.verify_gpu_cold_resume submit \
   --output "$RUN/capture-reference/evidence" --url http://127.0.0.1:30485 \
   --wait-ready 600 --timeout 600
 python -m experiments.kv_ec.verify_gpu_cold_resume reference \
   --output "$RUN/capture-reference/evidence"
+echo "REFERENCE_EXIT=$?"
 ```
 
 After capture/reference has completed, manually stop **only this experiment's
@@ -117,24 +195,46 @@ to launch a second instance while the origin is still alive. Choose currently
 idle GPUs again; use a different output directory and port:
 
 ```bash
-export RUN=/tmp/kv-cold-d-20261027-01
+# Keep the fresh RUN value created above; never reuse the failed run's ledger.
 export MODEL=/media/sda1/iic_data/luotao/models/Qwen3-8B
 python -u -m experiments.kv_ec.verify_gpu_cold_resume launch \
   --model "$MODEL" --bundle "$RUN/capture_bundle" \
   --reference "$RUN/capture-reference/evidence" --ledger "$RUN/restore-ledger" \
   --output "$RUN/cold-resume/evidence" --gpus 1,3 --port 30486 \
-  --mem-fraction-static 0.60 --timeout 120
+  --mem-fraction-static 0.60 --timeout 120 2>&1 | tee "$RUN/cold-server.log"
 ```
 
 Submit and check from another terminal:
 
 ```bash
-export RUN=/tmp/kv-cold-d-20261027-01
+# In the submission terminal keep the same fresh RUN value.
 python -m experiments.kv_ec.verify_gpu_cold_resume restore \
   --output "$RUN/cold-resume/evidence" --url http://127.0.0.1:30486 \
   --wait-ready 600 --timeout 600
 python -m experiments.kv_ec.verify_gpu_cold_resume check \
   --output "$RUN/cold-resume/evidence"
+echo "CHECK_EXIT=$?"
+```
+
+Do not continue unless Reference passes. Use unused ports if 30485/30486 are
+occupied. Each retry must start with another `mktemp` directory, a new real
+capture bundle and a separate ledger, even if the previous failure occurred
+after only one Decode. Existing sealed files and one-shot claims are retained.
+
+To display all first-three-round actual/expected values, or only mismatches:
+
+```bash
+python - "$RUN/cold-resume/evidence" <<'PY'
+import json, pathlib, sys
+for rank in (0, 1):
+    path = pathlib.Path(sys.argv[1]) / f"rank_{rank}.decode_state.jsonl"
+    for line in path.read_text().splitlines():
+        entry = json.loads(line)
+        print(json.dumps(entry, sort_keys=True))
+        for field, values in entry["fields"].items():
+            if not values["matches"]:
+                print("MISMATCH", rank, entry["step"], entry["phase"], field, values)
+PY
 ```
 
 The one-shot ledger makes every restore attempt consume that checkpoint, including

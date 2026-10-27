@@ -132,6 +132,7 @@ def read_evidence(output, mode):
             phases += ['GLOBAL_COLD_REQUEST_READY_OK', 'GLOBAL_COMMIT']
             for step in range(1, 17):
                 phases += [f'GLOBAL_READY_{step}_OK', f'GLOBAL_OBSERVED_{step - 1}_OK',
+                    f'GLOBAL_COLD_FORWARD_STATE_{step}_OK',
                     'GLOBAL_RESULT_' + token_digest(outputs[:step + 1]) + '_OK']
             phases += ['GLOBAL_RESTORE_LEDGER_COMMITTED_OK', 'GLOBAL_RESTORE_LEDGER_VISIBLE_OK']
             phases += ['COMPLETE']
