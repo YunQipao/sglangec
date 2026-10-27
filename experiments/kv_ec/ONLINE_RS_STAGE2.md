@@ -364,3 +364,56 @@ CPU Mock 不能证明真实 GPU fence、Host D2H 重叠、HCA/路由/GID、RDMA 
 若要声明整节点容错，后续必须引入第三个独立物理故障域/重新设计放置策略，
 并单独实现持久化、失效检测、恢复调度、GPU pool 安全回写；不能仅把状态名
 改成 GLOBAL_COMMITTED。
+
+## 阶段 A：GPU KV 写回实验入口
+
+`experiments/kv_ec/gpu_kv_restore.py` 提供默认不导入 Scheduler 的显式 API：
+`restore_to_gpu(scheduler, req, LocalCheckpointSource(path))`。它只接受 TP=2、
+Qwen3-8B BF16、NHD、page-size=1、36 层和完整 `global_node.bin`；逐层按
+`layer_records` 的 K/V 顺序校验 SHA，将每个 Rank 的 K/V 写到该 Rank 进程的新
+分配 Slots，在私有 CUDA Stream 上记录 Event，Event 完成后逐字节读回校验。
+请求行和旧 Slot 只有在返回的 `RestoreTransaction.state == "VERIFIED"` 后才
+能由调用方执行 `commit()`；失败必须 `abort()`，释放新 Slot。它不会释放或
+覆盖旧 Slot，也不会调用模型 forward。
+
+阶段 A CPU 回归：
+
+```bash
+PYTHONPATH="$PWD/python:$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+  python -m unittest experiments.kv_ec.test_gpu_kv_restore -v
+```
+
+真实服务器上必须在每个 TP Rank 所属进程执行同一个受控恢复请求，使用已经通过
+`verify_online_rs verify` 的新证据目录；不能将 Rank 0 文件交给 Rank 1。恢复
+调用应发生在 Scheduler 的 pre-forward 实验钩子中，此时请求行已分配但尚未执行
+Prefix Prefill：
+
+```python
+from experiments.kv_ec.gpu_kv_restore import LocalCheckpointSource, restore_to_gpu
+tx = restore_to_gpu(scheduler, req,
+    LocalCheckpointSource("/tmp/kv-online-rs-${GLOBAL_RUN}/node${NODE_ID}/local/<snapshot>/global_node.bin"),
+    token_start=0, source_name="local-or-rs-recovered")
+assert tx.state == "VERIFIED" and tx.stats.loaded_kv_tokens == 256
+tx.commit()
+```
+
+保存 `RestoreStats` 和事务状态到全新 `RUN/restore-stage-a.json`。PASS 条件是
+两 Rank 都 `VERIFIED/COMMITTED`、实际加载 256（或 512/768）Token、写入字节数
+等于 Rank Checkpoint 长度、GPU 读回逐字节一致、旧请求行 generation 未变化且
+新 Slot 在事务后可正常释放。当前仓库没有把这个调用自动接入 Scheduler：普通
+HTTP 请求没有恢复点/请求对象注入接口，贸然接入会在 Prefix Prefill 后重复执行
+Token。必须先使用显式实验钩子或后续阶段 B 的受控请求入口。
+
+阶段 A 尚未在本机 GPU 验证：当前环境 `torch.cuda.is_available()` 为 false。
+因此不能声称真实 GPU 写回 PASS；CPU 回归只证明解析、TP Rank/Chunk、XOR 重建、
+事务提交/回滚和损坏拒绝。
+
+阶段 B（请求接续）暂不宣称完成。SGLang 的 `Req.kv_committed_len` 在
+`ScheduleBatch.prepare_for_decode()` 中先递增并分配下一 Decode Slot；模型输出
+在 `batch_result_processor.py` 追加到 `Req.output_ids`，而 KV 写入发生在
+Attention backend 的 `forward_decode()`。因此“最后一个已采样 Token 是否已有
+KV”必须由 Scheduler 的实际 batch 边界确定，不能用 `len(origin_input_ids) +
+len(output_ids)` 猜测。阶段 B 需要一个显式恢复请求入口，按 `Req.req_pool_idx`、
+`req_generation`、`kv_committed_len`、`origin_input_ids/output_ids` 和下一输入
+Token 原子重建，并在恢复后直接进入 Decode；在此入口完成前，不提供伪造的续推
+命令，也不以重新 Prefill 作为恢复验收。
