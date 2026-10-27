@@ -50,12 +50,13 @@ class GPUResumeHook(GPURestoreHook):
     input_requirement_reason = "stage_b_requires_plain_256_token_resume_request"
 
     def __init__(self, scheduler, checkpoint, output, run_id, timeout=120, *,
-                 mode="resume", decode_steps=16):
+                 mode="resume", decode_steps=16, source=None, source_name=None):
         _require(mode in ("reference", "resume", "corrupt") and
                  16 <= decode_steps <= 128, "stage_b_invalid_mode_or_steps")
         self.mode, self.decode_steps = mode, decode_steps
         self.output_token_limit = 1 if mode == "corrupt" else decode_steps + 1
-        super().__init__(scheduler, checkpoint, output, run_id, timeout)
+        super().__init__(scheduler, checkpoint, output, run_id, timeout,
+                         source=source, source_name=source_name)
         runner = scheduler.model_worker.model_runner
         _require(type(runner.attn_backend).__name__ == "TritonAttnBackend" and
                  getattr(runner.attn_backend, "sliding_window_size", None) in (None, -1, 0) and
@@ -85,12 +86,31 @@ class GPUResumeHook(GPURestoreHook):
 
     @classmethod
     def from_env(cls, scheduler):
-        return cls(scheduler, os.environ["SGLANG_KV_EC_GPU_RESTORE_CHECKPOINT"],
+        source, source_name, rs = None, None, None
+        if os.environ.get("SGLANG_KV_EC_RS_RESUME") == "1":
+            from .rs_recovery_source import load_bundle
+            config = json.loads((Path(os.environ["SGLANG_KV_EC_GPU_RESTORE_OUTPUT"]) /
+                                 "run.json").read_text())
+            _require(config.get("experiment_mode") == "rs-resume" and
+                     config["mode"] == os.environ["SGLANG_KV_EC_GPU_RESUME_MODE"] == "resume",
+                     "stage_c_requires_explicit_rs_resume")
+            source, report, _, rs = load_bundle(config["rs_source"]["path"], config["rs_source"])
+            _require(config["checkpoint_sha256"] == rs["block_sha256"],
+                     "stage_c_run_source_hash_mismatch")
+            source_name = "native-rdma-rs:" + report["receipt"]["stripe_id"]
+        hook = cls(scheduler, os.environ["SGLANG_KV_EC_GPU_RESTORE_CHECKPOINT"],
                    os.environ["SGLANG_KV_EC_GPU_RESTORE_OUTPUT"],
                    os.environ["SGLANG_KV_EC_GPU_RESTORE_RUN_ID"],
                    float(os.environ.get("SGLANG_KV_EC_GPU_RESTORE_TIMEOUT", "120")),
                    mode=os.environ["SGLANG_KV_EC_GPU_RESUME_MODE"],
-                   decode_steps=int(os.environ["SGLANG_KV_EC_GPU_RESUME_STEPS"]))
+                   decode_steps=int(os.environ["SGLANG_KV_EC_GPU_RESUME_STEPS"]),
+                   source=source, source_name=source_name)
+        if rs is not None:
+            hook.rs_source_binding = rs
+            hook.evidence.update(experiment_mode="rs-resume", rs_source=rs,
+                source_kind="native-rdma-rs-immutable-bytes",
+                runtime_original_local_file_used=False)
+        return hook
 
     def _fail(self, exc):
         self.evidence["pass_stage_b"] = False
@@ -242,7 +262,7 @@ class GPUResumeHook(GPURestoreHook):
     def _prepare_restore(self):
         _require(sha(self.source.load()) == self.block_hash, "checkpoint_changed_after_startup")
         self.tx = restore_to_gpu(self.scheduler, self.req, self.source,
-                                 source_name=str(self.source.path))
+                                 source_name=self.source_name)
         try:
             pool = self.scheduler.model_worker.model_runner.token_to_kv_pool
             if self.mode == "corrupt" and self.rank == 0:

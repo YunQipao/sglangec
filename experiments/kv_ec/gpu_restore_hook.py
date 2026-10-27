@@ -78,7 +78,8 @@ class GPURestoreHook:
     output_token_limit = 1
     input_requirement_reason = "stage_a_requires_plain_256_token_one_output_request"
 
-    def __init__(self, scheduler, checkpoint, output, run_id, timeout=120):
+    def __init__(self, scheduler, checkpoint, output, run_id, timeout=120, *,
+                 source=None, source_name=None):
         validate_runtime(scheduler)
         _require(not any(os.environ.get(k) == "1" for k in (
             "SGLANG_KV_EC_ONLINE", "SGLANG_KV_EC_PAUSE_RESUME", "SGLANG_KV_EC_DEBUG")),
@@ -89,11 +90,13 @@ class GPURestoreHook:
                  "stage_a_requires_two_rank_cpu_group")
         self.scheduler = scheduler
         self.rank = int(scheduler.model_worker.ps.tp_rank)
-        self.source = LocalCheckpointSource(Path(checkpoint))
+        self.source = source if source is not None else LocalCheckpointSource(Path(checkpoint))
+        self.source_name = source_name if source_name is not None else str(checkpoint)
         block = self.source.load()
         self.block_hash = sha(block)
         self.meta = validate_checkpoint(block)
-        self.source = LocalCheckpointSource(Path(checkpoint), self.block_hash)
+        if source is None:
+            self.source = LocalCheckpointSource(Path(checkpoint), self.block_hash)
         self.output, self.run_id, self.timeout = Path(output), run_id, timeout
         _require(self.output.is_absolute() and self.output.is_dir() and bool(run_id)
                  and timeout > 0, "stage_a_output_run_or_timeout_invalid")
@@ -132,6 +135,8 @@ class GPURestoreHook:
         identity = dict(phase=phase, run_id=self.run_id, checkpoint=self.block_hash,
                         token_ids_sha256=self.meta["ranks"][0]["token_ids_sha256"],
                         row=self.evidence.get("row"), generation=self.evidence.get("generation_before"))
+        if getattr(self, "rs_source_binding", None) is not None:
+            identity["rs_source_binding"] = self.rs_source_binding
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).digest()
         value = torch.tensor([int(ready), *digest], dtype=torch.int32)
         gathered = [torch.empty_like(value) for _ in range(2)]
@@ -235,7 +240,7 @@ class GPURestoreHook:
                      "stage_a_checkpoint_model_mismatch")
             self.evidence["runtime_identity"] = identity
             self.tx = restore_to_gpu(self.scheduler, req, self.source,
-                                     source_name=str(self.source.path))
+                                     source_name=self.source_name)
             return self.tx
 
         def observe(phase, tx):

@@ -174,6 +174,7 @@ def launch(args, *, extra_config=None, extra_env=None):
         CUDA_VISIBLE_DEVICES=args.gpus, CUDA_DEVICE_ORDER="PCI_BUS_ID",
         SGLANG_KV_EC_GPU_RESTORE="1",
         SGLANG_KV_EC_GPU_RESUME="0",
+        SGLANG_KV_EC_RS_RESUME="0",
         SGLANG_KV_EC_GPU_RESTORE_CHECKPOINT=str(args.checkpoint.resolve()),
         SGLANG_KV_EC_GPU_RESTORE_OUTPUT=str(output),
         SGLANG_KV_EC_GPU_RESTORE_RUN_ID=output.name,

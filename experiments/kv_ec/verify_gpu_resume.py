@@ -239,7 +239,7 @@ def check_results(output, reference=None):
     return verdict
 
 
-def launch(args):
+def launch(args, *, extra_config=None, extra_env=None):
     _require(16 <= args.decode_steps <= 128, "stage_b_invalid_decode_steps")
     reference = None
     if args.mode == "resume":
@@ -248,10 +248,14 @@ def launch(args):
         _require(cfg["decode_steps"] == args.decode_steps and cfg["checkpoint_sha256"] ==
                  sha(args.checkpoint.read_bytes()), "stage_b_reference_checkpoint_or_steps_mismatch")
         reference = reference_identity(args.reference)
-    stage_a.launch(args, extra_config=dict(experiment="gpu-resume-stage-b", mode=args.mode,
-        decode_steps=args.decode_steps, reference=reference), extra_env=dict(
+    config = dict(experiment="gpu-resume-stage-b", mode=args.mode,
+        decode_steps=args.decode_steps, reference=reference)
+    config.update(extra_config or {})
+    env = dict(
         SGLANG_KV_EC_GPU_RESUME="1", SGLANG_KV_EC_GPU_RESUME_MODE=args.mode,
-        SGLANG_KV_EC_GPU_RESUME_STEPS=str(args.decode_steps)))
+        SGLANG_KV_EC_GPU_RESUME_STEPS=str(args.decode_steps))
+    env.update(extra_env or {})
+    stage_a.launch(args, extra_config=config, extra_env=env)
 
 
 def save_verdict(output, result):

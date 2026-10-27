@@ -182,7 +182,10 @@ class RemoteRSClient:
         expected = status["manifest"]["nodes"][missing_node]["sha256"]
         if sha(raw) != expected or sha(raw) != item.get("payload_sha256"):
             raise ValueError("RDMA recovered node checksum mismatch")
-        return status, raw, {"send_stats": send_stats, **item}
+        # Keep all four native legs. ``item.send_stats`` belongs to the server
+        # and previously hid the client's survivor upload under the same key.
+        return status, raw, {**item, "client_send_stats": send_stats,
+                             "client_receive_stats": result["stats"]}
 
     def call(self, op, *, payload=b"", **fields):
         start = time.perf_counter()
