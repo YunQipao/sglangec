@@ -174,6 +174,7 @@ def launch(args, *, extra_config=None, extra_env=None):
         CUDA_VISIBLE_DEVICES=args.gpus, CUDA_DEVICE_ORDER="PCI_BUS_ID",
         SGLANG_KV_EC_GPU_RESTORE="1",
         SGLANG_KV_EC_GPU_RESUME="0",
+        SGLANG_KV_EC_GPU_COLD_RESUME="0",
         SGLANG_KV_EC_RS_RESUME="0",
         SGLANG_KV_EC_GPU_RESTORE_CHECKPOINT=str(args.checkpoint.resolve()),
         SGLANG_KV_EC_GPU_RESTORE_OUTPUT=str(output),
@@ -187,7 +188,7 @@ def launch(args, *, extra_config=None, extra_env=None):
     os.execv(sys.executable, server_argv(args))
 
 
-def submit(args, *, max_new_tokens=1):
+def submit(args, *, max_new_tokens=1, sampling_overrides=None, request_id=None):
     output = args.output.resolve()
     config = json.loads((output / "run.json").read_text())
     block = Path(config["checkpoint"]).read_bytes()
@@ -203,8 +204,10 @@ def submit(args, *, max_new_tokens=1):
             if time.monotonic() >= deadline:
                 raise TimeoutError("stage_a_server_not_ready")
             time.sleep(1)
-    request = dict(input_ids=ids, rid=config["run_id"],
-                   sampling_params=dict(max_new_tokens=max_new_tokens, temperature=0, ignore_eos=True),
+    sampling = dict(max_new_tokens=max_new_tokens, temperature=0, ignore_eos=True)
+    sampling.update(sampling_overrides or {})
+    request = dict(input_ids=ids, rid=request_id or config["run_id"],
+                   sampling_params=sampling,
                    stream=False)
     # Reserve the submission marker before sending: retry cannot silently create
     # another request in a run whose one-shot request may have been accepted.

@@ -1750,6 +1750,8 @@ class Scheduler(
                 # forbidden during this isolated experiment's ownership window.
                 self._kv_ec_pause_gate.check_inputs(recv_reqs)
             self.process_input_requests(recv_reqs)
+            if self._kv_ec_gpu_restore is not None:
+                self._kv_ec_gpu_restore.after_inputs()
             if self._kv_ec_pause_gate is not None:
                 if self._kv_ec_pause_gate.tick():
                     continue

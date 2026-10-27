@@ -137,6 +137,8 @@ class GPURestoreHook:
                         row=self.evidence.get("row"), generation=self.evidence.get("generation_before"))
         if getattr(self, "rs_source_binding", None) is not None:
             identity["rs_source_binding"] = self.rs_source_binding
+        if getattr(self, "request_state_binding", None) is not None:
+            identity["request_state_binding"] = self.request_state_binding
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).digest()
         value = torch.tensor([int(ready), *digest], dtype=torch.int32)
         gathered = [torch.empty_like(value) for _ in range(2)]
@@ -206,6 +208,9 @@ class GPURestoreHook:
                 self.evidence["rejected_input"] = input_context
             self._fail(exc)
             raise
+
+    def after_inputs(self):
+        """Experimental cold admission overrides this; A/B/C are unchanged."""
 
     def before_forward(self, batch):
         """Stage A needs no pre-forward work; Stage B overrides this barrier."""

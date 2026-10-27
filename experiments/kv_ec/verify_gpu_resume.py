@@ -178,7 +178,8 @@ def read_run(output, expected_mode=None):
     return config, reports, all_logits
 
 
-def compare_outputs(reference, resumed, reference_logits, resumed_logits):
+def compare_outputs(reference, resumed, reference_logits, resumed_logits, *,
+                    output_offset=0, step_offset=0):
     _require(len(reference) == len(resumed) == len(reference_logits) == len(resumed_logits),
              "stage_b_reference_length_mismatch")
     first = next((i for i, pair in enumerate(zip(reference, resumed)) if pair[0] != pair[1]), None)
@@ -186,10 +187,11 @@ def compare_outputs(reference, resumed, reference_logits, resumed_logits):
     for step, (ref, actual) in enumerate(zip(reference_logits, resumed_logits)):
         _require(ref.shape == actual.shape, "stage_b_reference_logits_shape_mismatch")
         delta = actual.astype(np.float64) - ref.astype(np.float64)
-        errors.append(dict(step=step, max_abs_error=float(np.max(np.abs(delta))),
+        errors.append(dict(step=step + step_offset,
+                           max_abs_error=float(np.max(np.abs(delta))),
                            rms_error=float(np.sqrt(np.mean(delta * delta)))))
     difference = None if first is None else dict(
-        output_index=first, decode_step=first,
+        output_index=first + output_offset, decode_step=first + step_offset,
         reference_token_id=reference[first], resumed_token_id=resumed[first],
         logits_error=errors[first],
         reference_logits_at_tokens=reference_logits[first][0, [reference[first], resumed[first]]].tolist(),

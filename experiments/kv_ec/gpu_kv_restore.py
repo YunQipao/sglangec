@@ -122,6 +122,10 @@ class RestoreTransaction:
     mapping_installed: bool = False
     ownership_check: object = None
     finalized: bool = False
+    # First installation has no old physical owner. Stale row bytes are an
+    # undo image only, never slots to free or evidence of ownership.
+    initial_install: bool = False
+    prior_mapping: tuple[int, ...] | None = None
 
     def _identity(self):
         _require(self.req.req_pool_idx == self.row and self.row not in self.req_pool.free_slots,
@@ -157,7 +161,8 @@ class RestoreTransaction:
         self._identity()
         if self.ownership_check is not None:
             self.ownership_check()
-        _require(tuple(self._mapping().cpu().tolist()) == self.old_slots,
+        expected = self.prior_mapping if self.initial_install else self.old_slots
+        _require(tuple(self._mapping().cpu().tolist()) == expected,
                  "request_slot_mapping_changed_before_commit")
         _require(not set(self.old_slots) & set(self.new_slots), "restore_slot_alias")
         self._fence()
@@ -166,6 +171,9 @@ class RestoreTransaction:
         self.state = "MAPPING_PENDING"
         self._mapping().copy_(torch.tensor(self.new_slots, dtype=torch.int32,
                                            device=self.req_pool.device))
+        if self.initial_install:
+            self.req.kv_committed_len = self.token_count
+            self.req.kv.kv_allocated_len = self.token_count
         self._fence()
         self.state = "MAPPED"
 
@@ -215,8 +223,11 @@ class RestoreTransaction:
         self._fence()
         if self.mapping_installed:
             self._identity()
-            self._mapping().copy_(torch.tensor(self.old_slots, dtype=torch.int32,
+            previous = self.prior_mapping if self.initial_install else self.old_slots
+            self._mapping().copy_(torch.tensor(previous, dtype=torch.int32,
                                                device=self.req_pool.device))
+            if self.initial_install:
+                self.req.kv_committed_len = self.req.kv.kv_allocated_len = 0
             self._fence()
             self.mapping_installed = False
         if self.savepoint is not None:
@@ -377,8 +388,27 @@ def allocate_restore_slots(allocator, count, old_slots):
         raise
 
 
+def validate_initial_ownership(scheduler, req, reserved=()):
+    """A freshly allocated, exclusive row with ZERO owned KV, not fake old KV."""
+    rp, a = scheduler.req_to_token_pool, scheduler.token_to_kv_pool_allocator
+    row = req.req_pool_idx
+    _require(row is not None and 0 < row < rp.req_to_token.shape[0] and
+             set(range(1, rp.req_to_token.shape[0])) - set(rp.free_slots) == {row}
+             and int(rp.req_generation[row]) > 0, "cold_restore_requires_exclusive_row")
+    _require(req.kv_committed_len == 0 and req.kv is not None and
+             req.kv.kv_allocated_len == 0 and req.cache_protected_len == 0 and
+             len(req.prefix_indices) == 0, "cold_restore_request_already_has_kv")
+    free = a.free_pages.cpu().tolist() + a.release_pages.cpu().tolist()
+    _require(len(free) == len(set(free)) and len(reserved) == len(set(reserved)) and
+             not set(free).intersection(reserved) and
+             set(free).union(reserved) == set(range(1, a.size + 1)),
+             "cold_restore_unknown_physical_owner")
+    return ()
+
+
 def restore_to_gpu(scheduler, req, source: CheckpointSource, *, token_start: int = 0,
-                   stream=None, source_name: str = "checkpoint") -> RestoreTransaction:
+                   stream=None, source_name: str = "checkpoint",
+                   initial_install: bool = False) -> RestoreTransaction:
     """Prepare and verify a real GPU writeback; caller explicitly commits mapping."""
     if not torch.cuda.is_available():
         raise RestoreRejected("cuda_required_for_gpu_restore")
@@ -403,7 +433,11 @@ def restore_to_gpu(scheduler, req, source: CheckpointSource, *, token_start: int
              "restore_allocator_pool_mismatch")
     device = pool.k_buffer[0].device
     torch.cuda.synchronize(device)
-    old = validate_live_ownership(scheduler, req, token_start, token_count)
+    if initial_install:
+        _require(token_start == 0, "cold_restore_requires_prefix_start_zero")
+        old = validate_initial_ownership(scheduler, req)
+    else:
+        old = validate_live_ownership(scheduler, req, token_start, token_count)
     row = int(req.req_pool_idx)
     generation = int(req_pool.req_generation[row])
     owner = f"gpu-restore:{row}:{generation}"
@@ -412,13 +446,19 @@ def restore_to_gpu(scheduler, req, source: CheckpointSource, *, token_start: int
                             token_start, token_count,
                             RestoreStats(source_name, meta["node_id"], rank, tp_size,
                                          token_start, token_count, 0, 0),
-                            fence=lambda: torch.cuda.synchronize(device), guard_owner=owner)
+                            fence=lambda: torch.cuda.synchronize(device), guard_owner=owner,
+                            initial_install=initial_install)
     try:
+        if initial_install:
+            tx.prior_mapping = tuple(tx._mapping().cpu().tolist())
         new, tx.savepoint = allocate_restore_slots(allocator, token_count, old)
         tx.new_slots = new
-        tx.ownership_check = lambda: validate_live_ownership(
-            scheduler, req, token_start, token_count,
-            reserved=tx.old_slots if tx.mapping_installed else tx.new_slots)
+        def ownership():
+            if initial_install and not tx.mapping_installed:
+                return validate_initial_ownership(scheduler, req, reserved=tx.new_slots)
+            return validate_live_ownership(scheduler, req, token_start, token_count,
+                reserved=tx.old_slots if tx.mapping_installed else tx.new_slots)
+        tx.ownership_check = ownership
         stream = stream or torch.cuda.Stream(device=device)
         event = torch.cuda.Event()
         started = time.perf_counter()
