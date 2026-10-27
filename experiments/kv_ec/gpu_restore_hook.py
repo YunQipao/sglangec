@@ -75,6 +75,9 @@ def validate_checkpoint(block):
 
 
 class GPURestoreHook:
+    output_token_limit = 1
+    input_requirement_reason = "stage_a_requires_plain_256_token_one_output_request"
+
     def __init__(self, scheduler, checkpoint, output, run_id, timeout=120):
         validate_runtime(scheduler)
         _require(not any(os.environ.get(k) == "1" for k in (
@@ -169,27 +172,38 @@ class GPURestoreHook:
 
     def before_inputs(self, inputs):
         # Synchronous scheduler-only barrier: no inputs are processed until this
-        # returns. Health checks do not create rows; all mutation RPCs are denied.
+        # returns. FreezeGCReq is sent even with --skip-server-warmup; its
+        # scheduler handler only freezes Python GC and forwards to detokenizer.
+        # Neither it nor health checks change request rows or KV ownership.
+        # All other control RPCs remain denied.
+        input_context = None
         try:
             for message in inputs:
                 name = type(message).__name__
-                if name == "HealthCheckReqInput":
+                input_context = dict(message_type=name, admitted=self.admitted)
+                if name in ("HealthCheckReqInput", "FreezeGCReq"):
                     continue
-                _require(name == "TokenizedGenerateReqInput" and not self.admitted,
-                         "stage_a_only_one_generate_request_allowed")
+                _require(name == "TokenizedGenerateReqInput",
+                         "stage_a_unsupported_message_type:" + name)
+                _require(not self.admitted, "stage_a_duplicate_generate_request")
                 _require(len(message.input_ids) == 256 and
-                         message.sampling_params.max_new_tokens == 1 and
+                         message.sampling_params.max_new_tokens == self.output_token_limit and
                          message.session_id is None and message.mm_inputs is None and
                          message.input_embeds is None,
-                         "stage_a_requires_plain_256_token_one_output_request")
+                         self.input_requirement_reason)
                 token_hash = hashlib.sha256(np.asarray(message.input_ids, dtype="<i8").tobytes()).hexdigest()
                 _require(token_hash == self.meta["ranks"][0]["token_ids_sha256"],
                          "stage_a_checkpoint_request_token_mismatch")
                 self.admitted = True
                 self.evidence["token_ids_sha256"] = token_hash
         except Exception as exc:
+            if input_context is not None:
+                self.evidence["rejected_input"] = input_context
             self._fail(exc)
             raise
+
+    def before_forward(self, batch):
+        """Stage A needs no pre-forward work; Stage B overrides this barrier."""
 
     def after_forward(self, batch):
         self.deadline = time.monotonic() + self.timeout

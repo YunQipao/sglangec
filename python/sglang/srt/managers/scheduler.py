@@ -1766,6 +1766,8 @@ class Scheduler(
 
             # Launch the current batch
             if batch:
+                if self._kv_ec_gpu_restore is not None:
+                    self._kv_ec_gpu_restore.before_forward(batch)
                 result = self.run_batch(batch)
                 if self._kv_ec_online is not None:
                     self._kv_ec_online.after_forward(batch)

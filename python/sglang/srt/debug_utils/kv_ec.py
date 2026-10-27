@@ -3,6 +3,7 @@
 import importlib
 import importlib.util
 import logging
+import os
 from pathlib import Path
 import sys
 
@@ -20,6 +21,9 @@ def create_gpu_restore_hook(scheduler):
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
+    if os.environ.get("SGLANG_KV_EC_GPU_RESUME") == "1":
+        hook = importlib.import_module(name + ".gpu_resume_hook")
+        return hook.GPUResumeHook.from_env(scheduler)
     hook = importlib.import_module(name + ".gpu_restore_hook")
     return hook.GPURestoreHook.from_env(scheduler)
 

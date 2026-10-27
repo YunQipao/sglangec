@@ -611,6 +611,11 @@ class TpModelWorker(BaseTpWorker):
                 pp_proxy_tensors=pp_proxy_tensors,
             )
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+            # Checkout-only Stage B observer: actual model inputs/positions,
+            # Triton indices and raw logits, before sampling can modify logits.
+            kv_ec_observer = getattr(self.model_runner, "kv_ec_resume_observer", None)
+            if kv_ec_observer is not None:
+                kv_ec_observer(forward_batch, logits_output, can_run_cuda_graph)
             batch_result = GenerationBatchResult(
                 logits_output=logits_output,
                 can_run_cuda_graph=can_run_cuda_graph,

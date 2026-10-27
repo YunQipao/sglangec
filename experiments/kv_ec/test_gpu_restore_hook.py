@@ -315,6 +315,64 @@ class TPCoordinationTests(unittest.TestCase):
 
 
 class HookAdmissionTests(unittest.TestCase):
+    def admission_fixture(self):
+        hook = GPURestoreHook.__new__(GPURestoreHook)
+        hook.admitted = False
+        hook.evidence = {}
+        hook._fail = Mock()
+        message = type("TokenizedGenerateReqInput", (), {})()
+        message.input_ids = [1] * 256
+        message.sampling_params = NS(max_new_tokens=1)
+        message.session_id = message.mm_inputs = message.input_embeds = None
+        hook.meta = {"ranks": [{"token_ids_sha256": hashlib.sha256(
+            np.asarray(message.input_ids, dtype="<i8").tobytes()).hexdigest()}]}
+        return hook, message
+
+    def test_startup_freeze_gc_then_valid_request_is_admitted(self):
+        hook, message = self.admission_fixture()
+        freeze = type("FreezeGCReq", (), {})()
+        hook.before_inputs([freeze])
+        self.assertFalse(hook.admitted)
+        self.assertEqual(hook.evidence, {})
+        hook.before_inputs([message])
+        self.assertTrue(hook.admitted)
+        self.assertEqual(hook.evidence["token_ids_sha256"],
+                         hook.meta["ranks"][0]["token_ids_sha256"])
+        hook._fail.assert_not_called()
+
+    def test_freeze_gc_in_request_batch_and_after_admission_is_allowed(self):
+        hook, message = self.admission_fixture()
+        freeze = type("FreezeGCReq", (), {})()
+        hook.before_inputs([freeze, message, freeze])
+        evidence = deepcopy(hook.evidence)
+        hook.before_inputs([freeze])
+        self.assertTrue(hook.admitted)
+        self.assertEqual(hook.evidence, evidence)
+        hook._fail.assert_not_called()
+
+    def test_duplicate_request_is_rejected_with_input_context(self):
+        hook, message = self.admission_fixture()
+        with self.assertRaisesRegex(RestoreRejected, "stage_a_duplicate_generate_request"):
+            hook.before_inputs([message, message])
+        self.assertTrue(hook.admitted)
+        self.assertEqual(hook.evidence["rejected_input"],
+                         dict(message_type="TokenizedGenerateReqInput", admitted=True))
+        hook._fail.assert_called_once()
+
+    def test_other_control_messages_remain_rejected_with_input_context(self):
+        for admitted in (False, True):
+            for name in ("FlushCacheReq", "AbortReq", "UnknownReq"):
+                with self.subTest(admitted=admitted, message_type=name):
+                    hook, _ = self.admission_fixture()
+                    hook.admitted = admitted
+                    with self.assertRaisesRegex(RestoreRejected,
+                            "stage_a_unsupported_message_type:" + name):
+                        hook.before_inputs([type(name, (), {})()])
+                    self.assertEqual(hook.admitted, admitted)
+                    self.assertEqual(hook.evidence["rejected_input"],
+                                     dict(message_type=name, admitted=admitted))
+                    hook._fail.assert_called_once()
+
     def test_no_cuda_cannot_start_experiment(self):
         s, _, _, _ = lifetime_fixture()
         with patch("torch.cuda.is_available", return_value=False):
@@ -340,6 +398,7 @@ class HookAdmissionTests(unittest.TestCase):
     def test_multi_output_request_is_rejected_before_processing(self):
         hook = GPURestoreHook.__new__(GPURestoreHook)
         hook.admitted = False
+        hook.evidence = {}
         hook._fail = Mock()
         message = type("TokenizedGenerateReqInput", (), {})()
         message.input_ids = [1] * 256

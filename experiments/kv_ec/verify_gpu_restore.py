@@ -128,7 +128,7 @@ def check_results(output):
                 checkpoint_sha256=sha(block), run_id=config["run_id"], ranks=results)
 
 
-def launch(args):
+def launch(args, *, extra_config=None, extra_env=None):
     from .debug_capture import source_identity
     from .gpu_memory_budget import read_gpu_memory, read_gpu_tasks
     from .launch_online import check_gpu_resources, server_argv
@@ -167,11 +167,13 @@ def launch(args):
     config = dict(run_id=output.name, checkpoint=str(args.checkpoint.resolve()),
                   checkpoint_sha256=sha(block), gpus=args.gpus, model=args.model,
                   runtime_identity=identity, argv=server_argv(args))
+    config.update(extra_config or {})
     with (output / "run.json").open("x") as f:
         json.dump(config, f, indent=2)
     os.environ.update(
         CUDA_VISIBLE_DEVICES=args.gpus, CUDA_DEVICE_ORDER="PCI_BUS_ID",
         SGLANG_KV_EC_GPU_RESTORE="1",
+        SGLANG_KV_EC_GPU_RESUME="0",
         SGLANG_KV_EC_GPU_RESTORE_CHECKPOINT=str(args.checkpoint.resolve()),
         SGLANG_KV_EC_GPU_RESTORE_OUTPUT=str(output),
         SGLANG_KV_EC_GPU_RESTORE_RUN_ID=output.name,
@@ -179,11 +181,12 @@ def launch(args):
         SGLANG_KV_EC_PREPARED_IDENTITY=json.dumps(identity),
         SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION="0",
     )
+    os.environ.update(extra_env or {})
     print(json.dumps(config, indent=2), flush=True)
     os.execv(sys.executable, server_argv(args))
 
 
-def submit(args):
+def submit(args, *, max_new_tokens=1):
     output = args.output.resolve()
     config = json.loads((output / "run.json").read_text())
     block = Path(config["checkpoint"]).read_bytes()
@@ -200,7 +203,7 @@ def submit(args):
                 raise TimeoutError("stage_a_server_not_ready")
             time.sleep(1)
     request = dict(input_ids=ids, rid=config["run_id"],
-                   sampling_params=dict(max_new_tokens=1, temperature=0, ignore_eos=True),
+                   sampling_params=dict(max_new_tokens=max_new_tokens, temperature=0, ignore_eos=True),
                    stream=False)
     # Reserve the submission marker before sending: retry cannot silently create
     # another request in a run whose one-shot request may have been accepted.
