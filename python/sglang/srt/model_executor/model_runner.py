@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -1147,6 +1148,10 @@ class ModelRunner:
         after_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         self.weight_load_mem_usage = before_avail_memory - after_avail_memory
         self.weight_load_time = time.perf_counter() - tic_total
+        if os.environ.get("KV_EC_PERF_DIR") and os.environ.get("KV_EC_PERF_RUN_ID"):
+            from experiments.kv_ec.perf_observer import emit
+            emit("model_weight_load", "startup", source="existing_perf_counter",
+                 duration_ms=self.weight_load_time * 1000, tp_rank=self.ps.tp_rank)
         # Get quantization config from ModelConfig
         # This handles both config.json (standard) and hf_quant_config.json (ModelOpt)
         quant_str = self.model_config.get_quantization_config_log_str()

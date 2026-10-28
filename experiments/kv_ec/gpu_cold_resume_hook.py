@@ -24,6 +24,7 @@ from .gpu_kv_restore import (BytesCheckpointSource, RestoreRejected, _require,
 from .gpu_restore_hook import coordinated_restore
 from .gpu_resume_hook import GPUResumeHook, token_digest
 from .node_block_export import canonical, pack, sha
+from .perf_observer import enabled as perf_enabled, emit, observed, span
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +236,8 @@ class GPUColdResumeHook(GPUResumeHook):
                 token_ids_sha256=state['input_ids_sha256'])
             self.pending_batch = build_decode_batch(s, self.req, self.sampled_seed)
         try:
-            gate('COLD_ROW', allocate_row)
+            with span('scheduler_request_rebuild', 'recovery', tp_rank=self.rank):
+                gate('COLD_ROW', allocate_row)
             self.tx = coordinated_restore(self._prepare_restore, self._vote, self._observe_tx)
             self.prefix_slots = self.tx.new_slots
             self.req.prefix_indices = torch.tensor(self.prefix_slots, dtype=torch.int64,
@@ -300,6 +302,23 @@ class GPUColdResumeHook(GPUResumeHook):
             self._validate_decode_state(batch, n, 'READY')
             self._live(batch)
         self._barrier('READY_' + str(self.evidence['resume_decode_forward_count'] + 1), check)
+        if perf_enabled() and self.evidence['resume_decode_forward_count'] == 0:
+            # Record on the native forward stream; reuse the observer's existing
+            # completion fence below. No additional CUDA synchronization.
+            self._perf_decode_start = torch.cuda.Event(enable_timing=True)
+            self._perf_decode_end = torch.cuda.Event(enable_timing=True)
+            self._perf_decode_start.record()
+
+    def observe_model_forward(self, fb, logits_output, can_run_graph):
+        first = getattr(self, '_perf_decode_start', None)
+        if first is not None:
+            self._perf_decode_end.record()
+        super().observe_model_forward(fb, logits_output, can_run_graph)
+        if first is not None:
+            emit('first_restored_decode_cuda', 'decode', source='cuda_event',
+                 duration_ms=first.elapsed_time(self._perf_decode_end), tp_rank=self.rank,
+                 includes='native_forward_stream_elapsed_before_diagnostic_observer')
+            self._perf_decode_start = None
 
     def _validate_decode_state(self, batch, step, phase):
         report = decode_scheduler_state(self.req, batch, self.state, step, phase)
@@ -339,6 +358,7 @@ class GPUColdResumeHook(GPUResumeHook):
                     self.evidence['resume_decode_forward_count'], 'FORWARD_COMPLETE'))
             return
         if not self.prefill_seen:
+            @observed('capture_artifact_inclusive', 'data_preparation')
             def stage():
                 from .online_chunk import OnlineProtector, finish_metadata
                 # Reuse the real online exporter, with no worker and no network.
@@ -347,8 +367,13 @@ class GPUColdResumeHook(GPUResumeHook):
                 exporter.identity = self.evidence['runtime_identity']
                 exporter.max_bytes = 64 * 1024**2
                 exporter.stream = torch.cuda.Stream()
-                item = exporter._stage(self.req, 0, self.generation)
-                item.done.synchronize()
+                with span('gpu_kv_snapshot', 'protection', tp_rank=self.rank):
+                    item = exporter._stage(self.req, 0, self.generation)
+                    item.done.synchronize()
+                if perf_enabled():
+                    emit('gpu_to_host', 'communication', source='cuda_event',
+                         duration_ms=item.begin.elapsed_time(item.done), tp_rank=self.rank,
+                         bytes=item.host.numel())
                 payload = item.host.numpy().tobytes()
                 meta = finish_metadata(item.metadata, payload)
                 bundle = Path(self.cfg['capture_bundle'])

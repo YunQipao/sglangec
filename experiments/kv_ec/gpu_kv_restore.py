@@ -18,6 +18,7 @@ from typing import Protocol
 import torch
 
 from .node_block_export import unpack, sha
+from .perf_observer import emit
 
 
 class RestoreRejected(ValueError):
@@ -462,6 +463,7 @@ def restore_to_gpu(scheduler, req, source: CheckpointSource, *, token_start: int
         stream = stream or torch.cuda.Stream(device=device)
         event = torch.cuda.Event()
         started = time.perf_counter()
+        perf_started = time.monotonic_ns()
         gpu_slots = torch.tensor(new, dtype=torch.int64, device=device)
         # Slots created on the current stream must be ready on the private writer.
         torch.cuda.synchronize(device)
@@ -481,7 +483,10 @@ def restore_to_gpu(scheduler, req, source: CheckpointSource, *, token_start: int
         event.synchronize()
         tx.stats.written_bytes = len(raw)
         tx.stats.h2d_ms = (time.perf_counter() - started) * 1000
+        emit("gpu_kv_writeback", "recovery", start_ns=perf_started,
+             tp_rank=rank, bytes=len(raw), includes="host_tensor_prepare,H2D,scatter,existing_fences")
         verify_start = time.perf_counter()
+        perf_verify_started = time.monotonic_ns()
         cursor = 0
         for record in rank_meta["layer_records"]:
             got = _read_layer(pool, int(record["layer_id"]),
@@ -495,6 +500,8 @@ def restore_to_gpu(scheduler, req, source: CheckpointSource, *, token_start: int
             cursor += len(expected)
         torch.cuda.synchronize(pool.k_buffer[0].device)
         tx.stats.verify_ms = (time.perf_counter() - verify_start) * 1000
+        emit("gpu_layer_readback_validation", "validation", start_ns=perf_verify_started,
+             tp_rank=rank, layers=len(tx.stats.layers_verified))
         tx.stats.loaded_kv_tokens = token_count
         tx.state = "VERIFIED"
         return tx

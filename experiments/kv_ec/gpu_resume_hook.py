@@ -204,6 +204,8 @@ class GPUResumeHook(GPURestoreHook):
 
     def observe_model_forward(self, fb, logits_output, can_run_graph):
         """Called inside TpModelWorker after CUDA forward, before sampling."""
+        from .perf_observer import observed
+        @observed('decode_forward_validation', 'validation')
         def observe():
             pool = self.scheduler.model_worker.model_runner.token_to_kv_pool
             require_cuda_forward(pool, fb, logits_output.next_token_logits)

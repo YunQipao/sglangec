@@ -16,6 +16,7 @@ from .online_rs_identity import identity_for, stripe_id
 from .rs_recovery_source import committed_status, load_bundle, native_stats
 from .rs_stripe_builder import validate_manifest
 from .rs_codec import CODE
+from .perf_observer import observed
 
 FILES = ('stage_e.json', 'recovered_node.bin', 'protected/recovery.json',
          'protected/recovered_node.bin')
@@ -117,6 +118,7 @@ def unwrap_node(protected, claim, identity):
     return block
 
 
+@observed('rs_source_load_validate_inclusive', 'validation')
 def load_cold_source(directory):
     root = Path(directory).resolve()
     raw = (root / 'stage_e.json').read_bytes()

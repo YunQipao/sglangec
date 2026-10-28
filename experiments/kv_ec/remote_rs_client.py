@@ -11,6 +11,7 @@ import time
 from .remote_rs_protocol import rdma_diagnostic, receive, send
 from .node_block_export import descriptor as describe_node
 from .node_block_export import sha
+from .perf_observer import observed
 
 
 class RemoteRSClient:
@@ -66,6 +67,7 @@ class RemoteRSClient:
             time.sleep(poll_interval)
         raise TimeoutError(f"RDMA transfer did not complete: {status}")
 
+    @observed("rs_upload_inclusive", "communication")
     def rdma_submit_node_block(self, stripe_id, node_id, block, *, handle,
                                manifest_sha256, device, gid_index,
                                port_num=1, timeout=120):
@@ -135,6 +137,7 @@ class RemoteRSClient:
             raise ValueError("RDMA parity checksum mismatch")
         return status, raw, item
 
+    @observed("rs_recovery_rpc_inclusive", "recovery")
     def rdma_reconstruct_missing_node(self, stripe_id, missing_node,
                                       survivor, *, handle, manifest_sha256,
                                       destination, return_host, return_port,
@@ -169,6 +172,11 @@ class RemoteRSClient:
             send_stats = tx.send_with_stats(self.host, port, survivor)
         finally:
             tx.close()
+        if send_stats.get("elapsed_s") is not None:
+            from .perf_observer import emit
+            emit("survivor_upload", "communication", source="rdma_cq",
+                 duration_ms=send_stats["elapsed_s"] * 1000, bytes=len(survivor),
+                 native_stats=send_stats)
         status, item = self._wait_rdma_status(
             stripe_id, key,
             {"handle": handle, "manifest_sha256": manifest_sha256}, timeout,
@@ -179,6 +187,11 @@ class RemoteRSClient:
         if "error" in result:
             raise result["error"]
         raw = destination.read_bytes()
+        if result.get("stats", {}).get("elapsed_s") is not None:
+            from .perf_observer import emit
+            emit("recovered_block_return", "communication", source="rdma_cq",
+                 duration_ms=result["stats"]["elapsed_s"] * 1000, bytes=len(raw),
+                 native_stats=result["stats"])
         expected = status["manifest"]["nodes"][missing_node]["sha256"]
         if sha(raw) != expected or sha(raw) != item.get("payload_sha256"):
             raise ValueError("RDMA recovered node checksum mismatch")

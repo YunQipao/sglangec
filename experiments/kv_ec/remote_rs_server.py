@@ -114,9 +114,11 @@ class StripeStore:
         s["submitted_nodes"].append(node)
         s["submitted_nodes"].sort()
         if len(s["blocks"]) == 2:
-            start = time.perf_counter()
-            parity = encode(s["blocks"][0], s["blocks"][1])
-            encode_ms = (time.perf_counter() - start) * 1000
+            from .perf_observer import span
+            with span("rs_parity_encode", "ec_compute", stripe_id=s["manifest"]["stripe_id"]):
+                start = time.perf_counter()
+                parity = encode(s["blocks"][0], s["blocks"][1])
+                encode_ms = (time.perf_counter() - start) * 1000
             if time.monotonic() >= s["deadline"]:
                 self.expire()
                 raise ValueError("stripe expired during encode")
@@ -231,9 +233,11 @@ class StripeStore:
                     raise ValueError("survivor corruption/identity mismatch")
                 blocks = [None, None]
                 blocks[1 - missing] = survivor
-                decode_started = time.perf_counter()
-                raw = recover(blocks, s["parity"], [d["length"] for d in s["manifest"]["nodes"]])
-                decode_ms = (time.perf_counter() - decode_started) * 1000
+                from .perf_observer import span
+                with span("rs_decode", "ec_compute", stripe_id=sid):
+                    decode_started = time.perf_counter()
+                    raw = recover(blocks, s["parity"], [d["length"] for d in s["manifest"]["nodes"]])
+                    decode_ms = (time.perf_counter() - decode_started) * 1000
                 if len(raw) != expected_length or sha(raw) != expected_sha:
                     raise ValueError("recovered node integrity failure")
             tx = RDMATransport(

@@ -27,6 +27,7 @@ from .rs_cold_source import (FILES, MAX_ARCHIVE, load_cold_source, plan_identity
                              validate_claim, validate_protection)
 from .rs_recovery_source import load_bundle, native_stats, recover_node
 from .verify_rs_resume import rdma_options
+from .perf_observer import observed
 
 def capture_claim(directory):
     root = Path(directory)
@@ -51,6 +52,7 @@ def make_plan(args):
     return dict(plan=str(args.output), plan_sha256=sha(canonical(plan)))
 
 
+@observed("protection_inclusive", "protection")
 def export_capture(args):
     plan = json.loads(args.plan.read_text())
     identity = plan_identity(plan)
@@ -117,6 +119,7 @@ def seal_protection(args):
         handle=first['handle'], manifest_sha256=first['manifest_sha256'])
 
 
+@observed("recover_adapter_inclusive", "recovery")
 def recover(args):
     protection = json.loads(args.protection.read_text())
     identity = validate_protection(protection)  # commitment BEFORE logical loss
@@ -145,6 +148,7 @@ def recover(args):
     return identity
 
 
+@observed("delivery_send_inclusive", "communication")
 def send_source(args):
     from .multinode.rdma_transport import RDMATransport
     _, _, _, binding = load_cold_source(args.bundle)
@@ -166,6 +170,7 @@ def send_source(args):
     return result
 
 
+@observed("delivery_receive_inclusive", "communication")
 def receive_source(args):
     from .multinode.rdma_transport import receive_file
     args.output.mkdir(parents=True, exist_ok=False)
@@ -191,6 +196,7 @@ def receive_source(args):
     return load_cold_source(args.output)[3]
 
 
+@observed("independent_source_validation", "validation")
 def check_source(bundle, capture):
     source, report, _, binding = load_cold_source(bundle)
     original, state, _, _ = load_checkpoint(capture)  # independent acceptance ONLY

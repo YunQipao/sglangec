@@ -359,6 +359,8 @@ class OnlineProtector:
             "online_cuda_stream_required",
         )
         started = time.perf_counter()
+        from .perf_observer import enabled as perf_enabled, emit
+        perf_started = time.monotonic_ns() if perf_enabled() else None
         # Conservative stage-1 fence covers KV writes on all device streams.
         torch.cuda.synchronize(device)
         slots = rp.req_to_token[row, start:end].clone().long()
@@ -378,6 +380,9 @@ class OnlineProtector:
             # Even a rejected partial gather must finish its pool reads before
             # propagating. No queued task ever accesses pool storage.
             torch.cuda.current_stream(device).synchronize()
+        if perf_started is not None:
+            emit('gpu_snapshot_gather', 'protection', start_ns=perf_started,
+                 tp_rank=ps.tp_rank, includes='existing_fences,allocation,gather')
         require(
             req.req_pool_idx == row
             and int(rp.req_generation[row]) == generation

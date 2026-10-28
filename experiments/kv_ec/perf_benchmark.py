@@ -1,0 +1,428 @@
+"""Real Stage E performance preparation; synthetic/fixture data is never eligible.
+
+No SSH, process termination, cache flushing or service launch is implicit in
+inference/collect. `repeat` executes only the explicitly supplied trial command.
+"""
+
+import argparse
+from collections import defaultdict
+from datetime import datetime, timezone
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import socket
+import statistics
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+import uuid
+
+from .perf_observer import emit
+
+SCHEMES = ('no-ec', 'reprefill', 'xor-only', 'rs-only', 'two-level')
+
+
+def save(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('x') as stream:
+        json.dump(value, stream, indent=2, sort_keys=True, allow_nan=False)
+
+
+def read(path):
+    return json.loads(Path(path).read_text())
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def command(argv, timeout=15):
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return dict(argv=argv, returncode=result.returncode,
+                    stdout=result.stdout.strip(), stderr=result.stderr.strip())
+    except (OSError, subprocess.SubprocessError) as exc:
+        return dict(argv=argv, error=str(exc))
+
+
+def identity():
+    sha = command(['git', 'rev-parse', 'HEAD'])
+    if sha.get('returncode') != 0:
+        raise ValueError('benchmark must run from the repository checkout')
+    diff = command(['git', 'diff', '--binary', 'HEAD'], timeout=30)
+    # Include new observation/benchmark files even before they are committed.
+    root = Path(__file__).resolve().parent
+    files = {str(p.relative_to(root)): digest(p) for p in sorted(root.glob('perf_*.py'))}
+    return dict(commit_sha=sha['stdout'],
+        git_status=command(['git', 'status', '--short'])['stdout'],
+        tracked_diff_sha256=hashlib.sha256(diff['stdout'].encode()).hexdigest(),
+        benchmark_files=files, host=socket.gethostname(), pid=os.getpid(),
+        boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+        python=platform.python_version(), utc=datetime.now(timezone.utc).isoformat())
+
+
+def resource_snapshot():
+    """Host-wide gauges, never attributed as per-request CUDA utilization."""
+    result = dict(monotonic_ns=time.monotonic_ns(), host=socket.gethostname(),
+                  cpu_scope='host-wide', gpu_scope='device-wide')
+    for name in ('stat', 'meminfo', 'net/dev'):
+        try:
+            result[name] = Path('/proc', name).read_text()
+        except OSError as exc:
+            result[name] = dict(unavailable=str(exc))
+    result['rdma_counters'] = {}
+    for port in Path('/sys/class/infiniband').glob('*/ports/*'):
+        for name in ('port_xmit_data', 'port_rcv_data', 'port_xmit_packets', 'port_rcv_packets'):
+            p = port / 'counters' / name
+            try:
+                result['rdma_counters'][str(p)] = int(p.read_text())
+            except (OSError, ValueError):
+                pass
+    result['rdma_data_counter_unit'] = '4-byte words; counters may include unrelated traffic'
+    result['gpu'] = command(['nvidia-smi',
+        '--query-gpu=index,uuid,name,utilization.gpu,utilization.memory,memory.used,power.draw',
+        '--format=csv,noheader,nounits'], timeout=5)
+    return result
+
+
+class Sampler:
+    def __init__(self, path, interval):
+        if not math.isfinite(interval) or interval < 0.5:
+            raise ValueError('resource sampling interval must be >= 0.5 seconds')
+        self.path, self.interval, self.stop_event = Path(path), interval, threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def run(self):
+        with self.path.open('x') as stream:
+            while True:
+                started = time.monotonic_ns()
+                record = resource_snapshot()
+                record['sampler_ms'] = (time.monotonic_ns() - started) / 1e6
+                stream.write(json.dumps(record) + '\n')
+                stream.flush()
+                if self.stop_event.wait(self.interval):
+                    break
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.stop_event.set()
+        self.thread.join(timeout=10)
+
+
+def stats(values):
+    values = sorted(values)
+    if not values:
+        return dict(n=0, mean_ms=None, stddev_ms=None, p50_ms=None, p95_ms=None, p99_ms=None)
+    def q(p):
+        index = (len(values) - 1) * p
+        low, high = math.floor(index), math.ceil(index)
+        return values[low] + (values[high] - values[low]) * (index - low)
+    return dict(n=len(values), mean_ms=statistics.mean(values),
+                stddev_ms=statistics.stdev(values) if len(values) > 1 else None,
+                p50_ms=q(.5) if len(values) >= 5 else None,
+                p95_ms=q(.95) if len(values) >= 20 else None,
+                p99_ms=q(.99) if len(values) >= 100 else None)
+
+
+def http(url, payload=None, timeout=600):
+    data = None if payload is None else json.dumps(payload).encode()
+    request = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.load(response)
+
+
+def inference(args):
+    """Both controls execute a full uncached prefill, followed by 16 decodes."""
+    ids = read(args.input_ids)
+    if isinstance(ids, dict):
+        ids = ids['input_ids']
+    if len(ids) != 256 or any(type(x) is not int or x < 0 for x in ids):
+        raise ValueError('first baseline requires exactly 256 token IDs')
+    info = http(args.url.rstrip('/') + '/server_info')
+    required = dict(tp_size=2, disable_radix_cache=True, disable_overlap_schedule=True,
+                    chunked_prefill_size=-1, max_running_requests=1, attention_backend='triton')
+    if any(info.get(k) != v for k, v in required.items()):
+        raise ValueError('baseline server flags do not match Stage E: ' + str(required))
+    graph = info.get('cuda_graph_config', {})
+    if any(graph.get(k, {}).get('backend') != 'disabled' for k in ('decode', 'prefill')):
+        raise ValueError('baseline requires disabled CUDA graphs, matching Stage E')
+    if info.get('model_path') != args.model:
+        raise ValueError('baseline model_path mismatch')
+    # This is exactly Stage D submit's policy (temperature=0 normalizes to
+    # greedy top_k=1), 17 output IDs = one pending y0 plus 16 native decodes.
+    sampling = dict(max_new_tokens=17, temperature=0, ignore_eos=True, top_p=1.,
+                    top_k=1, min_p=0., min_new_tokens=0, n=1,
+                    frequency_penalty=0., presence_penalty=0., repetition_penalty=1.)
+    args.output.mkdir(parents=True, exist_ok=False)
+    meta = identity()
+    model_files = [Path(args.model) / 'config.json', *sorted(Path(args.model).glob('*.safetensors.index.json'))]
+    meta.update(scheme=args.scheme, model=args.model, model_files={str(p): digest(p)
+        for p in model_files if p.exists()}, input_sha256=digest(args.input_ids), prefix_tokens=256,
+        tp_size=2, generation_tokens=17, sampling=sampling, server_info=info,
+        repeat=args.repeat, warmup=args.warmup, cache_policy='server radix disabled; cached_tokens must be zero',
+        limitation='reprefill starts at explicit client resubmission, excludes detection and startup')
+    save(args.output / 'metadata.json', meta)
+    with Sampler(args.output / 'resources.jsonl', args.resource_interval):
+        for i in range(args.warmup + args.repeat):
+            request = dict(input_ids=ids, sampling_params=sampling, stream=True,
+                           rid=f'perf-{uuid.uuid4().hex}', return_logprob=False)
+            started, first, final = time.monotonic_ns(), None, None
+            # SSE: timestamp receipt of first generated token on this client.
+            req = urllib.request.Request(args.url.rstrip('/') + '/generate',
+                data=json.dumps(request).encode(), headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=args.timeout) as response:
+                for line in response:
+                    if not line.startswith(b'data: '):
+                        continue
+                    data = line[6:].strip()
+                    if data == b'[DONE]':
+                        break
+                    item = json.loads(data)
+                    if item.get('meta_info', {}).get('completion_tokens', 0) > 0 and first is None:
+                        first = time.monotonic_ns()
+                    final = item
+            ended = time.monotonic_ns()
+            if final is None or first is None:
+                raise ValueError('missing streaming generation evidence')
+            usage = final['meta_info']
+            if usage.get('cached_tokens') != 0 or usage.get('prompt_tokens') != 256 or usage.get('completion_tokens') != 17:
+                raise ValueError('cached/short/wrong-prefix inference cannot enter baseline statistics')
+            output_ids = final.get('output_ids')
+            if not isinstance(output_ids, list) or len(output_ids) != 17:
+                raise ValueError('server must return all 17 output_ids for correctness comparison')
+            save(args.output / f'request-{i:03d}.json', dict(warmup=i < args.warmup,
+                scheme=args.scheme, start_ns=started, end_ns=ended,
+                request_ms=(ended-started)/1e6, prefill_ttft_ms=(first-started)/1e6,
+                source='client_monotonic_ns', response=final, output_token_ids=output_ids,
+                correctness='raw token IDs recorded; compare against Stage E reference separately'))
+
+
+def local_xor(args):
+    """Minimal real-capture local-loss control, deliberately no GPU resume claim."""
+    import numpy as np
+    from .cold_resume_state import load_checkpoint
+    from .node_block_export import unpack
+    from .xor_codec import encode, recover
+    args.output.mkdir(parents=True, exist_ok=False)
+    source, state, _, _ = load_checkpoint(args.capture)
+    meta, payloads = unpack(source.load())  # production validator; fixtures rejected
+    blocks = [np.frombuffer(p, dtype=np.uint8) for p in payloads]
+    if meta['tp_size'] != 2 or state['token_count'] != 256:
+        raise ValueError('real TP2/256 capture required')
+    save(args.output / 'metadata.json', dict(**identity(), scheme='xor-only',
+        capture=str(args.capture), capture_sha256=hashlib.sha256(source.load()).hexdigest(),
+        runtime_identity=state['runtime_identity'], prefix_tokens=256, tp_size=2,
+        limitation='CPU codec on authentic GPU capture; controlled single TP-rank byte loss; '
+                   'no Scheduler/GPU resume, not native-RDMA end-to-end performance'))
+    with Sampler(args.output / 'resources.jsonl', args.resource_interval):
+        for i in range(args.repeat):
+            start = time.monotonic_ns()
+            parity = encode(blocks)
+            encoded = time.monotonic_ns()
+            survivors = [None if rank == args.lost_rank else b for rank, b in enumerate(blocks)]
+            restored = recover(survivors, parity)
+            recovered = time.monotonic_ns()
+            exact = np.array_equal(restored, blocks[args.lost_rank])
+            checked = time.monotonic_ns()
+            save(args.output / f'xor-{i:03d}.json', dict(scheme='xor-only', iteration=i,
+                xor_ms=(encoded-start)/1e6, recovery_ms=(recovered-encoded)/1e6,
+                validation_ms=(checked-recovered)/1e6, byte_exact=bool(exact),
+                lost_rank=args.lost_rank, decode_correctness=None, real_rdma=False))
+            if not exact:
+                raise ValueError('XOR controlled recovery mismatch')
+
+
+def rs_only(args):
+    """Consume an existing native Stage C/RS report; never invent a run."""
+    report = read(args.report)
+    if report.get('state') not in ('PASS', 'COMMITTED') or report.get('transport') != 'rdma':
+        raise ValueError('rs-only requires an existing native RDMA PASS report')
+    if report.get('network_profile') not in (None, 'physical'):
+        raise ValueError('mock/loopback network reports are not eligible')
+    args.output.mkdir(parents=True, exist_ok=False)
+    save(args.output / 'metadata.json', dict(**identity(), scheme='rs-only',
+        source_report=str(args.report.resolve()), source_report_sha256=digest(args.report),
+        prefix_tokens=report.get('chunk_tokens'), tp_size=report.get('tp_size'), rs=[2, 1],
+        limitation='RS/Node Block recovery only; no target Scheduler/GPU writeback or Decode'))
+    metrics = {}
+    for name in ('rs_encode_ms', 'remote_committed_ms', 'recovery_ms', 'server_recovery_ms'):
+        if isinstance(report.get(name), (int, float)):
+            metrics[name] = report[name]
+    for i in range(args.repeat):
+        save(args.output / f'rs-{i:03d}.json', dict(scheme='rs-only', iteration=i,
+            source_report=str(args.report), real_rdma=True, decode_correctness=None,
+            **metrics))
+
+
+def gate_stage_e(output):
+    # Re-run the actual checker including live parity admission; a JSON flag
+    # or historical PASS alone never grants eligibility.
+    from .verify_rs_cold_resume import check_results
+    verdict = check_results(Path(output))
+    required = ('pass_stage_e', 'pass_stage_d', 'real_rdma', 'cuda_executed',
+                'output_token_ids_match', 'gpu_restore_committed', 'new_instance')
+    if any(verdict.get(k) is not True for k in required):
+        raise ValueError('strict real Stage E gate failed')
+    return verdict
+
+
+def repeat(args):
+    config = read(args.config)
+    if config.get('prefix_tokens') != 256 or config.get('tp_size') != 2 or config.get('rs') != [2, 1]:
+        raise ValueError('first measurement requires 256-token TP2 RS(2,1) config')
+    argv = [sys.executable, '-m', 'experiments.kv_ec.perf_stage_e', 'trial']
+    args.output.mkdir(parents=True, exist_ok=False)
+    save(args.output / 'metadata.json', dict(**identity(), config=config,
+         repeat=args.repeat, argv=argv, scheme='two-level', resource_interval=args.resource_interval))
+    for i in range(args.repeat):
+        root = args.output.resolve() / f'trial-{i:03d}-{uuid.uuid4().hex[:8]}'
+        root.mkdir()
+        run_id = root.name
+        env = dict(os.environ, KV_EC_BENCH_TRIAL=str(root), KV_EC_BENCH_CONFIG=str(args.config.resolve()),
+                   KV_EC_PERF_RUN_ID=run_id, KV_EC_PERF_DIR=str(root / 'perf'),
+                   KV_EC_PERF_ROLE='coordinator-232')
+        started = time.monotonic_ns()
+        with (root / 'driver.log').open('x') as log, Sampler(root / 'resources-232.jsonl', args.resource_interval):
+            result = subprocess.run(argv, env=env, stdout=log, stderr=subprocess.STDOUT)
+        raw = dict(run_id=run_id, returncode=result.returncode, status='failed',
+                   trial_command_ms=(time.monotonic_ns()-started)/1e6,
+                   scheme='two-level', real_rdma_eligible=False)
+        try:
+            if result.returncode:
+                raise ValueError('trial command failed; see driver.log')
+            # Driver brings a JSON result to 232 while keeping RS on 233 alive.
+            acceptance = read(root / 'acceptance.json')
+            if acceptance.get('live_check_exit') != 0 or acceptance.get('run_id') != run_id:
+                raise ValueError('missing successful current trial live-check receipt')
+            verdict = read(root / 'stage-e-check.json')
+            for key in ('pass_stage_e', 'pass_stage_d', 'real_rdma', 'cuda_executed',
+                        'output_token_ids_match', 'gpu_restore_committed', 'new_instance'):
+                if verdict.get(key) is not True:
+                    raise ValueError('Stage E gate failed: ' + key)
+            if verdict.get('run_id') != acceptance.get('target_run_id'):
+                raise ValueError('verdict is not bound to this trial')
+            inventories = [read(root / f'inventory-{node}.json') for node in (232, 233)]
+            if inventories[0]['host'] == inventories[1]['host']:
+                raise ValueError('two physical hosts required')
+            if any(x['commit_sha'] != inventories[0]['commit_sha'] or
+                   x['tracked_diff_sha256'] != inventories[0]['tracked_diff_sha256'] or
+                   x['benchmark_files'] != inventories[0]['benchmark_files'] for x in inventories):
+                raise ValueError('two host source identities differ')
+            raw.update(status='accepted', real_rdma_eligible=True,
+                decode_correctness=True, verdict_sha256=digest(root / 'stage-e-check.json'))
+        except Exception as exc:
+            raw['failure_reason'] = str(exc)
+        save(root / 'trial.json', raw)
+        print(json.dumps(dict(trial=str(root), **raw)), flush=True)
+        if raw['status'] != 'accepted':
+            raise SystemExit(1)
+
+
+def collect(args):
+    groups, rejected = defaultdict(list), []
+    for root in args.roots:
+        metadata = read(root / 'metadata.json')
+        # No pooling configurations or schemes. Each group has its own source.
+        key = hashlib.sha256(json.dumps(metadata.get('config', metadata.get('server_info',
+            metadata.get('runtime_identity', {}))), sort_keys=True).encode()).hexdigest()
+        scheme = metadata['scheme']
+        for path in sorted(root.glob('request-*.json')):
+            record = read(path)
+            if record['warmup']:
+                continue
+            for metric in ('request_ms', 'prefill_ttft_ms'):
+                groups[(scheme, key, metric)].append(record[metric])
+        for path in sorted(root.glob('xor-*.json')):
+            record = read(path)
+            if not record['byte_exact']:
+                rejected.append(str(path))
+                continue
+            for metric in ('xor_ms', 'recovery_ms', 'validation_ms'):
+                groups[(scheme, key, metric)].append(record[metric])
+        for path in sorted(root.glob('rs-*.json')):
+            record = read(path)
+            if record.get('real_rdma') is not True:
+                rejected.append(str(path))
+                continue
+            for metric in ('rs_encode_ms', 'remote_committed_ms', 'recovery_ms', 'server_recovery_ms'):
+                if isinstance(record.get(metric), (int, float)):
+                    groups[(scheme, key, metric)].append(record[metric])
+        for path in sorted(root.glob('trial-*/trial.json')):
+            trial = read(path)
+            if trial['status'] != 'accepted' or trial['real_rdma_eligible'] is not True:
+                rejected.append(str(path))
+                continue
+            per_trial = defaultdict(float)
+            for log in sorted(path.parent.glob('perf*/*.jsonl')):
+                for line in log.read_text().splitlines():
+                    record = json.loads(line)
+                    if record['run_id'] != trial['run_id'] or record['status'] != 'ok':
+                        raise ValueError('foreign or failed observation: ' + str(log))
+                    value = record['duration_ms']
+                    if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                        raise ValueError('invalid observation duration')
+                    name = '/'.join(map(str, (record['stage'], record['role'], record['host'], record.get('tp_rank', '-'))))
+                    per_trial[name] += value
+            for name, value in per_trial.items():
+                groups[(scheme, key, name)].append(value)
+            for metric, value in read(path.parent / 'native-metrics.json').items():
+                groups[(scheme, key, metric)].append(value)
+    rows = [dict(scheme=scheme, config_sha256=key, metric=metric, **stats(values))
+            for (scheme, key, metric), values in sorted(groups.items())]
+    save(args.output, dict(schema='kv-ec-perf-summary-v1', rows=rows, rejected=rejected,
+        quantile_policy='P50 n>=5; P95 n>=20; P99 n>=100; linear interpolation; sample stddev',
+        overhead_ratio=None,
+        overhead_ratio_reason='Stage E capture/export is offline sequential harness, not steady-state serving; '
+            'matched online EC-on/off request latency is required before reporting protection overhead',
+        warning='inclusive regions overlap; never sum into recovery E2E or subtract validation to invent production cost'))
+    print(json.dumps(dict(output=str(args.output), series=len(rows), rejected=len(rejected))))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    p = sub.add_parser('inventory')
+    p.add_argument('--output', type=Path, required=True)
+    for name in ('inference', 'xor-only', 'rs-only', 'repeat'):
+        p = sub.add_parser(name)
+        p.add_argument('--output', type=Path, required=True)
+        p.add_argument('--repeat', type=int, default=5)
+        p.add_argument('--resource-interval', type=float, default=1.)
+        if name == 'inference':
+            p.add_argument('--scheme', choices=('no-ec', 'reprefill'), required=True)
+            p.add_argument('--url', required=True)
+            p.add_argument('--model', required=True)
+            p.add_argument('--input-ids', type=Path, required=True)
+            p.add_argument('--warmup', type=int, default=2)
+            p.add_argument('--timeout', type=float, default=600)
+        elif name == 'xor-only':
+            p.add_argument('--capture', type=Path, required=True)
+            p.add_argument('--lost-rank', type=int, choices=(0, 1), default=1)
+        elif name == 'rs-only':
+            p.add_argument('--report', type=Path, required=True)
+        else:
+            p.add_argument('--config', type=Path, required=True)
+    p = sub.add_parser('collect')
+    p.add_argument('--roots', type=Path, nargs='+', required=True)
+    p.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    if getattr(args, 'repeat', 1) < 1 or getattr(args, 'warmup', 0) < 0:
+        parser.error('repeat must be positive; warmup must be nonnegative')
+    if args.command == 'inventory':
+        save(args.output, dict(**identity(), resources=resource_snapshot()))
+    else:
+        {'inference': inference, 'xor-only': local_xor, 'rs-only': rs_only,
+         'repeat': repeat, 'collect': collect}[args.command](args)
+
+
+if __name__ == '__main__':
+    main()

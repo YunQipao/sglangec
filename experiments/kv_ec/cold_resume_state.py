@@ -14,6 +14,7 @@ from .gpu_kv_restore import BytesCheckpointSource, _require
 from .gpu_restore_hook import validate_checkpoint
 from .gpu_resume_hook import token_digest
 from .node_block_export import canonical, sha, unpack
+from .perf_observer import observed
 
 SCHEMA = "kv-cold-request-v1"
 SAMPLING = dict(temperature=1.0, top_p=1.0, top_k=1, min_p=0.0,
@@ -100,6 +101,7 @@ def validate_state(state, meta, block_hash):
     return state
 
 
+@observed('checkpoint_load_validate_inclusive', 'validation')
 def load_checkpoint(directory, rs_source=None):
     root = Path(directory).resolve()
     receipt = json.loads((root / 'COMMITTED.json').read_text())

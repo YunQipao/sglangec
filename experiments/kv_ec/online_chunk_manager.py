@@ -20,6 +20,7 @@ from .checkpoint_protocol import recv_message, send_message
 from .rank_snapshot import COMMON, rank_manifest, validate_payload, write_rank_files
 from .snapshot import digest
 from .xor_codec import encode, recover
+from .perf_observer import span
 
 
 ONLINE_IDENTITY = (
@@ -147,18 +148,20 @@ class OnlineChunkManager:
         entries = [ranks[i][1] for i in range(tp)]
         manifest = rank_manifest(entries)
         blocks = [ranks[i][0] for i in range(tp)]
-        started = time.perf_counter()
-        parity = encode(blocks)
-        xor_ms = (time.perf_counter() - started) * 1000
+        with span("local_xor_encode", "ec_compute"):
+            started = time.perf_counter()
+            parity = encode(blocks)
+            xor_ms = (time.perf_counter() - started) * 1000
         recovery_checks = []
         if self.test_recovery:
-            for lost in range(tp):
-                restored = recover(
-                    [None if i == lost else b for i, b in enumerate(blocks)], parity
-                )
-                if not np.array_equal(restored, blocks[lost]):
-                    raise ValueError("XOR recovery mismatch")
-                recovery_checks.append({"lost_rank": lost, "byte_exact": True})
+            with span("local_xor_validation", "validation"):
+                for lost in range(tp):
+                    restored = recover(
+                        [None if i == lost else b for i, b in enumerate(blocks)], parity
+                    )
+                    if not np.array_equal(restored, blocks[lost]):
+                        raise ValueError("XOR recovery mismatch")
+                    recovery_checks.append({"lost_rank": lost, "byte_exact": True})
         directory = self.output / key
         directory.mkdir()
         # Atomic *completion marker*: partial files after a crash cannot be

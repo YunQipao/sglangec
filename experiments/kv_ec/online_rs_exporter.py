@@ -294,6 +294,9 @@ class OnlineRSExporter:
             remote_retention="volatile_store_ttl",
             recovery_byte_exact="NOT_YET_VERIFIED",
         )
+        from .perf_observer import emit
+        emit('global_committed', 'protection', duration_ms=0,
+             source='monotonic_ns_marker', stripe_id=sid, node_id=self.node_id)
 
     def _worker(self):
         while True:
