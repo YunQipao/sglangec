@@ -13,7 +13,7 @@ import socket
 from .gpu_kv_restore import BytesCheckpointSource, _require
 from .gpu_restore_hook import validate_checkpoint
 from .gpu_resume_hook import token_digest
-from .node_block_export import canonical, sha
+from .node_block_export import canonical, sha, unpack
 
 SCHEMA = "kv-cold-request-v1"
 SAMPLING = dict(temperature=1.0, top_p=1.0, top_k=1, min_p=0.0,
@@ -109,8 +109,15 @@ def load_checkpoint(directory, rs_source=None):
              receipt['request_state_sha256'] == sha(state_bytes), 'cold_state_hash_or_seal_invalid')
     # RS input is optional and never falls back to the original capture file.
     if rs_source is not None:
-        from .rs_recovery_source import load_bundle
-        source, _, meta, binding = load_bundle(rs_source)
+        if (Path(rs_source) / 'stage_e.json').exists():
+            from .rs_cold_source import load_cold_source
+            source, _, meta, binding = load_cold_source(rs_source)
+            _require(binding['request_state_sha256'] == sha(state_bytes) and
+                     binding['capture_seal_sha256'] == sha((root / 'COMMITTED.json').read_bytes()),
+                     'stage_e_cold_state_seal_mismatch')
+        else:
+            from .rs_recovery_source import load_bundle
+            source, _, meta, binding = load_bundle(rs_source)
         block = source.load()
     else:
         block = (root / 'global_node.bin').read_bytes()
@@ -118,9 +125,13 @@ def load_checkpoint(directory, rs_source=None):
         binding = None
     _require(sha(block) == receipt['kv_sha256'], 'cold_kv_hash_mismatch')
     state = validate_state(json.loads(state_bytes), meta, sha(block))
+    # RS restore validates the reconstructed rank bytes, never reads the lost
+    # target's original rank payloads. Local Stage D retains its original checks.
+    rank_payloads = unpack(block)[1] if rs_source is not None else None
     for rank in (0, 1):
         rank_meta = json.loads((root / f'rank_{rank}.meta.json').read_text())
-        _require(sha((root / f'rank_{rank}.bin').read_bytes()) == meta['ranks'][rank]['sha256'] and
+        payload = rank_payloads[rank] if rank_payloads is not None else (root / f'rank_{rank}.bin').read_bytes()
+        _require(sha(payload) == meta['ranks'][rank]['sha256'] and
                  sha(canonical(rank_meta)) == sha(canonical(meta['ranks'][rank])),
                  'cold_rank_payload_or_metadata_mismatch')
     _require(state['restore_id'] == receipt['restore_id'] and
@@ -143,7 +154,8 @@ def load_checkpoint(directory, rs_source=None):
                  proof['process'] == receipt['origin_processes'][rank] and
                  proof['materialized_kv_tokens'] == 256 and proof['pending_token_id'] ==
                  state['pending_token_id'], 'cold_capture_proof_invalid')
-    _require([sha((root / f'rank_{rank}.bin').read_bytes()) for rank in (0, 1)] ==
+    _require([sha(rank_payloads[rank] if rank_payloads is not None else
+                  (root / f'rank_{rank}.bin').read_bytes()) for rank in (0, 1)] ==
              receipt['rank_payload_sha256'], 'cold_rank_payload_changed')
     return BytesCheckpointSource(block), state, receipt, binding
 

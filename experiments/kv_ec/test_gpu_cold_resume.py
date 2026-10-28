@@ -470,6 +470,21 @@ class InitialInstallTransactionTests(unittest.TestCase):
 
 
 class ColdComparisonTests(unittest.TestCase):
+    def test_failure_check_verdict_controls_exit_only_for_check_failure(self):
+        negative = dict(pass_stage_d=False, negative_test_pass=True)
+        self.assertTrue(cold_cli.check_exit_success('check-failure', negative))
+        self.assertFalse(cold_cli.check_exit_success('check', negative))
+        self.assertFalse(cold_cli.check_exit_success('reference', negative))
+        self.assertFalse(cold_cli.check_exit_success('check-failure',
+                                                     dict(pass_stage_d=False,
+                                                          negative_test_pass=False)))
+        self.assertFalse(cold_cli.check_exit_success('check',
+                                                     dict(pass_stage_d=False,
+                                                          pass_reference=False,
+                                                          negative_test_pass=True)))
+        self.assertTrue(cold_cli.check_exit_success('check', dict(pass_stage_d=True)))
+        self.assertTrue(cold_cli.check_exit_success('reference', dict(pass_reference=True)))
+
     def test_difference_reports_full_output_and_decode_positions(self):
         reference = [np.array([[0.0, 1.0, 2.0]])]
         resumed = [np.array([[0.0, 2.0, 1.0]])]

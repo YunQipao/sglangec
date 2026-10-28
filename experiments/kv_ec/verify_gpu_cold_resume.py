@@ -226,6 +226,12 @@ def check_failed_restore(output):
         no_request_row_leak=True, ranks=reports)
 
 
+def check_exit_success(command, result):
+    """Return success only for the selected check's independently validated verdict."""
+    return (result.get('pass_stage_d') is True or result.get('pass_reference') is True or
+            (command == 'check-failure' and result.get('negative_test_pass') is True))
+
+
 def launch(args, capture=False):
     _require(args.output.is_absolute(), 'cold_absolute_output_required')
     cfg = dict(experiment='gpu-cold-resume-stage-d', cold_mode='capture' if capture else 'restore',
@@ -350,7 +356,7 @@ def main():
                           failure_reason=f'{type(exc).__name__}:{exc}')
         save_verdict(args.output, result)
         print(json.dumps(result, indent=2))
-        if not (result.get('pass_stage_d') or result.get('pass_reference')):
+        if not check_exit_success(args.command, result):
             raise SystemExit(1)
 
 
