@@ -1,0 +1,44 @@
+{
+  "prefix_tokens": 256,
+  "tp_size": 2,
+  "rs": [2, 1],
+  "resource_interval": 1.0,
+  "mem_fraction_static": 0.6,
+  "trial_timeout": 3600,
+  "protection_timeout": 1800,
+  "min_disk_bytes": 21474836480,
+  "max_node_bytes": 67108864,
+  "remote_root": "/tmp/kv-ec-perf-233",
+  "return_host": "192.168.2.243",
+  "return_port": 30890,
+  "delivery_port": 30892,
+  "target_port": 30986,
+  "rs_server": {"host": "192.168.2.245", "port": 30700},
+  "nodes": [
+    {
+      "repo": "/media/sda1/iic_data/luotao/sglangec/sglang",
+      "python": "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+      "conda_prefix": "/media/sda1/iic_data/anaconda3/envs/sglang-ec",
+      "model": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+      "template": "/tmp/real-node0-template/global_node.bin",
+      "input_ids": "/tmp/input_ids.json",
+      "gpus": "0,1",
+      "origin_port": 30984,
+      "rdma_device": "mlx5_0",
+      "gid_index": 5
+    },
+    {
+      "ssh": "iic@10.102.0.233",
+      "repo": "/media/sda1/iic_data/luotao/sglangec/sglang",
+      "python": "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+      "conda_prefix": "/media/sda1/iic_data/anaconda3/envs/sglang-ec",
+      "model": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+      "template": "/tmp/real-node1-template/global_node.bin",
+      "input_ids": "/tmp/input_ids.json",
+      "gpus": "0,1",
+      "origin_port": 30985,
+      "rdma_device": "mlx5_0",
+      "gid_index": 3
+    }
+  ]
+}

@@ -41,58 +41,188 @@ GPU/Scheduler 恢复。`rs-only` 应使用现有 Stage C/`physical_two_node_rs.p
 Node Block 故障入口；若没有真实 Stage C PASS，结果必须保持 NOT IMPLEMENTED。
 `two-level` 仅由 Stage E `check` 通过的真实运行产生。
 
-## 232/233 命令
+## 从 0 到 1：配置与前置材料
 
-在仓库 `sglang` 目录中，先准备一个不覆盖历史运行的 JSON 配置（路径和 GPU
-按现场修改）：
+完整的、可复制的配置文件随代码提供：
 
-```json
-{
-  "repo": "/media/sda1/iic_data/luotao/sglangec/sglang",
-  "python": "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
-  "model": "/media/sda1/iic_data/models/Qwen3-8B",
-  "prefix_tokens": 256, "tp_size": 2, "rs": [2, 1], "resource_interval": 1.0,
-  "remote_root": "/tmp/kv-ec-perf",
-  "return_host": "192.168.2.243", "return_port": 30890, "delivery_port": 30892,
-  "target_port": 30986,
-  "rs_server": {"host": "192.168.2.245", "port": 30700},
-  "nodes": [
-    {"ssh": "iic@10.102.0.232", "gpus": "0,1", "origin_port": 30984,
-     "gid_index": 5, "rdma_device": "mlx5_0", "template": "/tmp/real-node0-template/global_node.bin",
-     "input_ids": "/tmp/input_ids.json", "repo": "/media/sda1/iic_data/luotao/sglangec/sglang",
-     "python": "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
-     "model": "/media/sda1/iic_data/models/Qwen3-8B"},
-    {"ssh": "iic@10.102.0.233", "gpus": "0,1", "origin_port": 30985,
-     "gid_index": 3, "rdma_device": "mlx5_0", "template": "/tmp/real-node1-template/global_node.bin",
-     "input_ids": "/tmp/input_ids.json", "repo": "/media/sda1/iic_data/luotao/sglangec/sglang",
-     "python": "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
-     "model": "/media/sda1/iic_data/models/Qwen3-8B"}
-  ]
-}
-```
+- 232：`experiments/kv_ec/perf_stage_e_232.example.json`，包含本地 Node 0 与 SSH Node 1。
+- 233：`experiments/kv_ec/perf_stage_e_233.env.example`，只配置人工启动的常驻 RS。
 
-RS server must already be running in a dedicated 233 terminal using the Stage E
-document's native-RDMA command. The coordinator never stops it. On 232:
+两台机器先切到 `feat/kv-gpu-restore-resume-20261027` 的相同 Commit，部署本次
+修改（包括新增 Python 文件），保持相同 tracked diff 和 `perf_*.py` 文件哈希。
+这里不提供自动 checkout、commit、push 或覆盖远端仓库的操作。
+两台机器需要可用的 `sglang-ec` Conda 环境、`cc`、libibverbs 与 verbs.h。
+232 的 SSH agent/公钥须能通过 `ssh -o BatchMode=yes iic@10.102.0.233 true`。
+管理网络用于 SSH/SCP；192.168.2.243/245 是历史 RDMA 网地址，须按现场确认。
+
+模板不是恢复点：它只提供 Stage A 模型/布局/输入准入，不能用其他请求的模板
+拼接历史请求状态。先按 `GPU_RS_COLD_RESUME_STAGE_E.md` 准备两台本地有效的
+`global_node.bin` 模板和匹配的 256 个 input IDs。若已具备历史有效模板可直接
+使用；每轮仍重新 Capture 两个独立请求，并产生新的 snapshot/restore/Stripe ID。
+任意缺失材料、模型字节指纹不匹配、显存不足都会拒绝，不会生成示例 KV 替代。
+
+示例使用每机空闲 GPU `0,1`，预检和原有 launch 准入都拒绝其上已有 compute
+进程。请调整为现场空闲卡；不支持自动清卡。JSON 内的 Python、Conda、模型、
+模板和 input IDs 路径都是可编辑的现场参数，不保证每台安装一致。
+
+### 1. 233：人工启动一次 RS
+
+在独立终端执行并保持前台运行：
 
 ```bash
 cd /media/sda1/iic_data/luotao/sglangec/sglang
-export PYTHONPATH="$PWD/python:$PWD"
-RUN=/tmp/kv-ec-perf-$(date +%Y%m%d-%H%M%S); mkdir "$RUN"
-python -m experiments.kv_ec.perf_benchmark repeat \
-  --config "$RUN/config.json" --output "$RUN/two-level-r5" --repeat 5 --resource-interval 1
-python -m experiments.kv_ec.perf_benchmark collect \
-  --roots "$RUN/two-level-r5" --output "$RUN/summary.json"
+source experiments/kv_ec/perf_stage_e_233.env.example
+export PATH="$CONDA_PREFIX_233/bin:$PATH"
+export PYTHONPATH="$REPO/python:$REPO"
+unset KV_EC_PERF_DIR KV_EC_PERF_RUN_ID KV_EC_PERF_ROLE
+export RS_RUN="$(mktemp -d "$RS_RUN_PARENT/kv-rs-perf-233.XXXXXXXX")"
+set -o pipefail
+python -u -m experiments.kv_ec.remote_rs_server \
+  --host "$RS_HOST" --port "$RS_PORT" --ttl "$RS_TTL" --timeout "$RS_TIMEOUT" \
+  --max-stripes "$RS_MAX_STRIPES" --max-bytes "$RS_MAX_BYTES" \
+  --rdma-device "$RS_RDMA_DEVICE" --rdma-gid-index "$RS_GID_INDEX" --rdma-port-num 1 \
+  --rdma-port-base "$RS_RDMA_PORT_BASE" --rdma-timeout "$RS_TIMEOUT" \
+  --rdma-directory "$RS_RUN/rs-server" 2>&1 | tee "$RS_RUN/rs-server.log"
 ```
 
-执行 10 次时只将 `--repeat 5` 改为 `--repeat 10` 并使用新目录。配置文件
-内容必须与上面一致；`repeat` 每次创建唯一 trial/run ID。服务、日志、JSONL
-和 verdict 都位于该 RUN 下；失败运行保留，不会覆盖历史记录。每次 trial 的
-232 目录需有 `acceptance.json`、`stage-e-check.json`、`native-metrics.json`；
-233 的 JSON 证据通过 SCP 传回，KV payload 不通过 SCP。
+这是原来的 native RS Server CLI。不要省略显式预算/HCA参数：当前协议没有预算
+查询 RPC，预检需要通过 233 `/proc` 验证实际 LISTEN socket 对应的进程与 argv，
+再用已有 `health/get_metrics` 查询 READY、epoch、Stripe 数、resident bytes。
+若已有 RS 服务占端口，命令必须失败；不要停止它，另选端口并同步配置。
 
-汇总仅在样本数达到阈值时输出 P50/P95/P99，否则为 null；同时输出均值、样本
-标准差、资源快照和被拒样本。保护额外开销比例只有在同一模型/输入/资源条件
-下有匹配 EC-on/off 在线样本时才能计算，当前摘要明确标记为 NOT COMPUTED。
+### 2. 232：准备并执行 Preflight
 
-本机无 CUDA、RDMA 或 CPU mock 的结果不进入上述 two-level 统计。Stage E 真实
-PASS 之前，`repeat` 和 `collect` 会拒绝该实验，不会虚构结果。
+```bash
+cd /media/sda1/iic_data/luotao/sglangec/sglang
+source /media/sda1/iic_data/anaconda3/etc/profile.d/conda.sh
+conda activate sglang-ec
+export PYTHONPATH="$PWD/python:$PWD"
+export RUN="$(mktemp -d /tmp/kv-perf-232.XXXXXXXX)"
+cp experiments/kv_ec/perf_stage_e_232.example.json "$RUN/config.json"
+# 编辑所有现场路径、空闲 GPU、HCA/GID 和端口，尤其是两台 model/template/input_ids。
+${EDITOR:-vi} "$RUN/config.json"
+python -m experiments.kv_ec.perf_benchmark preflight \
+  --config "$RUN/config.json" --output "$RUN/preflight-r5.json" --repeat 5
+```
+
+`preflight` 仅写指定的本地报告，不创建远端目录、保护、Stripe、恢复 Claim 或
+GPU 服务。验证两端 Commit、diff、脚本、完整模型字节指纹、模板/输入、Conda、
+两张空闲卡的可用显存与原有预算估计、HCA ACTIVE/GID、HTTP/native监听端口、
+SSH、磁盘与 RS。不会运行 native RDMA 数据传输，故预检 PASS 不代表 RDMA PASS。
+旧 RS 的 read-only 查询会执行其原有 TTL 维护；协调器不主动发出任何状态修改。
+
+### 3. 232：单轮自动化试跑
+
+```bash
+python -m experiments.kv_ec.perf_benchmark repeat \
+  --config "$RUN/config.json" --output "$RUN/smoke-r1" --repeat 1
+```
+
+退出码 0 且 `trial-*/trial.json` 为 `pass_fail=PASS` 才表示整条自动化通过。
+仅看到 Stage E checker 的 PASS、但最后 SCP/清理/证据核验失败，整轮仍为 FAIL。
+原始 checker JSON 原样保留，不添加顶层 `run_id`：身份由唯一 Trial ID 绑定的
+plan/Stripe、`cold-new/run.json`、两条 TP `ranks[].run_id`、restore ID 与 source
+binding 共同验证。验收收据另存文件哈希；它不是新的 Stage E verdict。
+
+### 4. 232：五轮测量（或十轮）
+
+```bash
+python -m experiments.kv_ec.perf_benchmark repeat \
+  --config "$RUN/config.json" --output "$RUN/baseline-r5" --repeat 5
+# 十轮使用另一新目录：
+# python -m experiments.kv_ec.perf_benchmark repeat \
+#   --config "$RUN/config.json" --output "$RUN/baseline-r10" --repeat 10
+```
+
+`repeat` 自动做批次预检、逐轮再预检与 epoch 校验，配置快照写入 batch。
+不要并发启动占用同一组 GPU/端口的 batch；检查与启动之间存在外部资源竞争，
+最终仍由既有 launch/RDMA bind 准入拒绝冲突，不会接管已有进程。
+
+每轮独立目录与一次性 Ledger，目标启动之前创建全新空 `restore-ledger`。
+失败立即停止后续轮次并保留所有本地/远端文件，不删除 Claim，不复用恢复点。
+重新执行必须指定新 OUTPUT，重新 Capture/保护；不提供 resume-old-trial。
+
+RS 的关键限制：过期 Stripe **不会从计数字典移除**。TTL 不能回收槽位，原来
+`--max-stripes 4` 不能安全启动五轮。预算按现有 Store 的 `3 * max(node_bytes)`
+reservation 计算，不能仅看 resident parity。示例 32 slots / 8GiB / TTL 7200s，
+`max_node_bytes=64MiB`，可容纳一次 smoke、五轮和十轮；历史未知 Stripe 则按
+协议最大 160MiB/Node 保守估计。空间不足在本轮保护之前拒绝；人工为新的测量
+任务选择另一空 RS 实例/端口，协调器绝不重启或清空现有 RS。
+`protection_timeout=1800s` 必须不大于 RS TTL；超期即 FAIL。原有实时 checker
+仍会检测中途过期、handle 变化和 RS 重启，不允许历史 PASS 替代。
+
+### 5. 232：统计和诊断
+
+```bash
+python -m experiments.kv_ec.perf_benchmark collect \
+  --roots "$RUN/baseline-r5" --output "$RUN/summary-r5.json"
+python -m json.tool "$RUN/summary-r5.json"
+find "$RUN/baseline-r5" -name trial.json -exec python -m json.tool {} \;
+find "$RUN/baseline-r5" -name failure.json -exec python -m json.tool {} \;
+find "$RUN/baseline-r5" -name cleanup.json -exec python -m json.tool {} \;
+# 每个失败 trial 的 driver.log / commands.jsonl，以及：
+# unzip -l "$RUN/baseline-r5/TRIAL_ID/json-evidence-233.zip"
+# unzip -p "$RUN/baseline-r5/TRIAL_ID/json-evidence-233.zip" target/server.log
+# 若 SSH 已断，直接去 233 对应 remote_root/TRIAL_ID 查看原始日志。
+```
+
+`collect` 允许分析失败/未完整结束的 batch，列出每个 rejected 原因；它不连接
+RS，不重跑恢复。只把当前流程中实时 checker 成功且完整验证的真实 PASS 纳入
+two-level 统计；缺少必需性能观测/CQ、被修改、重复或失败记录整轮拒绝。摘要
+按配置与 Commit/diff/脚本身份分组，不混合配置。无成功样本时 rows 为空。
+仅在 n>=5/20/100 时报告 P50/P95/P99，否则为 null；均值与样本标准差另列。
+`smoke-r1` 与 `baseline-r5` 默认分开统计，避免把试跑当测量。
+
+## 输出与进程安全
+
+每个 trial 有唯一 ID、Commit、`preflight.json`、逐命令 `commands.jsonl`、
+`trial.json` PASS/FAIL 与原因；原始 `stage-e-check.json`、`target-run.json`、
+`protection.json`、`acceptance.json`、`cq-evidence.json`、`native-metrics.json`、
+`resources*.jsonl` 和 233 原始 JSON/JSONL/日志压缩包保留。SCP 仅传元数据/日志，
+Capture、重建与恢复交付均不通过 SCP/TCP payload。
+
+origin、target 和一次性 native receiver 全由本轮 supervisor 管理；每个服务
+创建新 session/process group，保留 PID、start_ticks、boot ID、UID、session。
+停止时先验证本轮 owner marker，并验证 PID 没有复用且组成员属于自己的 session，
+只向该进程组依次发 SIGINT/SIGTERM/SIGKILL；从不按端口、用户名或 GPU 批量 kill。
+232 每 15s 刷新本轮 90s lease，SSH/driver 断连后 supervisor 限时回收本轮组。
+远端不可达时 cleanup 明确 FAIL，保留远端路径供人工诊断。supervisor 自身遭
+SIGKILL、机器断电、子进程主动逃逸 session、远端磁盘损坏等仍需人工诊断，
+不承诺分布式 fencing。RS 无 supervisor stop 入口，永远不在回收列表里。
+
+常见错误：`PORT_OCCUPIED`、`CONDA_PREFIX_MISMATCH`、`TEMPLATE_MODEL_IDENTITY_MISMATCH`、
+`INSUFFICIENT_GPU_MEMORY`、`SOURCE_IDENTITY_MISMATCH`、`HCA_INACTIVE_OR_ZERO_GID`、
+`RS_STRIPE_BUDGET`、`RS_BYTE_BUDGET`、`RS_TTL_TOO_SHORT`、SSH/SCP exit/timeout。
+启动错误立即查对应 `origin/server.log` 或 `target/server.log`；native RDMA CQ
+失败、Stripe expired、Ledger already claimed 原始异常和完整 traceback 留在
+driver/服务日志。修正原因后新建 OUTPUT，不删除 failed ledger 后重试旧 Capture。
+
+## 性能口径与限制
+
+表中各指标独立报告，origin/target 的角色分别标记，TP rank 单列。每个阶段的
+重复事件为该进程/角色/rank累计时间，不是跨 TP 的关键路径；inclusive 不能求和。
+`gpu_kv_snapshot`、D2H、CPU XOR、RS encode/native upload/reconstruct/delivery、
+GPU writeback/readback、request rebuild、权重加载与 first decode 分列。
+额外保留 `capture_artifact_inclusive`、validation、`harness_command_*`、
+`harness_scp_metadata`，后者包含 SSH 与命令工作；不将它们伪装成纯网络耗时。
+
+`failure_to_decode_complete_harness` 是 232 本机的受控 loss→16 Decode 完成
+计时，包含 SSH、实验验证、启动；不含故障发现。`new_instance_launch_to_ready_harness`
+包含模型/source 全量哈希、admission、权重加载、engine init 与健康轮询。
+原有 H2D/writeback 的值包括 host prepare/scatter/fence，不能称为纯 PCIe 时间。
+当前没有独立的“启动时全量哈希纯耗时”或“SSH纯耗时”指标，不能通过减法虚构；
+缺失时按未测量说明。模型全量哈希在每轮 preflight 中也会发生，预检属于 harness，
+不计入 engine 指标，可能预热主机 page cache；当前是 warm filesystem 基线，
+不执行系统 drop_caches。五轮不应宣称 P95/P99，亦不宣称 steady-state EC 开销比例。
+
+所有 duration 都来自单一进程/主机的 monotonic 或已有 CUDA/native CQ；不进行
+跨机器 monotonic 相减。CPU Mock 测试不产生 Stage E GPU/RDMA PASS，历史成功
+`kv-rs-cold-e-20261029.FYgjKW/stage-e-acceptance.json` 也不会自动进入新测量统计。
+
+CPU 回归（在具备 numpy/torch 的 Conda 环境运行，不需要 GPU 或 HCA）：
+
+```bash
+python -m unittest experiments.kv_ec.test_perf_stage_e \
+  experiments.kv_ec.test_gpu_cold_resume experiments.kv_ec.test_rs_cold_resume \
+  experiments.kv_ec.test_rs_recovery_source experiments.kv_ec.test_rdma_transport -v
+```

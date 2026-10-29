@@ -1,8 +1,0 @@
-{
-  "snapshot_id": "guard-20261019T122248",
-  "tp_rank": 2,
-  "diagnostic_write_ms": 0.815852,
-  "info_log_ms": 0.134363,
-  "scheduler_through_diagnostics_ms": 96.224138,
-  "tail_record_own_write_included": false
-}

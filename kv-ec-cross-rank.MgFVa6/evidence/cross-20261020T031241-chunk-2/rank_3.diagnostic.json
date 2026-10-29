@@ -1,8 +1,0 @@
-{
-  "snapshot_id": "cross-20261020T031241-chunk-2",
-  "tp_rank": 3,
-  "diagnostic_write_ms": 3.254744,
-  "info_log_ms": 0.174693,
-  "scheduler_through_diagnostics_ms": 293.894175,
-  "tail_record_own_write_included": false
-}

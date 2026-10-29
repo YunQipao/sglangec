@@ -1,8 +1,0 @@
-{
-  "snapshot_id": "scratch-20261020T073240-SLmcMoq5-chunk-3",
-  "tp_rank": 2,
-  "diagnostic_write_ms": 0.267493,
-  "info_log_ms": 0.11934,
-  "scheduler_through_diagnostics_ms": 114.984739,
-  "tail_record_own_write_included": false
-}

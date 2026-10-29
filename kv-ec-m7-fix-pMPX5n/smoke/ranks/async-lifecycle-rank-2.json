@@ -1,9 +1,0 @@
-{
-  "transaction_id": "pause-22e2d9a9fc29470890cce161fcc14c08",
-  "tp_rank": 2,
-  "request_end_monotonic": 1478432.999186344,
-  "cancelled": false,
-  "state_at_request_end": "COMMITTED",
-  "pending_policy": "bounded_off_path_drain",
-  "foreground_waited_for_commit": false
-}

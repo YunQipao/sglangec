@@ -39,7 +39,11 @@ def read(path):
 
 
 def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    hasher = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(8 * 1024**2), b''):
+            hasher.update(block)
+    return hasher.hexdigest()
 
 
 def command(argv, timeout=15):
@@ -276,40 +280,61 @@ def gate_stage_e(output):
 
 
 def repeat(args):
+    from .perf_preflight import preflight, validate_config
+    from .perf_stage_e import process_identity, signal_owned
+    import signal
     config = read(args.config)
-    if config.get('prefix_tokens') != 256 or config.get('tp_size') != 2 or config.get('rs') != [2, 1]:
-        raise ValueError('first measurement requires 256-token TP2 RS(2,1) config')
+    validate_config(config)
+    if Path.cwd().resolve() != Path(config['nodes'][0]['repo']).resolve():
+        raise ValueError('repeat must run from configured node0 repo on 232')
+    config['resource_interval'] = args.resource_interval or config['resource_interval']
     argv = [sys.executable, '-m', 'experiments.kv_ec.perf_stage_e', 'trial']
     args.output.mkdir(parents=True, exist_ok=False)
     save(args.output / 'metadata.json', dict(**identity(), config=config,
-         repeat=args.repeat, argv=argv, scheme='two-level', resource_interval=args.resource_interval))
+         repeat=args.repeat, argv=argv, scheme='two-level', resource_interval=config['resource_interval']))
+    save(args.output / 'config.json', config)
+    admission = preflight(config, args.output.resolve(), args.repeat)
+    save(args.output / 'preflight.json', admission)
+    if admission['status'] != 'PASS':
+        print(json.dumps(admission), flush=True)
+        raise SystemExit(1)
     for i in range(args.repeat):
-        root = args.output.resolve() / f'trial-{i:03d}-{uuid.uuid4().hex[:8]}'
+        root = args.output.resolve() / f'trial-{i:03d}-{uuid.uuid4().hex}'
         root.mkdir()
         run_id = root.name
-        env = dict(os.environ, KV_EC_BENCH_TRIAL=str(root), KV_EC_BENCH_CONFIG=str(args.config.resolve()),
+        env = dict(os.environ, KV_EC_BENCH_TRIAL=str(root), KV_EC_BENCH_CONFIG=str((args.output / 'config.json').resolve()),
                    KV_EC_PERF_RUN_ID=run_id, KV_EC_PERF_DIR=str(root / 'perf'),
                    KV_EC_PERF_ROLE='coordinator-232')
         started = time.monotonic_ns()
-        with (root / 'driver.log').open('x') as log, Sampler(root / 'resources-232.jsonl', args.resource_interval):
-            result = subprocess.run(argv, env=env, stdout=log, stderr=subprocess.STDOUT)
-        raw = dict(run_id=run_id, returncode=result.returncode, status='failed',
-                   trial_command_ms=(time.monotonic_ns()-started)/1e6,
-                   scheme='two-level', real_rdma_eligible=False)
+        raw = dict(run_id=run_id, returncode=None, status='failed', pass_fail='FAIL',
+                   commit_sha=admission['nodes'][0]['checks']['inventory']['commit_sha'],
+                   scheme='two-level', real_rdma_eligible=False,
+                   remote_root=str(Path(config['remote_root']) / run_id))
         try:
-            if result.returncode:
+            # Recheck idle GPUs/ports/RS epoch and all *remaining* slots before
+            # each trial, including fresh batches on a long-lived server.
+            current = preflight(config, root, args.repeat - i, admission['rs']['server_epoch'])
+            save(root / 'preflight.json', current)
+            if current['status'] != 'PASS':
+                raise ValueError('trial preflight failed: ' + current['error'])
+            with (root / 'driver.log').open('x') as log, Sampler(root / 'resources-232.jsonl', config['resource_interval']):
+                proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                owned = process_identity(proc.pid)
+                save(root / 'driver-process.json', owned)
+                try:
+                    raw['returncode'] = proc.wait(timeout=config['trial_timeout'])
+                except BaseException:
+                    # Only this newly created/verified session receives signals.
+                    signal_owned(owned, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=180)
+                    except subprocess.TimeoutExpired:
+                        signal_owned(owned, signal.SIGKILL)
+                        proc.wait(timeout=10)
+                    raise
+            if raw['returncode']:
                 raise ValueError('trial command failed; see driver.log')
-            # Driver brings a JSON result to 232 while keeping RS on 233 alive.
-            acceptance = read(root / 'acceptance.json')
-            if acceptance.get('live_check_exit') != 0 or acceptance.get('run_id') != run_id:
-                raise ValueError('missing successful current trial live-check receipt')
-            verdict = read(root / 'stage-e-check.json')
-            for key in ('pass_stage_e', 'pass_stage_d', 'real_rdma', 'cuda_executed',
-                        'output_token_ids_match', 'gpu_restore_committed', 'new_instance'):
-                if verdict.get(key) is not True:
-                    raise ValueError('Stage E gate failed: ' + key)
-            if verdict.get('run_id') != acceptance.get('target_run_id'):
-                raise ValueError('verdict is not bound to this trial')
+            validate_trial(root, run_id)
             inventories = [read(root / f'inventory-{node}.json') for node in (232, 233)]
             if inventories[0]['host'] == inventories[1]['host']:
                 raise ValueError('two physical hosts required')
@@ -317,23 +342,87 @@ def repeat(args):
                    x['tracked_diff_sha256'] != inventories[0]['tracked_diff_sha256'] or
                    x['benchmark_files'] != inventories[0]['benchmark_files'] for x in inventories):
                 raise ValueError('two host source identities differ')
-            raw.update(status='accepted', real_rdma_eligible=True,
+            raw.update(status='accepted', pass_fail='PASS', real_rdma_eligible=True,
                 decode_correctness=True, verdict_sha256=digest(root / 'stage-e-check.json'))
-        except Exception as exc:
-            raw['failure_reason'] = str(exc)
+        except (Exception, KeyboardInterrupt) as exc:
+            raw['failure_reason'] = f'{type(exc).__name__}: {exc}'
+        raw['trial_command_ms'] = (time.monotonic_ns()-started)/1e6
         save(root / 'trial.json', raw)
         print(json.dumps(dict(trial=str(root), **raw)), flush=True)
         if raw['status'] != 'accepted':
             raise SystemExit(1)
 
 
+def validate_trial(root, run_id):
+    """Offline audit of a current live-check receipt; never add verdict fields."""
+    from .perf_stage_e import target_binding
+    root = Path(root)
+    acceptance = read(root / 'acceptance.json')
+    if acceptance.get('live_check_exit') != 0 or acceptance.get('run_id') != run_id:
+        raise ValueError('missing successful current trial live-check receipt')
+    for name, key in (('stage-e-check.json', 'verdict_sha256'),
+                      ('target-run.json', 'target_run_sha256'), ('protection.json', 'protection_sha256')):
+        if acceptance.get(key) != digest(root / name):
+            raise ValueError('trial_evidence_digest_mismatch: ' + name)
+    verdict = read(root / 'stage-e-check.json')
+    if verdict.get('schema') != 'kv-rs-cold-resume-stage-e-v1' or verdict.get('runtime_original_local_file_used') is not False:
+        raise ValueError('real Stage E schema/recovered-source provenance required')
+    for key in ('pass_stage_e', 'pass_stage_d', 'real_rdma', 'cuda_executed',
+                'output_token_ids_match', 'gpu_restore_committed', 'new_instance',
+                'rs_recovery_byte_exact', 'no_slot_leak', 'no_request_row_leak',
+                'restored_slots_used_by_decode'):
+        if verdict.get(key) is not True:
+            raise ValueError('Stage E gate failed: ' + key)
+    for key, value in (('resume_decode_forward_count', 16), ('original_prefix_prefill_tokens', 0),
+                       ('recomputed_prefix_tokens', 0), ('tp_size', 2)):
+        if type(verdict.get(key)) is not int or verdict[key] != value:
+            raise ValueError('Stage E gate failed: ' + key)
+    binding = target_binding(verdict, read(root / 'target-run.json'), read(root / 'protection.json'), run_id)
+    if any(acceptance.get(k) != v for k, v in binding.items()):
+        raise ValueError('trial_acceptance_binding_mismatch')
+    cleanup = read(root / 'cleanup.json')
+    if cleanup['status'] != 'PASS':
+        raise ValueError('trial_cleanup_incomplete')
+    cq = read(root / 'cq-evidence.json')
+    from .rs_recovery_source import native_stats
+    for upload in cq['uploads']:
+        native_stats(upload, upload['bytes'])
+    for key in ('client_send_stats', 'receive_stats', 'send_stats', 'client_receive_stats'):
+        native_stats(cq['recovery'][key], cq['recovery'][key]['bytes'])
+    for key, field in (('delivery_send', 'send_stats'), ('delivery_receive', 'receive_stats')):
+        native_stats(cq[key][field], cq[key]['archive_bytes'])
+    exports = [read(root / 'export0/export.json'), read(root / 'export1.json')]
+    if cq['uploads'] != [e['receipt']['metrics']['rdma_native'] for e in exports]:
+        raise ValueError('trial_upload_CQ_binding_mismatch')
+    recovery = read(root / 'recovered-source/protected/recovery.json')
+    delivery = read(root / 'delivery-send.json')
+    if cq['recovery'] != recovery['transfer'] or cq['delivery_send'] != delivery:
+        raise ValueError('trial_recovery_CQ_binding_mismatch')
+    from .perf_stage_e import native_metrics
+    if read(root / 'native-metrics.json') != native_metrics(None, *exports, recovery, delivery):
+        raise ValueError('trial_native_metric_binding_mismatch')
+    inventories = [read(root / f'inventory-{node}.json') for node in (232, 233)]
+    if inventories[0]['host'] == inventories[1]['host'] or inventories[0]['boot_id'] == inventories[1]['boot_id']:
+        raise ValueError('two physical hosts required')
+    for key in ('commit_sha', 'tracked_diff_sha256', 'benchmark_files'):
+        if inventories[0][key] != inventories[1][key]:
+            raise ValueError('two host source identities differ: ' + key)
+    metadata = read(root.parent / 'metadata.json')
+    for key in ('commit_sha', 'tracked_diff_sha256', 'benchmark_files'):
+        if inventories[0][key] != metadata[key]:
+            raise ValueError('trial_source_changed_since_batch_admission: ' + key)
+    return verdict
+
+
 def collect(args):
-    groups, rejected = defaultdict(list), []
+    groups, rejected, accepted, missing = defaultdict(list), [], [], []
+    seen = set()
     for root in args.roots:
         metadata = read(root / 'metadata.json')
         # No pooling configurations or schemes. Each group has its own source.
-        key = hashlib.sha256(json.dumps(metadata.get('config', metadata.get('server_info',
-            metadata.get('runtime_identity', {}))), sort_keys=True).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps(dict(config=metadata.get('config', metadata.get('server_info',
+            metadata.get('runtime_identity', {}))), source={k: metadata.get(k) for k in
+            ('commit_sha', 'tracked_diff_sha256', 'benchmark_files')}), sort_keys=True).encode()).hexdigest()
         scheme = metadata['scheme']
         for path in sorted(root.glob('request-*.json')):
             record = read(path)
@@ -356,29 +445,60 @@ def collect(args):
             for metric in ('rs_encode_ms', 'remote_committed_ms', 'recovery_ms', 'server_recovery_ms'):
                 if isinstance(record.get(metric), (int, float)):
                     groups[(scheme, key, metric)].append(record[metric])
-        for path in sorted(root.glob('trial-*/trial.json')):
-            trial = read(path)
-            if trial['status'] != 'accepted' or trial['real_rdma_eligible'] is not True:
-                rejected.append(str(path))
+        for directory in sorted(root.glob('trial-*')):
+            if not directory.is_dir():
                 continue
-            per_trial = defaultdict(float)
-            for log in sorted(path.parent.glob('perf*/*.jsonl')):
-                for line in log.read_text().splitlines():
-                    record = json.loads(line)
-                    if record['run_id'] != trial['run_id'] or record['status'] != 'ok':
-                        raise ValueError('foreign or failed observation: ' + str(log))
-                    value = record['duration_ms']
-                    if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-                        raise ValueError('invalid observation duration')
-                    name = '/'.join(map(str, (record['stage'], record['role'], record['host'], record.get('tp_rank', '-'))))
-                    per_trial[name] += value
-            for name, value in per_trial.items():
-                groups[(scheme, key, name)].append(value)
-            for metric, value in read(path.parent / 'native-metrics.json').items():
-                groups[(scheme, key, metric)].append(value)
+            path = directory / 'trial.json'
+            try:
+                trial = read(path)
+                if (trial['status'] != 'accepted' or trial['real_rdma_eligible'] is not True or
+                        trial.get('pass_fail') != 'PASS'):
+                    raise ValueError(trial.get('failure_reason', 'not an accepted real trial'))
+                validate_trial(directory, trial['run_id'])
+                fingerprint = (trial['run_id'], trial['verdict_sha256'])
+                if fingerprint in seen:
+                    raise ValueError('duplicate trial; cannot count same PASS twice')
+                if trial['verdict_sha256'] != digest(directory / 'stage-e-check.json'):
+                    raise ValueError('trial_verdict_digest_mismatch')
+                per_trial = defaultdict(float)
+                stages = set()
+                for log in sorted(directory.glob('perf*/*.jsonl')):
+                    for line in log.read_text().splitlines():
+                        record = json.loads(line)
+                        if record['run_id'] != trial['run_id'] or record['status'] != 'ok':
+                            raise ValueError('foreign or failed observation: ' + str(log))
+                        value = record['duration_ms']
+                        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                            raise ValueError('invalid observation duration')
+                        stages.add(record['stage'])
+                        name = '/'.join(map(str, (record['stage'], record['role'], record['host'], record.get('tp_rank', '-'))))
+                        per_trial[name] += value
+                required = {'gpu_kv_snapshot', 'gpu_to_host', 'local_xor_encode', 'gpu_kv_writeback',
+                            'gpu_layer_readback_validation', 'scheduler_request_rebuild',
+                            'model_weight_load', 'first_restored_decode_cuda',
+                            'failure_to_decode_complete_harness', 'new_instance_launch_to_ready_harness'}
+                absent = sorted(required - stages)
+                if absent:
+                    missing.append(dict(trial=str(directory), stages=absent))
+                    raise ValueError('missing required performance observations: ' + ','.join(absent))
+                native = read(directory / 'native-metrics.json')
+                if not native or 'rs_decode_ms' not in native:
+                    raise ValueError('native metrics missing')
+                for metric, value in native.items():
+                    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                        raise ValueError('invalid native metric: ' + metric)
+                    per_trial[metric] = value
+                # Commit observations only after the ENTIRE trial validates.
+                for name, value in per_trial.items():
+                    groups[(scheme, key, name)].append(value)
+                accepted.append(str(directory))
+                seen.add(fingerprint)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                rejected.append(dict(trial=str(directory), reason=f'{type(exc).__name__}: {exc}'))
     rows = [dict(scheme=scheme, config_sha256=key, metric=metric, **stats(values))
             for (scheme, key, metric), values in sorted(groups.items())]
-    save(args.output, dict(schema='kv-ec-perf-summary-v1', rows=rows, rejected=rejected,
+    save(args.output, dict(schema='kv-ec-perf-summary-v2', rows=rows, rejected=rejected,
+        accepted_trials=accepted, missing_metrics=missing,
         quantile_policy='P50 n>=5; P95 n>=20; P99 n>=100; linear interpolation; sample stddev',
         overhead_ratio=None,
         overhead_ratio_reason='Stage E capture/export is offline sequential harness, not steady-state serving; '
@@ -392,11 +512,15 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     p = sub.add_parser('inventory')
     p.add_argument('--output', type=Path, required=True)
+    p = sub.add_parser('preflight')
+    p.add_argument('--config', type=Path, required=True)
+    p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--repeat', type=int, default=1)
     for name in ('inference', 'xor-only', 'rs-only', 'repeat'):
         p = sub.add_parser(name)
         p.add_argument('--output', type=Path, required=True)
         p.add_argument('--repeat', type=int, default=5)
-        p.add_argument('--resource-interval', type=float, default=1.)
+        p.add_argument('--resource-interval', type=float, default=None if name == 'repeat' else 1.)
         if name == 'inference':
             p.add_argument('--scheme', choices=('no-ec', 'reprefill'), required=True)
             p.add_argument('--url', required=True)
@@ -417,8 +541,18 @@ def main():
     args = parser.parse_args()
     if getattr(args, 'repeat', 1) < 1 or getattr(args, 'warmup', 0) < 0:
         parser.error('repeat must be positive; warmup must be nonnegative')
+    interval = getattr(args, 'resource_interval', None)
+    if interval is not None and (not math.isfinite(interval) or interval < .5):
+        parser.error('resource interval must be finite and >= 0.5 seconds')
     if args.command == 'inventory':
         save(args.output, dict(**identity(), resources=resource_snapshot()))
+    elif args.command == 'preflight':
+        from .perf_preflight import preflight
+        report = preflight(read(args.config), args.output.resolve().parent, args.repeat)
+        save(args.output, report)
+        print(json.dumps(report), flush=True)
+        if report['status'] != 'PASS':
+            raise SystemExit(1)
     else:
         {'inference': inference, 'xor-only': local_xor, 'rs-only': rs_only,
          'repeat': repeat, 'collect': collect}[args.command](args)

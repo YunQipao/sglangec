@@ -1,8 +1,0 @@
-{
-  "snapshot_id": "lease-20261019T133723",
-  "tp_rank": 3,
-  "diagnostic_write_ms": 1.487601,
-  "info_log_ms": 0.140682,
-  "scheduler_through_diagnostics_ms": 118.495745,
-  "tail_record_own_write_included": false
-}
