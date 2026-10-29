@@ -21,7 +21,7 @@ import re
 import math
 import urllib.request
 
-from .perf_benchmark import Sampler, digest, read, save
+from .perf_benchmark import Sampler, digest, identity, read, save
 
 E = 'experiments.kv_ec.verify_rs_cold_resume'
 D = 'experiments.kv_ec.verify_gpu_cold_resume'
@@ -284,6 +284,27 @@ def scp(host, remote, local, upload=False):
                         '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', *args], check=True, timeout=120)
 
 
+def local_ssh_tunnel(host, local_port, remote_port):
+    proc = subprocess.Popen(['ssh', '-N', '-o', 'BatchMode=yes',
+        '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=10',
+        '-L', f'127.0.0.1:{local_port}:127.0.0.1:{remote_port}', host.cfg['ssh']],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+    deadline = time.monotonic() + 30
+    while True:
+        if proc.poll() is not None:
+            raise RuntimeError('reprefill_ssh_tunnel_failed')
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{local_port}/server_info', timeout=2):
+                return proc
+        except OSError:
+            if time.monotonic() >= deadline:
+                proc.terminate()
+                proc.wait(timeout=5)
+                raise TimeoutError('reprefill_ssh_tunnel_timeout')
+            time.sleep(.1)
+
+
 def native_metrics(root, n0, n1, recovery, delivery):
     from .rs_recovery_source import native_stats
     values = {}
@@ -321,6 +342,9 @@ def trial():
     validate_config(cfg)
     local = Path(os.environ['KV_EC_BENCH_TRIAL'])
     rid = os.environ['KV_EC_PERF_RUN_ID']
+    recovery_mode = os.environ.get('KV_EC_PERF_RECOVERY_MODE', 'two-level')
+    if recovery_mode not in ('two-level', 'reprefill'):
+        raise ValueError('invalid_recovery_mode')
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', rid) or local.name != rid:
         raise ValueError('invalid_trial_ID_or_directory_binding')
     remote = Path(cfg.get('remote_root', '/tmp/kv-ec-perf')) / rid
@@ -346,7 +370,7 @@ def trial():
         raise InterruptedError(f'coordinator_signal_{signum}')
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, interrupted)
-    services, logs = [], []
+    services, logs, tunnels = [], [], []
     def start(h, name, module, *args):
         log = (local / f'{name}-node{h.node}.log').open('x')
         logs.append(log)
@@ -389,6 +413,12 @@ def trial():
             h.run(D, 'reference', '--output', h.root / f'node{h.node}-reference')
             h.run(E, 'claim', '--capture', h.root / 'capture', '--output', h.root / f'claim{h.node}.json')
         parallel(*[lambda h=h: capture(h) for h in hosts])
+        if recovery_mode == 'reprefill':
+            (local / 'node1-reference').mkdir(exist_ok=True)
+            scp(b, remote / 'node1-reference/rank_0.json',
+                local / 'node1-reference/rank_0.json')
+            scp(b, remote / 'node1-reference/submitted_input_ids.json',
+                local / 'node1-reference/submitted_input_ids.json')
         for h in hosts:
             stop(h, 'origin')
         scp(b, remote / 'claim1.json', local / 'claim1.json')
@@ -410,6 +440,47 @@ def trial():
         # All E2E timestamps below are on this 232 coordinator. SSH/control and
         # independent checks remain included and are explicitly harness costs.
         recovery_start = time.monotonic_ns()
+        if recovery_mode == 'reprefill':
+            target_started = time.monotonic_ns()
+            start(b, 'target', 'experiments.kv_ec.reprefill_server', 'launch',
+                '--model', b.cfg['model'], '--output', remote / 'cold-reprefill',
+                '--gpus', b.cfg['gpus'], '--port', cfg['target_port'],
+                '--mem-fraction-static', cfg.get('mem_fraction_static', .60))
+            b.run(SELF, 'wait-file', '--path', remote / 'cold-reprefill/run.json',
+                  '--service-root', remote / 'target')
+            b.run(SELF, 'wait-health', '--url', f'http://127.0.0.1:{cfg["target_port"]}',
+                  '--service-root', remote / 'target')
+            ready = time.monotonic_ns()
+            scp(b, remote / 'cold-reprefill/run.json', local / 'reprefill-target-run.json')
+            from .perf_preflight import free_ports
+            free_ports([a.cfg['origin_port']])
+            tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'])
+            tunnels.append(tunnel)
+            a.run(B, 'inference', '--scheme', 'reprefill', '--url',
+                f'http://127.0.0.1:{a.cfg["origin_port"]}', '--model', a.cfg['model'],
+                '--server-model', b.cfg['model'],
+                '--input-ids', local / 'node1-reference/submitted_input_ids.json',
+                '--output', local / 'reprefill-inference', '--warmup', 0, '--repeat', 1,
+                '--expected-model-sha256',
+                read(local / 'node1-reference/rank_0.json')['runtime_identity']['model_sha256'],
+                '--model-identity-evidence', local / 'reprefill-target-run.json',
+                '--ready-monotonic-ns', ready)
+            request = read(local / 'reprefill-inference/request-000.json')
+            reference = read(local / 'node1-reference/rank_0.json')
+            if request['output_token_ids'] != reference['output_token_ids']:
+                raise ValueError('reprefill_output_token_ids_mismatch')
+            save(local / 'reprefill.json', dict(schema='kv-ec-cold-reprefill-v1',
+                pass_reprefill=True, output_token_ids_match=True,
+                commit_sha=identity()['commit_sha'], model_sha256=reference['runtime_identity']['model_sha256'],
+                input_sha256=digest(local / 'node1-reference/submitted_input_ids.json'), target_run_id=rid,
+                target_started_ns=target_started, ready_ns=ready,
+                fault_boundary_to_ready_ms=(ready-recovery_start)/1e6,
+                ready_to_first_token_ms=request['ready_to_first_token_ms'],
+                ready_to_decode_complete_ms=request['ready_to_decode_complete_ms'],
+                fault_boundary_to_decode_complete_ms=(request['end_ns']-recovery_start)/1e6,
+                client_request_ms=request['request_ms'], client_prefill_ttft_ms=request['prefill_ttft_ms'],
+                timing_note='all event timestamps use node0 coordinator monotonic; SSH tunnel targets the owned node1 service'))
+            return
         restore_id = read(local / 'capture/request_state.json')['restore_id']
         a.run(E, 'recover', '--protection', local / 'protection.json',
             '--survivor', local / f'export0/{restore_id}/global_node.bin', *rdma(a),
@@ -454,6 +525,48 @@ def trial():
             verdict_sha256=digest(local / 'stage-e-check.json'),
             target_run_sha256=digest(local / 'target-run.json'),
             protection_sha256=digest(local / 'protection.json')))
+        save(local / 'stage-e-timing.json', dict(
+            schema='kv-ec-stage-e-coordinator-timing-v1', target_run_id=read(local / 'target-run.json')['run_id'],
+            ready_to_decode_complete_ms=(decoded-ready)/1e6,
+            fault_boundary_to_decode_complete_ms=(decoded-recovery_start)/1e6,
+            fault_boundary_to_ready_ms=(ready-recovery_start)/1e6,
+            timing_note='232 coordinator monotonic; includes remote command and Stage E validation'))
+        if os.environ.get('KV_EC_PAIRED_READY_REPREFILL') == '1':
+            b.run(SELF, 'wait-health', '--url', f'http://127.0.0.1:{cfg["target_port"]}',
+                  '--service-root', remote / 'target')
+            (local / 'node1-reference').mkdir(exist_ok=True)
+            scp(b, remote / 'node1-reference/rank_0.json', local / 'node1-reference/rank_0.json')
+            scp(b, remote / 'node1-reference/submitted_input_ids.json',
+                local / 'node1-reference/submitted_input_ids.json')
+            from .perf_preflight import free_ports
+            free_ports([a.cfg['origin_port']])
+            tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'])
+            tunnels.append(tunnel)
+            target_run = read(local / 'target-run.json')
+            a.run(B, 'inference', '--scheme', 'reprefill', '--url',
+                f'http://127.0.0.1:{a.cfg["origin_port"]}', '--model', a.cfg['model'],
+                '--server-model', b.cfg['model'], '--input-ids',
+                local / 'node1-reference/submitted_input_ids.json', '--output',
+                local / 'paired-ready-reprefill', '--warmup', 0, '--repeat', 1,
+                '--expected-model-sha256', target_run['runtime_identity']['model_sha256'],
+                '--model-identity-evidence', local / 'target-run.json',
+                '--ready-monotonic-ns', ready)
+            paired = read(local / 'paired-ready-reprefill/request-000.json')
+            reference = read(local / 'node1-reference/rank_0.json')
+            if paired['output_token_ids'] != reference['output_token_ids']:
+                raise ValueError('paired_reprefill_output_token_ids_mismatch')
+            save(local / 'paired-ready-reprefill.json', dict(
+                schema='kv-ec-stage-e-same-target-reprefill-v1', pass_reprefill=True,
+                output_token_ids_match=True, stage_e_verdict_sha256=digest(local / 'stage-e-check.json'),
+                target_run_sha256=digest(local / 'target-run.json'), target_run_id=target_run['run_id'],
+                model_sha256=target_run['runtime_identity']['model_sha256'],
+                input_sha256=digest(local / 'node1-reference/submitted_input_ids.json'),
+                request_ms=paired['request_ms'], prefill_ttft_ms=paired['prefill_ttft_ms'],
+                ready_to_first_token_ms=paired['ready_to_first_token_ms'],
+                ready_to_decode_complete_ms=paired['ready_to_decode_complete_ms'],
+                cached_tokens=paired['response']['meta_info']['cached_tokens'],
+                prompt_tokens=paired['response']['meta_info']['prompt_tokens'],
+                completion_tokens=paired['response']['meta_info']['completion_tokens']))
         from .perf_observer import emit
         emit('failure_to_decode_complete_harness', 'recovery', start_ns=recovery_start, end_ns=decoded,
              includes='native_recovery,delivery,independent_checks,SSH,target_startup,16_decodes,validation',
@@ -477,6 +590,14 @@ def trial():
         raise
     finally:
         errors = []
+        for tunnel in tunnels:
+            if tunnel.poll() is None:
+                tunnel.terminate()
+                try:
+                    tunnel.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    tunnel.kill()
+                    tunnel.wait(timeout=5)
         for h, name, proc in reversed(services):
             if proc.poll() is None:
                 try:
@@ -511,7 +632,8 @@ def trial():
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='command', required=True)
-    sub.add_parser('trial')
+    trial_parser = sub.add_parser('trial')
+    trial_parser.add_argument('--recovery-mode', choices=('two-level', 'reprefill'), default='two-level')
     for name in ('prepare', 'init-trial', 'heartbeat', 'stop', 'service', 'bundle-json'):
         q = sub.add_parser(name)
         q.add_argument('--root', type=Path, required=True)
@@ -529,6 +651,7 @@ def main():
     q.add_argument('--timeout', type=float, default=900)
     a = p.parse_args()
     if a.command == 'trial':
+        os.environ['KV_EC_PERF_RECOVERY_MODE'] = a.recovery_mode
         trial()
     elif a.command == 'prepare':
         a.root.mkdir(parents=True, exist_ok=False)

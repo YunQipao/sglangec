@@ -62,7 +62,11 @@ def identity():
     diff = command(['git', 'diff', '--binary', 'HEAD'], timeout=30)
     # Include new observation/benchmark files even before they are committed.
     root = Path(__file__).resolve().parent
-    files = {str(p.relative_to(root)): digest(p) for p in sorted(root.glob('perf_*.py'))}
+    benchmark_paths = list(root.glob('perf_*.py'))
+    reprefill = root / 'reprefill_server.py'
+    if reprefill.exists():
+        benchmark_paths.append(reprefill)
+    files = {str(p.relative_to(root)): digest(p) for p in sorted(benchmark_paths)}
     return dict(commit_sha=sha['stdout'],
         git_status=command(['git', 'status', '--short'])['stdout'],
         tracked_diff_sha256=hashlib.sha256(diff['stdout'].encode()).hexdigest(),
@@ -159,8 +163,18 @@ def inference(args):
     graph = info.get('cuda_graph_config', {})
     if any(graph.get(k, {}).get('backend') != 'disabled' for k in ('decode', 'prefill')):
         raise ValueError('baseline requires disabled CUDA graphs, matching Stage E')
-    if info.get('model_path') != args.model:
+    server_model = getattr(args, 'server_model', None) or args.model
+    if info.get('model_path') != server_model:
         raise ValueError('baseline model_path mismatch')
+    if args.expected_model_sha256:
+        if getattr(args, 'model_identity_evidence', None):
+            evidence = read(args.model_identity_evidence)
+            actual = evidence.get('model_identity', {}).get('model_sha256')
+        else:
+            from .debug_capture import source_identity
+            actual = source_identity(args.model).get('model_sha256')
+        if actual != args.expected_model_sha256:
+            raise ValueError('baseline_model_sha256_mismatch')
     # This is exactly Stage D submit's policy (temperature=0 normalizes to
     # greedy top_k=1), 17 output IDs = one pending y0 plus 16 native decodes.
     sampling = dict(max_new_tokens=17, temperature=0, ignore_eos=True, top_p=1.,
@@ -206,8 +220,51 @@ def inference(args):
             save(args.output / f'request-{i:03d}.json', dict(warmup=i < args.warmup,
                 scheme=args.scheme, start_ns=started, end_ns=ended,
                 request_ms=(ended-started)/1e6, prefill_ttft_ms=(first-started)/1e6,
+                ready_to_first_token_ms=((first-args.ready_monotonic_ns)/1e6
+                    if getattr(args, 'ready_monotonic_ns', None) is not None else None),
+                ready_to_decode_complete_ms=((ended-args.ready_monotonic_ns)/1e6
+                    if getattr(args, 'ready_monotonic_ns', None) is not None else None),
                 source='client_monotonic_ns', response=final, output_token_ids=output_ids,
                 correctness='raw token IDs recorded; compare against Stage E reference separately'))
+
+
+def collect_inference(args):
+    """Collect independent ready-server inference roots without pooling identities."""
+    groups = defaultdict(list)
+    accepted, rejected = [], []
+    for root in args.roots:
+        try:
+            metadata = read(root / 'metadata.json')
+            if metadata.get('scheme') != args.scheme:
+                raise ValueError('scheme_mismatch')
+            if metadata.get('prefix_tokens') != 256 or metadata.get('tp_size') != 2:
+                raise ValueError('baseline_identity_mismatch')
+            records = []
+            for path in sorted(root.glob('request-*.json')):
+                record = read(path)
+                if record.get('warmup'):
+                    continue
+                response = record.get('response', {})
+                meta = response.get('meta_info', {})
+                if (meta.get('cached_tokens') != 0 or meta.get('prompt_tokens') != 256 or
+                        meta.get('completion_tokens') != 17 or
+                        len(record.get('output_token_ids', [])) != 17):
+                    raise ValueError('inference_correctness_boundary_invalid')
+                records.append(record)
+            if len(records) != args.expected_trials:
+                raise ValueError(f'expected_{args.expected_trials}_requests_got_{len(records)}')
+            accepted.append(str(root))
+            for metric in ('request_ms', 'prefill_ttft_ms'):
+                groups[metric].extend(r[metric] for r in records)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            rejected.append(dict(root=str(root), reason=f'{type(exc).__name__}: {exc}'))
+    rows = [dict(scheme=args.scheme, metric=metric, **stats(values))
+            for metric, values in sorted(groups.items())]
+    save(args.output, dict(schema='kv-ec-inference-summary-v1', scheme=args.scheme,
+        accepted_roots=accepted, rejected=rejected, rows=rows,
+        expected_trials=args.expected_trials,
+        warning='request latency is ready-server client timing; it excludes cold startup and fault detection'))
+    print(json.dumps(dict(output=str(args.output), series=len(rows), rejected=len(rejected))))
 
 
 def local_xor(args):
@@ -290,8 +347,16 @@ def repeat(args):
     config['resource_interval'] = args.resource_interval or config['resource_interval']
     argv = [sys.executable, '-m', 'experiments.kv_ec.perf_stage_e', 'trial']
     args.output.mkdir(parents=True, exist_ok=False)
+    recovery_mode = getattr(args, 'recovery_mode', 'two-level')
+    if recovery_mode not in ('two-level', 'reprefill'):
+        raise ValueError('invalid_recovery_mode')
+    paired_ready_reprefill = bool(getattr(args, 'paired_ready_reprefill', False))
+    if paired_ready_reprefill and recovery_mode != 'two-level':
+        raise ValueError('paired_ready_reprefill_requires_two_level')
+    if recovery_mode == 'reprefill':
+        argv = argv + ['--recovery-mode', 'reprefill']
     save(args.output / 'metadata.json', dict(**identity(), config=config,
-         repeat=args.repeat, argv=argv, scheme='two-level', resource_interval=config['resource_interval']))
+         repeat=args.repeat, argv=argv, scheme=recovery_mode, resource_interval=config['resource_interval']))
     save(args.output / 'config.json', config)
     admission = preflight(config, args.output.resolve(), args.repeat)
     save(args.output / 'preflight.json', admission)
@@ -304,11 +369,12 @@ def repeat(args):
         run_id = root.name
         env = dict(os.environ, KV_EC_BENCH_TRIAL=str(root), KV_EC_BENCH_CONFIG=str((args.output / 'config.json').resolve()),
                    KV_EC_PERF_RUN_ID=run_id, KV_EC_PERF_DIR=str(root / 'perf'),
-                   KV_EC_PERF_ROLE='coordinator-232')
+                   KV_EC_PERF_ROLE='coordinator-232', KV_EC_PERF_RECOVERY_MODE=recovery_mode,
+                   KV_EC_PAIRED_READY_REPREFILL='1' if paired_ready_reprefill else '0')
         started = time.monotonic_ns()
         raw = dict(run_id=run_id, returncode=None, status='failed', pass_fail='FAIL',
                    commit_sha=admission['nodes'][0]['checks']['inventory']['commit_sha'],
-                   scheme='two-level', real_rdma_eligible=False,
+                   scheme=recovery_mode, real_rdma_eligible=False,
                    remote_root=str(Path(config['remote_root']) / run_id))
         try:
             # Recheck idle GPUs/ports/RS epoch and all *remaining* slots before
@@ -334,7 +400,12 @@ def repeat(args):
                     raise
             if raw['returncode']:
                 raise ValueError('trial command failed; see driver.log')
-            validate_trial(root, run_id)
+            if recovery_mode == 'two-level':
+                validate_trial(root, run_id)
+            else:
+                reprefill = read(root / 'reprefill.json')
+                if reprefill.get('pass_reprefill') is not True or reprefill.get('output_token_ids_match') is not True:
+                    raise ValueError('reprefill_control_gate_failed')
             inventories = [read(root / f'inventory-{node}.json') for node in (232, 233)]
             if inventories[0]['host'] == inventories[1]['host']:
                 raise ValueError('two physical hosts required')
@@ -342,8 +413,11 @@ def repeat(args):
                    x['tracked_diff_sha256'] != inventories[0]['tracked_diff_sha256'] or
                    x['benchmark_files'] != inventories[0]['benchmark_files'] for x in inventories):
                 raise ValueError('two host source identities differ')
-            raw.update(status='accepted', pass_fail='PASS', real_rdma_eligible=True,
-                decode_correctness=True, verdict_sha256=digest(root / 'stage-e-check.json'))
+            raw.update(status='accepted', pass_fail='PASS',
+                real_rdma_eligible=(recovery_mode == 'two-level'),
+                decode_correctness=True,
+                verdict_sha256=(digest(root / 'stage-e-check.json')
+                    if recovery_mode == 'two-level' else digest(root / 'reprefill.json')))
         except (Exception, KeyboardInterrupt) as exc:
             raw['failure_reason'] = f'{type(exc).__name__}: {exc}'
         raw['trial_command_ms'] = (time.monotonic_ns()-started)/1e6
@@ -451,16 +525,30 @@ def collect(args):
             path = directory / 'trial.json'
             try:
                 trial = read(path)
-                if (trial['status'] != 'accepted' or trial['real_rdma_eligible'] is not True or
-                        trial.get('pass_fail') != 'PASS'):
+                if (trial['status'] != 'accepted' or trial.get('pass_fail') != 'PASS' or
+                        (scheme == 'two-level' and trial['real_rdma_eligible'] is not True)):
                     raise ValueError(trial.get('failure_reason', 'not an accepted real trial'))
-                validate_trial(directory, trial['run_id'])
+                per_trial = defaultdict(float)
+                if scheme == 'two-level':
+                    validate_trial(directory, trial['run_id'])
+                else:
+                    control = read(directory / 'reprefill.json')
+                    if control.get('pass_reprefill') is not True or control.get('output_token_ids_match') is not True:
+                        raise ValueError('reprefill_control_gate_failed')
+                    for metric in ('fault_boundary_to_ready_ms', 'ready_to_first_token_ms',
+                                   'ready_to_decode_complete_ms', 'fault_boundary_to_decode_complete_ms',
+                                   'client_request_ms', 'client_prefill_ttft_ms'):
+                        value = control.get(metric)
+                        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                            raise ValueError('reprefill_metric_missing_or_invalid:' + metric)
+                        per_trial[metric] += value
                 fingerprint = (trial['run_id'], trial['verdict_sha256'])
                 if fingerprint in seen:
                     raise ValueError('duplicate trial; cannot count same PASS twice')
-                if trial['verdict_sha256'] != digest(directory / 'stage-e-check.json'):
+                expected_digest = (digest(directory / 'stage-e-check.json') if scheme == 'two-level'
+                                   else digest(directory / 'reprefill.json'))
+                if trial['verdict_sha256'] != expected_digest:
                     raise ValueError('trial_verdict_digest_mismatch')
-                per_trial = defaultdict(float)
                 stages = set()
                 for log in sorted(directory.glob('perf*/*.jsonl')):
                     for line in log.read_text().splitlines():
@@ -473,14 +561,21 @@ def collect(args):
                         stages.add(record['stage'])
                         name = '/'.join(map(str, (record['stage'], record['role'], record['host'], record.get('tp_rank', '-'))))
                         per_trial[name] += value
-                required = {'gpu_kv_snapshot', 'gpu_to_host', 'local_xor_encode', 'gpu_kv_writeback',
+                required = ({'gpu_kv_snapshot', 'gpu_to_host', 'local_xor_encode', 'gpu_kv_writeback',
                             'gpu_layer_readback_validation', 'scheduler_request_rebuild',
                             'model_weight_load', 'first_restored_decode_cuda',
                             'failure_to_decode_complete_harness', 'new_instance_launch_to_ready_harness'}
+                            if scheme == 'two-level' else set())
                 absent = sorted(required - stages)
                 if absent:
                     missing.append(dict(trial=str(directory), stages=absent))
                     raise ValueError('missing required performance observations: ' + ','.join(absent))
+                if scheme == 'reprefill':
+                    accepted.append(str(directory))
+                    seen.add(fingerprint)
+                    for name, value in per_trial.items():
+                        groups[(scheme, key, name)].append(value)
+                    continue
                 native = read(directory / 'native-metrics.json')
                 if not native or 'rs_decode_ms' not in native:
                     raise ValueError('native metrics missing')
@@ -521,13 +616,22 @@ def main():
         p.add_argument('--output', type=Path, required=True)
         p.add_argument('--repeat', type=int, default=5)
         p.add_argument('--resource-interval', type=float, default=None if name == 'repeat' else 1.)
+        if name == 'repeat':
+            p.add_argument('--recovery-mode', choices=('two-level', 'reprefill'), default='two-level')
+            p.add_argument('--paired-ready-reprefill', action='store_true',
+                           help='run a token-bound Re-Prefill request on the same accepted Stage E target')
         if name == 'inference':
             p.add_argument('--scheme', choices=('no-ec', 'reprefill'), required=True)
             p.add_argument('--url', required=True)
             p.add_argument('--model', required=True)
+            p.add_argument('--server-model')
             p.add_argument('--input-ids', type=Path, required=True)
             p.add_argument('--warmup', type=int, default=2)
             p.add_argument('--timeout', type=float, default=600)
+            p.add_argument('--expected-model-sha256')
+            p.add_argument('--model-identity-evidence', type=Path)
+            p.add_argument('--ready-monotonic-ns', type=int,
+                           help='same-host coordinator monotonic timestamp for cold-start control')
         elif name == 'xor-only':
             p.add_argument('--capture', type=Path, required=True)
             p.add_argument('--lost-rank', type=int, choices=(0, 1), default=1)
@@ -538,8 +642,14 @@ def main():
     p = sub.add_parser('collect')
     p.add_argument('--roots', type=Path, nargs='+', required=True)
     p.add_argument('--output', type=Path, required=True)
+    p = sub.add_parser('collect-inference')
+    p.add_argument('--roots', type=Path, nargs='+', required=True)
+    p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--scheme', choices=('no-ec', 'reprefill'), required=True)
+    p.add_argument('--expected-trials', type=int, default=1)
     args = parser.parse_args()
-    if getattr(args, 'repeat', 1) < 1 or getattr(args, 'warmup', 0) < 0:
+    if (getattr(args, 'repeat', 1) < 1 or getattr(args, 'warmup', 0) < 0 or
+            getattr(args, 'expected_trials', 1) < 1):
         parser.error('repeat must be positive; warmup must be nonnegative')
     interval = getattr(args, 'resource_interval', None)
     if interval is not None and (not math.isfinite(interval) or interval < .5):
@@ -555,7 +665,7 @@ def main():
             raise SystemExit(1)
     else:
         {'inference': inference, 'xor-only': local_xor, 'rs-only': rs_only,
-         'repeat': repeat, 'collect': collect}[args.command](args)
+         'repeat': repeat, 'collect': collect, 'collect-inference': collect_inference}[args.command](args)
 
 
 if __name__ == '__main__':

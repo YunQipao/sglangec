@@ -19,6 +19,7 @@ import zipfile
 from . import perf_benchmark as bench
 from . import perf_preflight as pf
 from . import perf_stage_e as stage
+from . import reprefill_server
 
 
 EXAMPLE = Path(__file__).with_name('perf_stage_e_232.example.json')
@@ -827,6 +828,54 @@ class CollectionTests(unittest.TestCase):
             report = bench.read(out)
             self.assertEqual(report['rows'], [])
             self.assertEqual(len(report['missing_metrics']), 1)
+
+
+class RePrefillInterfaceTests(unittest.TestCase):
+    def test_reprefill_contract_rejects_wrong_prefix_and_short_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ids = Path(tmp) / 'ids.json'
+            ids.write_text(json.dumps([1] * 256))
+            self.assertEqual(len(reprefill_server.read_ids(ids)), 256)
+            ids.write_text(json.dumps([1] * 255))
+            with self.assertRaisesRegex(ValueError, 'exactly_256_input_ids_required'):
+                reprefill_server.read_ids(ids)
+        valid = dict(meta_info=dict(cached_tokens=0, prompt_tokens=256, completion_tokens=17),
+                     output_ids=list(range(17)))
+        self.assertEqual(reprefill_server.validate_generation(valid), list(range(17)))
+        valid['meta_info']['cached_tokens'] = 1
+        with self.assertRaisesRegex(ValueError, 'reprefill_generation_boundary_invalid'):
+            reprefill_server.validate_generation(valid)
+
+    def test_inference_records_coordinator_ready_to_first_and_complete(self):
+        import urllib.request
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ids_path = root / 'ids.json'
+            ids_path.write_text(json.dumps([2] * 256))
+            output = root / 'run'
+            result = dict(meta_info=dict(cached_tokens=0, prompt_tokens=256,
+                                         completion_tokens=17), output_ids=[3] * 17)
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *_): return False
+                def __iter__(self):
+                    yield b'data: ' + json.dumps(result).encode() + b'\n'
+                    yield b'data: [DONE]\n'
+            info = dict(tp_size=2, disable_radix_cache=True, disable_overlap_schedule=True,
+                chunked_prefill_size=-1, max_running_requests=1, attention_backend='triton',
+                cuda_graph_config={k: {'backend': 'disabled'} for k in ('decode', 'prefill')},
+                model_path='/model')
+            args = NS(input_ids=ids_path, url='http://127.0.0.1:30000', model='/model',
+                scheme='reprefill', output=output, repeat=1, warmup=0, timeout=10,
+                resource_interval=1., expected_model_sha256=None,
+                model_identity_evidence=None, ready_monotonic_ns=time.monotonic_ns()-10_000_000)
+            with patch.object(bench, 'http', return_value=info), \
+                    patch.object(urllib.request, 'urlopen', return_value=Response()):
+                bench.inference(args)
+            record = bench.read(output / 'request-000.json')
+            self.assertEqual(record['output_token_ids'], [3] * 17)
+            self.assertGreater(record['ready_to_first_token_ms'], 0)
+            self.assertGreaterEqual(record['ready_to_decode_complete_ms'], record['ready_to_first_token_ms'])
 
 
 if __name__ == '__main__':
