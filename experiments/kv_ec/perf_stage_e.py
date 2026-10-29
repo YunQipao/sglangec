@@ -217,12 +217,16 @@ class Host:
 
     def argv(self, module, *args):
         cmd = [self.cfg['python'], '-m', module, *map(str, args)]
+        conda_bin = str(Path(self.cfg['conda_prefix']) / 'bin')
         if self.cfg.get('ssh'):
-            shell = 'cd ' + shlex.quote(self.cfg['repo']) + ' && exec env ' + shlex.join(
+            # Expand PATH on the remote host, never inherit node0's Conda PATH.
+            # env also passes it to supervisors, launchers and JIT subprocesses.
+            shell = 'cd ' + shlex.quote(self.cfg['repo']) + ' && exec env PATH=' + shlex.quote(conda_bin) + ':"$PATH" ' + shlex.join(
                 [f'{k}={v}' for k, v in self.env.items()] + cmd)
             return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
                     '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', self.cfg['ssh'], shell]
-        return ['env', *[f'{k}={v}' for k, v in self.env.items()], *cmd]
+        return ['env', 'PATH=' + conda_bin + os.pathsep + os.environ.get('PATH', os.defpath),
+                *[f'{k}={v}' for k, v in self.env.items()], *cmd]
 
     def run(self, module, *args, log=None, timeout=1200):
         cmd = self.argv(module, *args)

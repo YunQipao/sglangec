@@ -24,6 +24,86 @@ from . import perf_stage_e as stage
 EXAMPLE = Path(__file__).with_name('perf_stage_e_232.example.json')
 
 
+class HostEnvironmentTests(unittest.TestCase):
+    def test_local_and_remote_shell_inherit_node_PATH_in_children(self):
+        # Execute the exact remote shell payload with a default-only PATH;
+        # SSH transport is mocked by a local /bin/sh, with no real SSH/GPU work.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / 'repo'
+            repo.mkdir()
+            (repo / 'env_probe.py').write_text(
+                'import json, os, subprocess, sys\n'
+                'keys = ["PATH", "PYTHONPATH", "KV_EC_PERF_DIR", "KV_EC_PERF_RUN_ID", "KV_EC_PERF_ROLE"]\n'
+                'env = {k: os.environ[k] for k in keys}\n'
+                'child = json.loads(subprocess.check_output([sys.executable, "-c", '
+                '"import json,os; print(json.dumps(dict(os.environ)))"], text=True))\n'
+                'print(json.dumps(dict(env=env, child=child, ninja=subprocess.check_output('
+                '["ninja", "--version"], text=True).strip())))\n')
+            for node in (0, 1):
+                with self.subTest(node=node):
+                    # Also exercise shell quoting of a prefix containing spaces/$.
+                    prefix = Path(tmp) / f'conda node{node} $literal'
+                    bin_dir = prefix / 'bin'
+                    bin_dir.mkdir(parents=True)
+                    ninja = bin_dir / 'ninja'
+                    ninja.write_text('#!/bin/sh\nprintf "1.13.2\\n"\n')
+                    ninja.chmod(0o755)
+                    cfg = dict(repo=str(repo), python=sys.executable, conda_prefix=str(prefix))
+                    if node:
+                        cfg['ssh'] = 'test@233'
+                    host = stage.Host(cfg, Path(tmp) / 'trial', 'env-cpu-trial', node)
+                    with patch.dict(os.environ, PATH='/usr/bin:/bin'):
+                        argv = host.argv('env_probe')
+                    if node:
+                        self.assertEqual(argv[0], 'ssh')
+                        cmd = ['/bin/sh', '-c', argv[-1]]
+                        inherited_path = '/bin:/usr/bin'  # remote PATH differs from node0
+                    else:
+                        cmd = argv
+                        inherited_path = '/usr/bin:/bin'
+                    process_env = dict(os.environ, PATH=inherited_path)
+                    result = subprocess.run(cmd, cwd=repo, env=process_env,
+                                            capture_output=True, text=True, check=True, timeout=10)
+                    result = json.loads(result.stdout)
+                    expected = dict(host.env, PATH=str(bin_dir) + ':' + inherited_path)
+                    self.assertEqual(result['env'], expected)
+                    self.assertEqual({k: result['child'][k] for k in expected}, expected)
+                    self.assertEqual(result['ninja'], '1.13.2')
+                    with patch.dict(os.environ, result['env']):
+                        report = pf.check_ninja(cfg)
+                    self.assertEqual(report, dict(path=expected['PATH'], executable=str(ninja), version='1.13.2'))
+
+    def test_preflight_rejects_missing_ninja_before_resource_checks(self):
+        cfg = bench.read(EXAMPLE)
+        node = cfg['nodes'][1]
+        with patch.dict(os.environ, PATH=node['conda_prefix'] + '/bin:/usr/bin:/bin'), \
+                patch.object(pf.sys, 'prefix', node['conda_prefix']), \
+                patch.object(pf, 'identity', return_value={}), \
+                patch.object(pf.shutil, 'which', return_value=None), \
+                patch.object(pf, 'free_ports') as resource_check:
+            report = pf.probe(cfg, 1, '/tmp/not-created')
+        self.assertEqual(report['status'], 'FAIL')
+        self.assertIn('NINJA_NOT_FOUND', report['error'])
+        resource_check.assert_not_called()
+
+    def test_preflight_rejects_wrong_PATH(self):
+        with patch.dict(os.environ, PATH='/usr/bin:/bin'), \
+                self.assertRaisesRegex(ValueError, 'CONDA_PATH_MISMATCH'):
+            pf.check_ninja(dict(conda_prefix='/configured/conda'))
+
+    def test_preflight_rejects_broken_or_hanging_ninja(self):
+        for outcome in (NS(returncode=1, stdout='', stderr='broken'),
+                        NS(returncode=0, stdout='', stderr=''),
+                        FileNotFoundError('gone'), subprocess.TimeoutExpired('ninja', 10)):
+            with self.subTest(outcome=outcome), \
+                    patch.dict(os.environ, PATH='/configured/conda/bin:/usr/bin'), \
+                    patch.object(pf.shutil, 'which', return_value='/configured/conda/bin/ninja'), \
+                    patch.object(pf.subprocess, 'run', **({'side_effect': outcome} if isinstance(outcome, Exception)
+                                                      else {'return_value': outcome})), \
+                    self.assertRaisesRegex(ValueError, 'NINJA_(UNAVAILABLE|VERSION_FAILED)'):
+                pf.check_ninja(dict(conda_prefix='/configured/conda'))
+
+
 class WaitHealthTests(unittest.TestCase):
     """No HTTP listener, GPU or Scheduler is launched by these tests."""
 

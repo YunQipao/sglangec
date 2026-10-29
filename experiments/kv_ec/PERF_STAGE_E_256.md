@@ -60,6 +60,10 @@ Node Block 故障入口；若没有真实 Stage C PASS，结果必须保持 NOT 
 修改（包括新增 Python 文件），保持相同 tracked diff 和 `perf_*.py` 文件哈希。
 这里不提供自动 checkout、commit、push 或覆盖远端仓库的操作。
 两台机器需要可用的 `sglang-ec` Conda 环境、`cc`、libibverbs 与 verbs.h。
+协调器对每个节点均将该节点配置的 `conda_prefix/bin` 放在 PATH 最前面；
+SSH 保留远端原有 PATH 后缀，不带入 232 的 PATH。preflight 使用与 Trial 相同的
+`Host.argv` 环境检查 Ninja 路径及 `ninja --version`，报告写入 `checks.ninja`。
+缺失、无法执行或超时会拒绝启动；不修改系统配置或 Conda 环境。
 232 的 SSH agent/公钥须能通过 `ssh -o BatchMode=yes iic@10.102.0.233 true`。
 管理网络用于 SSH/SCP；192.168.2.243/245 是历史 RDMA 网地址，须按现场确认。
 

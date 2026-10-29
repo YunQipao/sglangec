@@ -138,6 +138,25 @@ def nearest_existing(path):
     return path
 
 
+def check_ninja(node):
+    """Inspect the actual Host.argv environment without building any kernels."""
+    path = os.environ.get('PATH', '')
+    conda_bin = str(Path(node['conda_prefix']) / 'bin')
+    if path.split(os.pathsep)[0] != conda_bin:
+        raise ValueError('CONDA_PATH_MISMATCH: expected PATH prefix ' + conda_bin)
+    ninja = shutil.which('ninja')
+    if ninja is None:
+        raise ValueError('NINJA_NOT_FOUND: PATH=' + path)
+    try:
+        result = subprocess.run([ninja, '--version'], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f'NINJA_UNAVAILABLE: {ninja}: {exc}') from exc
+    version = result.stdout.strip()
+    if result.returncode or not version:
+        raise ValueError(f'NINJA_VERSION_FAILED: {ninja}: exit={result.returncode}; {result.stderr.strip()}')
+    return dict(path=path, executable=ninja, version=version)
+
+
 def probe(cfg, node_index, output_root):
     """Executed with configured Conda Python on each host; returns only JSON."""
     from .debug_capture import source_identity
@@ -153,6 +172,7 @@ def probe(cfg, node_index, output_root):
         if Path(sys.prefix).resolve() != Path(node['conda_prefix']).resolve():
             raise ValueError('CONDA_PREFIX_MISMATCH: ' + sys.prefix)
         checks['conda_prefix'] = sys.prefix
+        checks['ninja'] = check_ninja(node)
         addresses = command(['ip', '-j', '-4', 'addr', 'show'])
         if addresses.get('returncode') != 0:
             raise ValueError('LOCAL_IPV4_INSPECTION_FAILED: require iproute2')
