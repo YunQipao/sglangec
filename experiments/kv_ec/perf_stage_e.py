@@ -18,6 +18,8 @@ import zipfile
 import threading
 import traceback
 import re
+import math
+import urllib.request
 
 from .perf_benchmark import Sampler, digest, read, save
 
@@ -96,6 +98,70 @@ def require_trial(root):
     if marker['run_id'] != os.environ['KV_EC_PERF_RUN_ID']:
         raise ValueError('trial_ownership_mismatch')
     return marker
+
+
+def require_service_alive(root):
+    """Read-only ownership/liveness check; a foreign HTTP listener is not READY."""
+    marker = require_trial(root.parent)
+    if (root / 'exit.json').exists():
+        raise RuntimeError(f'owned server exited before ready: {read(root / "exit.json")}; '
+                           f'see {root / "server.log"}')
+    if not (root / 'owned-process.json').exists():
+        return False  # supervisor has not published the child identity yet
+    owned = read(root / 'owned-process.json')
+    if owned.get('run_id') != marker['run_id']:
+        raise RuntimeError('owned service trial identity mismatch: ' + str(root))
+    try:
+        current = process_identity(owned['pid'])
+    except OSError as exc:
+        raise RuntimeError('owned server exited or identity unavailable before ready: ' + str(root)) from exc
+    if any(current[k] != owned[k] for k in ('pid', 'start_ticks', 'pgid', 'session', 'uid', 'boot_id')):
+        raise RuntimeError('owned service process identity mismatch before ready: ' + str(root))
+    if current['state'] in ('Z', 'X'):
+        raise RuntimeError('owned server exited before ready: ' + str(root))
+    return True
+
+
+class _NoHealthRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never follow a redirect into /server_info or another control API.
+        return None
+
+
+def health_status(url, timeout):
+    # /health returns an empty Response, not JSON. Existing Stage A launcher
+    # sets SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=0 for both E launch modes.
+    opener = urllib.request.build_opener(_NoHealthRedirect())
+    with opener.open(url, timeout=timeout) as response:
+        return response.status
+
+
+def wait_health(url, service_root, timeout=900):
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError('positive finite health timeout required')
+    root = Path(service_root)
+    endpoint = url.rstrip('/') + '/health'
+    end = time.monotonic() + timeout
+    last_error = 'owned process identity not yet published'
+    while True:
+        alive = require_service_alive(root)
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f'server not ready: {endpoint}; {last_error}; see {root / "server.log"}')
+        if alive:
+            status = None
+            try:
+                status = health_status(endpoint, timeout=min(5., remaining))
+                last_error = f'HTTP {status}, expected 200'
+            except (OSError, ValueError) as exc:
+                last_error = f'{type(exc).__name__}: {exc}'
+            # A service can die or its PID can change while HTTP is in flight.
+            if require_service_alive(root) and status == 200 and time.monotonic() < end:
+                return
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f'server not ready: {endpoint}; {last_error}; see {root / "server.log"}')
+        time.sleep(min(.5, remaining))
 
 
 def service(root, argv, interval):
@@ -452,6 +518,7 @@ def main():
     q = sub.add_parser('wait-health')
     q.add_argument('--url', required=True)
     q.add_argument('--service-root', type=Path, required=True)
+    q.add_argument('--timeout', type=float, default=900)
     a = p.parse_args()
     if a.command == 'trial':
         trial()
@@ -492,18 +559,7 @@ def main():
                 raise TimeoutError('launcher did not publish ' + str(a.path))
             time.sleep(.5)
     else:
-        from .perf_benchmark import http
-        end = time.monotonic() + 900
-        while True:
-            if (a.service_root / 'exit.json').exists():
-                raise RuntimeError('owned server exited before ready')
-            try:
-                http(a.url.rstrip('/') + '/server_info', timeout=5)
-                break
-            except (OSError, ValueError):
-                if time.monotonic() > end:
-                    raise TimeoutError('server not ready')
-                time.sleep(.5)
+        wait_health(a.url, a.service_root, timeout=a.timeout)
 
 
 if __name__ == '__main__':

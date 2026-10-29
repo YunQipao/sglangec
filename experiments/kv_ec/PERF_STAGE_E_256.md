@@ -31,10 +31,18 @@ Scheduler、GPU KV 写回、RS 或 RDMA 数据通路。每个进程使用自己�
 
 ## 对照组
 
+Stage E `repeat/trial` 的服务就绪探针仅访问 `/health`，要求 HTTP 200，
+不解析响应体、不跟随重定向，并在请求前后核验本轮进程身份与退出收据。
+原有 Stage A launcher 已设置 `SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=0`；
+此时 `/health` 在 HTTP 层直接返回，不生成请求，也不调用内部状态 RPC。
+不要使用 `/server_info` 或 `/health_generate` 判断 Restore Hook 服务就绪。
+
 `perf_benchmark inference --scheme no-ec` 使用同一 Qwen3-8B、256 token、TP2、
 采样参数和 17 个输出；服务必须关闭 radix cache、overlap、chunked prefill，
 CUDA graph disabled。`reprefill` 是无 EC 的故障后重新 Prefill 控制，启动另一个
 同配置服务并重复提交同一输入；其 CLI 明确标注不包含故障发现时间。
+该独立 `inference` 命令仍使用 `/server_info` 严格核对配置，只能指向单独的
+普通推理服务，不能指向实验 Restore Hook 服务；`repeat/trial` 不调用它。
 
 `xor-only` 接受真实 GPU Capture，测量受控单 TP rank 丢失的局部 XOR；它不声称
 GPU/Scheduler 恢复。`rs-only` 应使用现有 Stage C/`physical_two_node_rs.py` 的

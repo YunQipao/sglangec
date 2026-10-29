@@ -1,6 +1,8 @@
 """CPU ONLY: mock coordination/faults and admission; never RDMA/GPU evidence."""
 
 import json
+import ast
+import asyncio
 import os
 from pathlib import Path
 import shutil
@@ -11,7 +13,7 @@ import tempfile
 import time
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 import zipfile
 
 from . import perf_benchmark as bench
@@ -20,6 +22,133 @@ from . import perf_stage_e as stage
 
 
 EXAMPLE = Path(__file__).with_name('perf_stage_e_232.example.json')
+
+
+class WaitHealthTests(unittest.TestCase):
+    """No HTTP listener, GPU or Scheduler is launched by these tests."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / 'origin'
+        self.owned = dict(**stage.process_identity(os.getpid()), run_id='health-cpu-trial')
+        bench.save(self.root.parent / 'trial-owner.json', dict(run_id='health-cpu-trial'))
+        bench.save(self.root / 'owned-process.json', self.owned)
+        env = patch.dict(os.environ, KV_EC_PERF_RUN_ID='health-cpu-trial')
+        env.start()
+        self.addCleanup(env.stop)
+        self.clock = 0.
+
+    def advance(self, seconds):
+        self.clock += seconds
+
+    def wait(self, timeout=1):
+        with patch.object(stage.time, 'monotonic', side_effect=lambda: self.clock), \
+                patch.object(stage.time, 'sleep', side_effect=self.advance):
+            stage.wait_health('http://127.0.0.1:30984/', self.root, timeout=timeout)
+
+    def test_HTTP_200_empty_body_is_ready_and_only_health_is_requested(self):
+        response = MagicMock()
+        response.status = 200
+        response.__enter__.return_value = response
+        with patch.object(stage.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.return_value = response
+            self.wait(timeout=2)
+            opener.return_value.open.assert_called_once_with('http://127.0.0.1:30984/health', timeout=2.)
+        response.read.assert_not_called()  # the endpoint is not a JSON API
+
+    def test_non_200_never_grants_ready(self):
+        for status in (204, 301, 302, 404, 500, 503):
+            with self.subTest(status=status), patch.object(stage, 'health_status', return_value=status):
+                self.clock = 0.
+                with self.assertRaisesRegex(TimeoutError, f'HTTP {status}, expected 200'):
+                    self.wait()
+
+    def test_starting_503_retries_until_200(self):
+        with patch.object(stage, 'health_status', side_effect=[503, 200]) as probe:
+            self.wait(timeout=2)
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(self.clock, .5)
+
+    def test_service_exit_receipt_fails_before_HTTP(self):
+        bench.save(self.root / 'exit.json', dict(returncode=1, reason='mock_startup_failure'))
+        with patch.object(stage, 'health_status') as probe, self.assertRaisesRegex(RuntimeError, 'exited before ready'):
+            self.wait()
+        probe.assert_not_called()
+
+    def test_dead_process_fails_without_exit_receipt(self):
+        with patch.object(stage, 'process_identity', side_effect=ProcessLookupError('gone')), \
+                patch.object(stage, 'health_status') as probe, self.assertRaisesRegex(RuntimeError, 'exited or identity unavailable'):
+            self.wait()
+        probe.assert_not_called()
+
+    def test_recycled_PID_and_foreign_trial_cannot_be_ready(self):
+        changed = dict(self.owned, start_ticks=self.owned['start_ticks'] + 1)
+        with patch.object(stage, 'process_identity', return_value=changed), \
+                patch.object(stage, 'health_status') as probe, self.assertRaisesRegex(RuntimeError, 'process identity mismatch'):
+            self.wait()
+        probe.assert_not_called()
+        with patch.dict(os.environ, KV_EC_PERF_RUN_ID='foreign-trial'), \
+                self.assertRaisesRegex(ValueError, 'trial_ownership_mismatch'):
+            self.wait()
+
+    def test_service_exit_during_HTTP_200_is_not_ready(self):
+        def response(*args, **kwargs):
+            bench.save(self.root / 'exit.json', dict(returncode=1))
+            return 200
+        with patch.object(stage, 'health_status', side_effect=response), \
+                self.assertRaisesRegex(RuntimeError, 'exited before ready'):
+            self.wait()
+
+    def test_transport_errors_timeout_with_bounded_request_deadline(self):
+        def timeout(url, timeout):
+            self.assertLessEqual(timeout, 1 - self.clock)
+            self.advance(timeout)
+            raise TimeoutError('mock HTTP read timed out')
+        with patch.object(stage, 'health_status', side_effect=timeout) as probe, \
+                self.assertRaisesRegex(TimeoutError, 'mock HTTP read timed out'):
+            self.wait()
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(self.clock, 1.)
+
+    def test_missing_owned_identity_never_uses_HTTP_as_port_only_readiness(self):
+        (self.root / 'owned-process.json').unlink()
+        with patch.object(stage, 'health_status') as probe, self.assertRaisesRegex(TimeoutError, 'identity not yet published'):
+            self.wait()
+        probe.assert_not_called()
+
+    def test_redirect_to_internal_control_API_is_not_followed(self):
+        self.assertIsNone(stage._NoHealthRedirect().redirect_request(
+            None, None, 302, 'Found', {}, 'http://127.0.0.1:30984/server_info'))
+
+    def test_invalid_timeout_rejected(self):
+        for timeout in (0, -1, float('nan'), float('inf')):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                self.wait(timeout)
+
+    def test_actual_health_handler_with_generation_disabled_has_no_internal_RPC(self):
+        # Execute only the repository's actual handler AST with CPU fake state;
+        # avoid importing the full HTTP server or starting any model process.
+        repo = Path(__file__).resolve().parents[2]
+        tree = ast.parse((repo / 'python/sglang/srt/entrypoints/http_server.py').read_text())
+        handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == 'health_generate')
+        handler.decorator_list = []
+        tokenizer = NS(gracefully_exit=False, server_status='Up',
+                       get_internal_state=Mock(side_effect=AssertionError('internal state RPC forbidden')),
+                       generate_request=Mock(side_effect=AssertionError('generation forbidden')))
+        namespace = dict(Request=object, Response=lambda **kw: NS(**kw),
+                         ServerStatus=NS(Starting='Starting'), _global_state=NS(tokenizer_manager=tokenizer),
+                         envs=NS(SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=NS(get=lambda: False)))
+        exec(compile(ast.Module(body=[handler], type_ignores=[]), '<actual-health-handler>', 'exec'), namespace)
+        result = asyncio.run(namespace['health_generate'](NS(url=NS(path='/health'))))
+        self.assertEqual(result.status_code, 200)
+        tokenizer.get_internal_state.assert_not_called()
+        tokenizer.generate_request.assert_not_called()
+        # Both E capture and target launch reuse this unchanged Stage A launcher.
+        launcher = ast.parse((repo / 'experiments/kv_ec/verify_gpu_restore.py').read_text())
+        self.assertTrue(any(isinstance(node, ast.keyword) and node.arg == 'SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION'
+                            and isinstance(node.value, ast.Constant) and node.value.value == '0'
+                            for node in ast.walk(launcher)))
 
 
 class AdmissionTests(unittest.TestCase):
