@@ -44,11 +44,35 @@ def cuda_environment(node):
     if any('stubs' in Path(p).parts for p in libraries):
         raise ValueError('CUDA_CONFIG_INVALID: runtime library directories must not contain stubs')
     fixed = dict(CUDA_HOME=home, CUDA_PATH=home, CUDACXX=home + '/bin/nvcc', NVCC=home + '/bin/nvcc')
+    tmpdir = node.get('tmpdir', '/tmp')
+    if (not isinstance(tmpdir, str) or not tmpdir or ':' in tmpdir or
+            any(c in tmpdir for c in ('\n', '\r', '\0')) or
+            not Path(tmpdir).is_absolute() or '..' in Path(tmpdir).parts or tmpdir == '/'):
+        raise ValueError('TMPDIR_INVALID: expected one absolute path')
+    fixed.update(TMPDIR=tmpdir, TMP=tmpdir, TEMP=tmpdir)
     # An installed Conda nvcc must not shadow a separately selected Toolkit.
     prefixes = dict(PATH=':'.join(dict.fromkeys([home + '/bin', str(Path(node['conda_prefix']) / 'bin')])),
                     LIBRARY_PATH=':'.join(libraries), LD_LIBRARY_PATH=':'.join(libraries),
                     CPATH=':'.join(includes), CPLUS_INCLUDE_PATH=':'.join(includes))
     return fixed, prefixes
+
+
+def check_tmpdir(node, minimum_bytes=1):
+    """Verify the configured per-host temporary directory without deleting user data."""
+    tmpdir = Path(node.get('tmpdir', '/tmp'))
+    if not tmpdir.is_dir() or not os.access(tmpdir, os.W_OK | os.X_OK):
+        raise ValueError('TMPDIR_NOT_WRITABLE: ' + str(tmpdir))
+    usage = shutil.disk_usage(tmpdir)
+    if usage.free < minimum_bytes:
+        raise ValueError(f'TMPDIR_INSUFFICIENT_SPACE: {tmpdir} free={usage.free} required={minimum_bytes}')
+    try:
+        fd, path = tempfile.mkstemp(prefix='kv-ec-preflight-', dir=tmpdir)
+        os.close(fd)
+        Path(path).unlink()
+    except OSError as exc:
+        raise ValueError(f'TMPDIR_TEMPFILE_FAILED: {tmpdir}: {exc}') from exc
+    return dict(path=str(tmpdir), free_bytes=usage.free, required_bytes=minimum_bytes,
+                writable=True, tempfile_probe=True)
 
 
 def validate_config(cfg):
@@ -259,7 +283,11 @@ lib.stage_e_header_version.restype = ctypes.c_int
 paths = sorted({line.split(maxsplit=5)[-1].strip() for line in open('/proc/self/maps') if 'libcudart.so' in line})
 print(json.dumps(dict(header_version=lib.stage_e_header_version(), runtime_paths=paths)))
 '''
-    with tempfile.TemporaryDirectory(prefix='kv-ec-cuda-probe-', dir=nearest_existing(output_root)) as tmp:
+    # Use the node-local configured temporary filesystem.  The output root may
+    # still be on /tmp (or a remote experiment volume), which is not suitable
+    # when that filesystem is full.
+    tmp_base = Path(node.get('tmpdir', '/tmp'))
+    with tempfile.TemporaryDirectory(prefix='kv-ec-cuda-probe-', dir=tmp_base) as tmp:
         tmp = Path(tmp)
         src, obj, shared = tmp / 'probe.cu', tmp / 'probe.o', tmp / 'probe.so'
         src.write_text(source)
@@ -301,6 +329,7 @@ def probe(cfg, node_index, output_root):
         if Path(sys.prefix).resolve() != Path(node['conda_prefix']).resolve():
             raise ValueError('CONDA_PREFIX_MISMATCH: ' + sys.prefix)
         checks['conda_prefix'] = sys.prefix
+        checks['tmpdir'] = check_tmpdir(node, cfg['min_disk_bytes'])
         checks['ninja'] = check_ninja(node)
         checks['cuda_toolchain'] = check_cuda_toolchain(node, output_root)
         addresses = command(['ip', '-j', '-4', 'addr', 'show'])

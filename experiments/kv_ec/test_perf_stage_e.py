@@ -35,6 +35,7 @@ class HostEnvironmentTests(unittest.TestCase):
             (repo / 'env_probe.py').write_text(
                 'import json, os, subprocess, sys\n'
                 'keys = ["PATH", "PYTHONPATH", "KV_EC_PERF_DIR", "KV_EC_PERF_RUN_ID", "KV_EC_PERF_ROLE", '
+                '"TMPDIR", "TMP", "TEMP", '
                 '"CUDA_HOME", "CUDA_PATH", "CUDACXX", "NVCC", "LIBRARY_PATH", "LD_LIBRARY_PATH", "CPATH", "CPLUS_INCLUDE_PATH"]\n'
                 'env = {k: os.environ[k] for k in keys}\n'
                 'child = json.loads(subprocess.check_output([sys.executable, "-c", '
@@ -52,9 +53,11 @@ class HostEnvironmentTests(unittest.TestCase):
                     ninja.write_text('#!/bin/sh\nprintf "1.13.2\\n"\n')
                     ninja.chmod(0o755)
                     cfg = dict(repo=str(repo), python=sys.executable, conda_prefix=str(prefix),
-                               cuda_home=str(Path(tmp) / f'cuda node{node} $literal'))
+                               cuda_home=str(Path(tmp) / f'cuda node{node} $literal'),
+                               tmpdir=str(Path(tmp) / f'tmp node{node} $literal'))
                     cuda_bin = Path(cfg['cuda_home']) / 'bin'
                     cuda_bin.mkdir(parents=True)
+                    Path(cfg['tmpdir']).mkdir(parents=True)
                     for binary, version in ((cuda_bin / 'nvcc', f'toolkit-node{node}'),
                                              (bin_dir / 'nvcc', 'WRONG_CONDA_NVCC')):
                         binary.write_text(f'#!/bin/sh\nprintf "{version}\\n"\n')
@@ -155,7 +158,9 @@ class CudaToolchainTests(unittest.TestCase):
         (home / 'bin/nvcc').chmod(0o755)
         self.runtime = home / 'lib64/libcudart.so'
         self.runtime.touch()
-        self.node = dict(cuda_home=str(home), conda_prefix='/configured/conda')
+        tmpdir = self.root / 'tmpdir'
+        tmpdir.mkdir()
+        self.node = dict(cuda_home=str(home), conda_prefix='/configured/conda', tmpdir=str(tmpdir))
         fixed, prefixes = pf.cuda_environment(self.node)
         env = patch.dict(os.environ, dict(fixed, **prefixes))
         env.start()
@@ -167,6 +172,9 @@ class CudaToolchainTests(unittest.TestCase):
 
     def mock_command(self, argv, **kwargs):
         self.assertEqual(kwargs['env']['CUDA_VISIBLE_DEVICES'], '')
+        self.assertEqual(kwargs['env']['TMPDIR'], self.node['tmpdir'])
+        self.assertEqual(kwargs['env']['TMP'], self.node['tmpdir'])
+        self.assertEqual(kwargs['env']['TEMP'], self.node['tmpdir'])
         if argv[-1] == '--version':
             return NS(returncode=0, stdout='Cuda compilation tools, release 13.0, V13.0.88', stderr='')
         if '-c' in argv and argv[0].endswith('/nvcc'):
@@ -190,6 +198,13 @@ class CudaToolchainTests(unittest.TestCase):
         self.assertFalse(result['gpu_context_created'] or result['cuda_api_called'])
         self.assertIsNone(result['compatibility_warning'])
         self.assertEqual(list(self.root.glob('kv-ec-cuda-probe-*')), [])
+
+    def test_tmpdir_probe_requires_writable_space_and_creates_no_residue(self):
+        result = pf.check_tmpdir(self.node, minimum_bytes=1)
+        self.assertEqual(result['path'], self.node['tmpdir'])
+        self.assertTrue(result['tempfile_probe'])
+        with self.assertRaisesRegex(ValueError, 'TMPDIR_NOT_WRITABLE'):
+            pf.check_tmpdir(dict(self.node, tmpdir=str(self.root / 'missing')))
 
     def test_invalid_CUDA_HOME_and_directory_config_rejected_before_launch(self):
         for value in (None, '', '/cuda:/other', ':/usr/local/cuda', '/cuda:', 'relative', '/', '/cuda/../other'):
