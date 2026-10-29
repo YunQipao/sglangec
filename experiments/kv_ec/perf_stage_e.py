@@ -210,23 +210,27 @@ def service(root, argv, interval):
 
 class Host:
     def __init__(self, cfg, root, run_id, node):
+        from .perf_preflight import cuda_environment
         self.cfg, self.root, self.run_id, self.node = cfg, Path(root), run_id, node
+        cuda, self.path_prefixes = cuda_environment(cfg)
         self.env = dict(PYTHONPATH=cfg['repo'] + '/python:' + cfg['repo'],
             KV_EC_PERF_DIR=str(self.root / 'perf'), KV_EC_PERF_RUN_ID=run_id,
-            KV_EC_PERF_ROLE=f'node{node}-{232+node}')
+            KV_EC_PERF_ROLE=f'node{node}-{232+node}', **cuda)
 
     def argv(self, module, *args):
         cmd = [self.cfg['python'], '-m', module, *map(str, args)]
-        conda_bin = str(Path(self.cfg['conda_prefix']) / 'bin')
         if self.cfg.get('ssh'):
-            # Expand PATH on the remote host, never inherit node0's Conda PATH.
-            # env also passes it to supervisors, launchers and JIT subprocesses.
-            shell = 'cd ' + shlex.quote(self.cfg['repo']) + ' && exec env PATH=' + shlex.quote(conda_bin) + ':"$PATH" ' + shlex.join(
+            # Expand each suffix on its own host; never copy node0's paths to
+            # node1. Empty suffixes must not add the current directory to PATH.
+            paths = [key + '=' + shlex.quote(value) + '"${' + key + ':+:$' + key + '}"'
+                     for key, value in self.path_prefixes.items()]
+            shell = 'cd ' + shlex.quote(self.cfg['repo']) + ' && exec env ' + ' '.join(paths) + ' ' + shlex.join(
                 [f'{k}={v}' for k, v in self.env.items()] + cmd)
             return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
                     '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', self.cfg['ssh'], shell]
-        return ['env', 'PATH=' + conda_bin + os.pathsep + os.environ.get('PATH', os.defpath),
-                *[f'{k}={v}' for k, v in self.env.items()], *cmd]
+        paths = [f'{key}={value}' + (os.pathsep + os.environ[key] if os.environ.get(key) else '')
+                 for key, value in self.path_prefixes.items()]
+        return ['env', *paths, *[f'{k}={v}' for k, v in self.env.items()], *cmd]
 
     def run(self, module, *args, log=None, timeout=1200):
         cmd = self.argv(module, *args)

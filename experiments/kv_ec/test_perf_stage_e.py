@@ -33,12 +33,14 @@ class HostEnvironmentTests(unittest.TestCase):
             repo.mkdir()
             (repo / 'env_probe.py').write_text(
                 'import json, os, subprocess, sys\n'
-                'keys = ["PATH", "PYTHONPATH", "KV_EC_PERF_DIR", "KV_EC_PERF_RUN_ID", "KV_EC_PERF_ROLE"]\n'
+                'keys = ["PATH", "PYTHONPATH", "KV_EC_PERF_DIR", "KV_EC_PERF_RUN_ID", "KV_EC_PERF_ROLE", '
+                '"CUDA_HOME", "CUDA_PATH", "CUDACXX", "NVCC", "LIBRARY_PATH", "LD_LIBRARY_PATH", "CPATH", "CPLUS_INCLUDE_PATH"]\n'
                 'env = {k: os.environ[k] for k in keys}\n'
                 'child = json.loads(subprocess.check_output([sys.executable, "-c", '
                 '"import json,os; print(json.dumps(dict(os.environ)))"], text=True))\n'
                 'print(json.dumps(dict(env=env, child=child, ninja=subprocess.check_output('
-                '["ninja", "--version"], text=True).strip())))\n')
+                '["ninja", "--version"], text=True).strip(), nvcc=subprocess.check_output('
+                '["nvcc", "--version"], text=True).strip())))\n')
             for node in (0, 1):
                 with self.subTest(node=node):
                     # Also exercise shell quoting of a prefix containing spaces/$.
@@ -48,7 +50,14 @@ class HostEnvironmentTests(unittest.TestCase):
                     ninja = bin_dir / 'ninja'
                     ninja.write_text('#!/bin/sh\nprintf "1.13.2\\n"\n')
                     ninja.chmod(0o755)
-                    cfg = dict(repo=str(repo), python=sys.executable, conda_prefix=str(prefix))
+                    cfg = dict(repo=str(repo), python=sys.executable, conda_prefix=str(prefix),
+                               cuda_home=str(Path(tmp) / f'cuda node{node} $literal'))
+                    cuda_bin = Path(cfg['cuda_home']) / 'bin'
+                    cuda_bin.mkdir(parents=True)
+                    for binary, version in ((cuda_bin / 'nvcc', f'toolkit-node{node}'),
+                                             (bin_dir / 'nvcc', 'WRONG_CONDA_NVCC')):
+                        binary.write_text(f'#!/bin/sh\nprintf "{version}\\n"\n')
+                        binary.chmod(0o755)
                     if node:
                         cfg['ssh'] = 'test@233'
                     host = stage.Host(cfg, Path(tmp) / 'trial', 'env-cpu-trial', node)
@@ -61,17 +70,42 @@ class HostEnvironmentTests(unittest.TestCase):
                     else:
                         cmd = argv
                         inherited_path = '/usr/bin:/bin'
-                    process_env = dict(os.environ, PATH=inherited_path)
+                    suffix = f'/node{node}/inherited'
+                    process_env = dict(os.environ, PATH=inherited_path,
+                                       CUDA_HOME=':/bad/cuda', CUDA_PATH=':/bad/cuda', CUDACXX='bad', NVCC='bad')
+                    for key in ('LIBRARY_PATH', 'LD_LIBRARY_PATH', 'CPATH', 'CPLUS_INCLUDE_PATH'):
+                        process_env[key] = suffix
+                    # Local env assignments expand when argv is constructed;
+                    # remote assignments expand in the receiving shell.
+                    if not node:
+                        with patch.dict(os.environ, process_env, clear=True):
+                            cmd = host.argv('env_probe')
                     result = subprocess.run(cmd, cwd=repo, env=process_env,
                                             capture_output=True, text=True, check=True, timeout=10)
                     result = json.loads(result.stdout)
-                    expected = dict(host.env, PATH=str(bin_dir) + ':' + inherited_path)
+                    expected = dict(host.env, **{key: value + ':' + (inherited_path if key == 'PATH' else suffix)
+                                                for key, value in host.path_prefixes.items()})
                     self.assertEqual(result['env'], expected)
                     self.assertEqual({k: result['child'][k] for k in expected}, expected)
                     self.assertEqual(result['ninja'], '1.13.2')
+                    self.assertEqual(result['nvcc'], f'toolkit-node{node}')
                     with patch.dict(os.environ, result['env']):
                         report = pf.check_ninja(cfg)
                     self.assertEqual(report, dict(path=expected['PATH'], executable=str(ninja), version='1.13.2'))
+
+    def test_remote_unset_search_paths_have_no_empty_current_directory_entry(self):
+        cfg = bench.read(EXAMPLE)['nodes'][1]
+        host = stage.Host(cfg, '/tmp/cpu-only', 'env-cpu-trial', 1)
+        # Inspect the actual shell assignment parsing without starting SSH.
+        shell = host.argv('ignored')[-1].split(' && exec env ', 1)[1]
+        assignments = shell.rsplit(' ' + cfg['python'], 1)[0]
+        command = 'exec env ' + assignments + ' /usr/bin/env'
+        result = subprocess.run(['/bin/sh', '-c', command], env={'PATH': '/usr/bin:/bin'},
+                                capture_output=True, text=True, check=True, timeout=10)
+        env = dict(line.split('=', 1) for line in result.stdout.splitlines())
+        for key in ('LIBRARY_PATH', 'LD_LIBRARY_PATH', 'CPATH', 'CPLUS_INCLUDE_PATH'):
+            self.assertEqual(env[key], host.path_prefixes[key])
+            self.assertNotIn('', env[key].split(':'))
 
     def test_preflight_rejects_missing_ninja_before_resource_checks(self):
         cfg = bench.read(EXAMPLE)
@@ -102,6 +136,151 @@ class HostEnvironmentTests(unittest.TestCase):
                                                       else {'return_value': outcome})), \
                     self.assertRaisesRegex(ValueError, 'NINJA_(UNAVAILABLE|VERSION_FAILED)'):
                 pf.check_ninja(dict(conda_prefix='/configured/conda'))
+
+
+class CudaToolchainTests(unittest.TestCase):
+    """Mock toolchain faults are CPU tests, not real CUDA/RDMA evidence."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        home = self.root / 'cuda'
+        for name in ('bin', 'include', 'lib64'):
+            (home / name).mkdir(parents=True)
+        for name in ('cuda.h', 'cuda_runtime.h', 'cuda_runtime_api.h'):
+            (home / 'include' / name).touch()
+        (home / 'bin/nvcc').write_text('#!/bin/sh\nexit 0\n')
+        (home / 'bin/nvcc').chmod(0o755)
+        self.runtime = home / 'lib64/libcudart.so'
+        self.runtime.touch()
+        self.node = dict(cuda_home=str(home), conda_prefix='/configured/conda')
+        fixed, prefixes = pf.cuda_environment(self.node)
+        env = patch.dict(os.environ, dict(fixed, **prefixes))
+        env.start()
+        self.addCleanup(env.stop)
+        import torch
+        torch_cuda = patch.object(torch.version, 'cuda', '13.0')
+        torch_cuda.start()
+        self.addCleanup(torch_cuda.stop)
+
+    def mock_command(self, argv, **kwargs):
+        self.assertEqual(kwargs['env']['CUDA_VISIBLE_DEVICES'], '')
+        if argv[-1] == '--version':
+            return NS(returncode=0, stdout='Cuda compilation tools, release 13.0, V13.0.88', stderr='')
+        if '-c' in argv and argv[0].endswith('/nvcc'):
+            source = Path(argv[argv.index('-c') + 2]).read_text()
+            self.assertIn('__global__', source)
+            self.assertNotIn('<<<', source)
+        if argv[0] == 'c++':
+            self.assertIn('-lcudart', argv)
+            self.assertFalse(any(arg.startswith('-L') for arg in argv))
+        data = dict(header_version=13000, runtime_paths=[str(self.runtime)])
+        return NS(returncode=0, stdout=json.dumps(data) if argv[0] == sys.executable else '', stderr='')
+
+    def check(self):
+        return pf.check_cuda_toolchain(self.node, self.root)
+
+    def test_mock_compile_link_and_fresh_dynamic_loader_and_own_temp_cleanup(self):
+        with patch.object(pf.subprocess, 'run', side_effect=self.mock_command) as run:
+            result = self.check()
+        self.assertEqual(run.call_count, 4)
+        self.assertTrue(result['nvcc_compile'] and result['host_link'] and result['dynamic_load'])
+        self.assertFalse(result['gpu_context_created'] or result['cuda_api_called'])
+        self.assertIsNone(result['compatibility_warning'])
+        self.assertEqual(list(self.root.glob('kv-ec-cuda-probe-*')), [])
+
+    def test_invalid_CUDA_HOME_and_directory_config_rejected_before_launch(self):
+        for value in (None, '', '/cuda:/other', ':/usr/local/cuda', '/cuda:', 'relative', '/', '/cuda/../other'):
+            cfg = bench.read(EXAMPLE)
+            cfg['nodes'][0]['cuda_home'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'CUDA_HOME_INVALID'):
+                pf.validate_config(cfg)
+        for key, value in (('cuda_library_dirs', '/cuda/lib64'), ('cuda_include_dirs', []),
+                           ('cuda_library_dirs', ['/cuda/lib64/stubs'])):
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, 'CUDA_CONFIG_INVALID'):
+                pf.cuda_environment(dict(self.node, **{key: value}))
+
+    def test_missing_header_nvcc_and_unversioned_runtime_rejected(self):
+        for target, error in (('include/cuda.h', 'CUDA_HEADER_NOT_FOUND'),
+                              ('bin/nvcc', 'CUDA_NVCC_INVALID'), ('lib64/libcudart.so', 'CUDA_RUNTIME_NOT_FOUND')):
+            p = Path(self.node['cuda_home']) / target
+            original = p.read_bytes()
+            mode = p.stat().st_mode
+            p.unlink()
+            try:
+                with self.subTest(target=target), self.assertRaisesRegex(ValueError, error):
+                    self.check()
+            finally:
+                p.write_bytes(original)
+                p.chmod(mode)
+
+    def test_wrong_process_environment_is_rejected(self):
+        with patch.dict(os.environ, CUDA_HOME=':/usr/local/cuda'), \
+                self.assertRaisesRegex(ValueError, 'CUDA_ENV_MISMATCH'):
+            self.check()
+
+    def test_preflight_toolchain_failure_rejects_before_resource_admission(self):
+        cfg = bench.read(EXAMPLE)
+        node = cfg['nodes'][1]
+        with patch.object(pf.sys, 'prefix', node['conda_prefix']), \
+                patch.object(pf, 'identity', return_value={}), \
+                patch.object(pf, 'check_ninja', return_value={}), \
+                patch.object(pf, 'check_cuda_toolchain', side_effect=ValueError('CUDA_RUNTIME_NOT_FOUND')) as check, \
+                patch.object(pf, 'free_ports') as resource_check:
+            result = pf.probe(cfg, 1, str(self.root))
+        self.assertEqual(result['status'], 'FAIL')
+        self.assertIn('CUDA_RUNTIME_NOT_FOUND', result['error'])
+        check.assert_called_once_with(node, str(self.root))
+        resource_check.assert_not_called()
+
+    def test_only_versioned_runtime_and_wrong_runtime_major_are_rejected(self):
+        versioned = self.runtime.with_name('libcudart.so.12.8.90')
+        self.runtime.rename(versioned)
+        with self.assertRaisesRegex(ValueError, 'CUDA_RUNTIME_NOT_FOUND'):
+            self.check()
+        self.runtime.symlink_to(versioned.name)
+        with patch.object(pf.subprocess, 'run', side_effect=self.mock_command), \
+                self.assertRaisesRegex(ValueError, 'CUDA_RUNTIME_VERSION_MISMATCH'):
+            self.check()
+
+    def test_compile_link_loader_errors_and_timeouts_are_explicit(self):
+        for index, error in ((0, 'CUDA_NVCC_INVALID'), (1, 'CUDA_JIT_COMPILE_FAILED'),
+                             (2, 'CUDA_JIT_LINK_FAILED'), (3, 'CUDA_JIT_LINK_FAILED')):
+            for timeout in (False, True):
+                calls = []
+                def run(argv, **kwargs):
+                    calls.append(argv)
+                    if len(calls) == index + 1:
+                        if timeout:
+                            raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+                        return NS(returncode=1, stdout='', stderr='mock missing compiler/runtime')
+                    return self.mock_command(argv, **kwargs)
+                with self.subTest(index=index, timeout=timeout), patch.object(pf.subprocess, 'run', side_effect=run), \
+                        self.assertRaisesRegex(ValueError, error):
+                    self.check()
+                self.assertEqual(list(self.root.glob('kv-ec-cuda-probe-*')), [])
+
+    def test_torch_major_mismatch_fails_and_minor_mismatch_is_reported(self):
+        import torch
+        with patch.object(pf.subprocess, 'run', side_effect=self.mock_command):
+            with patch.object(torch.version, 'cuda', '12.8'), \
+                    self.assertRaisesRegex(ValueError, 'CUDA_TORCH_VERSION_MISMATCH'):
+                self.check()
+            with patch.object(torch.version, 'cuda', '13.1'):
+                self.assertIn('CUDA_MINOR_VERSION_MISMATCH', self.check()['compatibility_warning'])
+
+    def test_loader_wrong_runtime_or_header_version_rejected(self):
+        for data, error in ((dict(header_version=12080, runtime_paths=[str(self.runtime)]), 'CUDA_HEADER_VERSION_MISMATCH'),
+                            (dict(header_version=13000, runtime_paths=['/other/libcudart.so']), 'CUDA_JIT_LINK_FAILED')):
+            def run(argv, **kwargs):
+                result = self.mock_command(argv, **kwargs)
+                if argv[0] == sys.executable:
+                    result.stdout = json.dumps(data)
+                return result
+            with self.subTest(data=data), patch.object(pf.subprocess, 'run', side_effect=run), \
+                    self.assertRaisesRegex(ValueError, error):
+                self.check()
 
 
 class WaitHealthTests(unittest.TestCase):

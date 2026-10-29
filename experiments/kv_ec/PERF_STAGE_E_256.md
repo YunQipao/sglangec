@@ -60,7 +60,7 @@ Node Block 故障入口；若没有真实 Stage C PASS，结果必须保持 NOT 
 修改（包括新增 Python 文件），保持相同 tracked diff 和 `perf_*.py` 文件哈希。
 这里不提供自动 checkout、commit、push 或覆盖远端仓库的操作。
 两台机器需要可用的 `sglang-ec` Conda 环境、`cc`、libibverbs 与 verbs.h。
-协调器对每个节点均将该节点配置的 `conda_prefix/bin` 放在 PATH 最前面；
+协调器将每个节点配置的 CUDA bin、`conda_prefix/bin` 放在继承 PATH 前面；
 SSH 保留远端原有 PATH 后缀，不带入 232 的 PATH。preflight 使用与 Trial 相同的
 `Host.argv` 环境检查 Ninja 路径及 `ninja --version`，报告写入 `checks.ninja`。
 缺失、无法执行或超时会拒绝启动；不修改系统配置或 Conda 环境。
@@ -117,11 +117,75 @@ python -m experiments.kv_ec.perf_benchmark preflight \
   --config "$RUN/config.json" --output "$RUN/preflight-r5.json" --repeat 5
 ```
 
-`preflight` 仅写指定的本地报告，不创建远端目录、保护、Stripe、恢复 Claim 或
-GPU 服务。验证两端 Commit、diff、脚本、完整模型字节指纹、模板/输入、Conda、
+`preflight` 写指定的本地报告，并在两端创建自建自清理的 CUDA 工具链临时目录；
+不创建远端 Trial 目录、保护、Stripe、恢复 Claim 或 GPU 服务。
+验证两端 Commit、diff、脚本、完整模型字节指纹、模板/输入、Conda、
 两张空闲卡的可用显存与原有预算估计、HCA ACTIVE/GID、HTTP/native监听端口、
 SSH、磁盘与 RS。不会运行 native RDMA 数据传输，故预检 PASS 不代表 RDMA PASS。
 旧 RS 的 read-only 查询会执行其原有 TTL 维护；协调器不主动发出任何状态修改。
+
+### CUDA Toolkit 配置与无 GPU 工具链预检
+
+每个 `nodes[i]` 都必须配置自己的 `cuda_home`，两端可使用不同的 Toolkit。
+它必须是**单个绝对根目录**，不能是 `:/usr/local/cuda`、冒号分隔的路径列表
+或 `nvcc` 文件本身。缺少此配置的旧 JSON 会被拒绝，不读取交互式 Shell 的
+`CUDA_HOME` 作为回退。示例 JSON 使用 Conda Toolkit 的布局：
+
+```json
+{
+  "cuda_home": "/media/sda1/iic_data/anaconda3/envs/sglang-ec",
+  "cuda_include_dirs": ["/media/sda1/iic_data/anaconda3/envs/sglang-ec/targets/x86_64-linux/include"],
+  "cuda_library_dirs": ["/media/sda1/iic_data/anaconda3/envs/sglang-ec/lib", "/media/sda1/iic_data/anaconda3/envs/sglang-ec/targets/x86_64-linux/lib"]
+}
+```
+
+这只是候选配置，两端均须按实际安装验证。标准 Toolkit 可以配置其真实根目录，
+例如 `/usr/local/cuda-13.0`，配套 `include` 与 `lib64`；不支持把 `stubs` 加入
+运行时库目录。省略两个目录列表时会检查根目录的 `include`、`lib64`、`lib` 和
+`targets/x86_64-linux/{include,lib}` 常见布局。
+
+`Host.argv` 同时用于 Preflight、origin、target、submit 和 service supervisor。
+它覆盖 `CUDA_HOME/CUDA_PATH`，令 `CUDACXX/NVCC` 指向该 Toolkit 的 `bin/nvcc`，
+并在本节点已有搜索路径前加入 CUDA bin、Conda bin、CUDA include 和 CUDA library：
+`PATH`、`CPATH`、`CPLUS_INCLUDE_PATH`、`LIBRARY_PATH`、`LD_LIBRARY_PATH`。
+SSH 后缀在远端展开，不传入 232 的路径；不依赖 `.bashrc` 或 `.profile`。
+CUDA bin 优先于 Conda bin，防止 Conda 中另一份 nvcc 遮蔽所选 Toolkit。
+
+完整 Preflight 会增加 `checks.cuda_toolchain`：检查 header、可执行的 nvcc、
+**可供 `-lcudart` 链接的 `libcudart.so`**，只有 `libcudart.so.13` 不足以通过。
+然后用 nvcc 编译包含未启动 kernel 的对象，用 `c++ -shared ... -lcudart` 链接，
+最后由新 Python 进程动态加载并核对 `/proc/self/maps` 中真实加载的 cudart。
+链接不额外传 `-L`，因此实际验证 `LIBRARY_PATH`，加载验证 `LD_LIBRARY_PATH`。
+探针子进程强制 `CUDA_VISIBLE_DEVICES=''`，不调用 CUDA API、不加载模型。
+它只在输出路径最近的已有父目录下创建并移除自己的临时文件，不清除 JIT 缓存。
+因此报告的 `read_only=false` 表示有临时编译写入，`read_only_services=true`
+仍表示不修改 RS 等外部服务。与 PyTorch CUDA 主版本不一致会拒绝，次版本不一致
+按 PyTorch 的检查方式记录警告；工具链 PASS 不等于驱动、RoPE 或 Stage E PASS。
+
+可以先只跑工具链探针，完全跳过模型身份、GPU 资源与 RS 检查。在 232 设置
+`CONFIG` 为更新后的完整 JSON 路径，再执行：
+
+```bash
+python - "$CONFIG" <<'PY'
+import base64, json, subprocess, sys
+from pathlib import Path
+from experiments.kv_ec.perf_stage_e import Host
+cfg = json.load(open(sys.argv[1]))
+encoded = base64.urlsafe_b64encode(json.dumps(cfg).encode()).decode()
+for i, node in enumerate(cfg['nodes']):
+    root = str(Path(sys.argv[1]).resolve().parent) if i == 0 else cfg['remote_root']
+    host = Host(node, root, 'cuda-preflight', i)
+    subprocess.run(host.argv('experiments.kv_ec.perf_preflight', 'cuda-probe',
+        '--config-base64', encoded, '--node', i, '--output-root', root),
+        cwd=node['repo'] if not node.get('ssh') else None, check=True)
+PY
+```
+
+每端输出一行 `KV_EC_PREFLIGHT`，任一错误均返回非零退出码。常见错误为
+`CUDA_HOME_INVALID`、`CUDA_ENV_MISMATCH`、`CUDA_HEADER_NOT_FOUND`、
+`CUDA_NVCC_INVALID`、`CUDA_RUNTIME_NOT_FOUND`、`CUDA_JIT_COMPILE_FAILED`、
+`CUDA_JIT_LINK_FAILED`、`CUDA_TORCH_VERSION_MISMATCH`。修正配置后使用新的
+Smoke OUTPUT，不删除或复用历史 Ledger。
 
 ### 3. 232：单轮自动化试跑
 

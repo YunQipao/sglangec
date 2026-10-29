@@ -1,4 +1,7 @@
-"""Read-only Stage E admission. No CUDA initialization, protection or service launch.
+"""Stage E admission. No CUDA initialization, protection or service launch.
+
+CUDA admission compiles/loads a disposable shared object without launching a
+kernel or calling a CUDA runtime API. Only its own temporary files are removed.
 
 RS budgets come from the *listening process*, not operator assertions. Old
 servers have no budget RPC: fail closed if /proc cannot identify that process.
@@ -15,10 +18,37 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 from .perf_benchmark import command, identity
 
 MODULE = 'experiments.kv_ec.perf_preflight'
+
+
+def cuda_environment(node):
+    """Pure configuration: identical values on the coordinator and SSH node."""
+    def path(value, error):
+        if (not isinstance(value, str) or not value or ':' in value or
+                any(c in value for c in ('\n', '\r', '\0')) or
+                not Path(value).is_absolute() or '..' in Path(value).parts or value == '/'):
+            raise ValueError(error + ': expected one absolute path, not a colon-separated list')
+        return str(Path(value))
+    home = path(node.get('cuda_home'), 'CUDA_HOME_INVALID')
+    def dirs(key, defaults):
+        values = node.get(key, defaults)
+        if not isinstance(values, list) or not values:
+            raise ValueError('CUDA_CONFIG_INVALID: ' + key + ' must be a nonempty list')
+        return list(dict.fromkeys(path(v, 'CUDA_CONFIG_INVALID: ' + key) for v in values))
+    includes = dirs('cuda_include_dirs', [home + '/include', home + '/targets/x86_64-linux/include'])
+    libraries = dirs('cuda_library_dirs', [home + '/lib64', home + '/lib', home + '/targets/x86_64-linux/lib'])
+    if any('stubs' in Path(p).parts for p in libraries):
+        raise ValueError('CUDA_CONFIG_INVALID: runtime library directories must not contain stubs')
+    fixed = dict(CUDA_HOME=home, CUDA_PATH=home, CUDACXX=home + '/bin/nvcc', NVCC=home + '/bin/nvcc')
+    # An installed Conda nvcc must not shadow a separately selected Toolkit.
+    prefixes = dict(PATH=':'.join(dict.fromkeys([home + '/bin', str(Path(node['conda_prefix']) / 'bin')])),
+                    LIBRARY_PATH=':'.join(libraries), LD_LIBRARY_PATH=':'.join(libraries),
+                    CPATH=':'.join(includes), CPLUS_INCLUDE_PATH=':'.join(includes))
+    return fixed, prefixes
 
 
 def validate_config(cfg):
@@ -53,6 +83,7 @@ def validate_config(cfg):
     ipaddress.IPv4Address(cfg['return_host'])
     port(rs['port'])
     for i, node in enumerate(cfg['nodes']):
+        cuda_environment(node)
         for key in ('repo', 'python', 'model', 'template', 'input_ids', 'conda_prefix'):
             value = node.get(key, '')
             if not value or not Path(value).is_absolute() or '..' in Path(value).parts:
@@ -142,8 +173,9 @@ def check_ninja(node):
     """Inspect the actual Host.argv environment without building any kernels."""
     path = os.environ.get('PATH', '')
     conda_bin = str(Path(node['conda_prefix']) / 'bin')
-    if path.split(os.pathsep)[0] != conda_bin:
-        raise ValueError('CONDA_PATH_MISMATCH: expected PATH prefix ' + conda_bin)
+    expected = list(dict.fromkeys([str(Path(node.get('cuda_home', node['conda_prefix'])) / 'bin'), conda_bin]))
+    if path.split(os.pathsep)[:len(expected)] != expected:
+        raise ValueError('CONDA_PATH_MISMATCH: expected CUDA/Conda PATH prefix ' + ':'.join(expected))
     ninja = shutil.which('ninja')
     if ninja is None:
         raise ValueError('NINJA_NOT_FOUND: PATH=' + path)
@@ -155,6 +187,103 @@ def check_ninja(node):
     if result.returncode or not version:
         raise ValueError(f'NINJA_VERSION_FAILED: {ninja}: exit={result.returncode}; {result.stderr.strip()}')
     return dict(path=path, executable=ninja, version=version)
+
+
+def check_cuda_toolchain(node, output_root):
+    """Compile device code and load a linked DSO; never call CUDA or use a GPU."""
+    fixed, prefixes = cuda_environment(node)
+    if not Path(fixed['CUDA_HOME']).is_dir():
+        raise ValueError('CUDA_HOME_INVALID: Toolkit root directory not found: ' + fixed['CUDA_HOME'])
+    for key, value in fixed.items():
+        if os.environ.get(key) != value:
+            raise ValueError(f'CUDA_ENV_MISMATCH: {key}, expected {value}')
+    for key, value in prefixes.items():
+        if os.environ.get(key, '').split(':')[:len(value.split(':'))] != value.split(':'):
+            raise ValueError(f'CUDA_ENV_MISMATCH: {key}, expected prefix {value}')
+    includes = prefixes['CPATH'].split(':')
+    libraries = prefixes['LIBRARY_PATH'].split(':')
+    for header in ('cuda.h', 'cuda_runtime.h', 'cuda_runtime_api.h'):
+        if not any((Path(p) / header).is_file() for p in includes):
+            raise ValueError(f'CUDA_HEADER_NOT_FOUND: {header}; searched {includes}')
+    nvcc = fixed['NVCC']
+    if not Path(nvcc).is_file() or not os.access(nvcc, os.X_OK):
+        raise ValueError('CUDA_NVCC_INVALID: not executable: ' + nvcc)
+    runtime = next((Path(p) / 'libcudart.so' for p in libraries if (Path(p) / 'libcudart.so').is_file()), None)
+    if runtime is None:
+        raise ValueError(f'CUDA_RUNTIME_NOT_FOUND: need linkable libcudart.so, not only a versioned runtime; searched {libraries}')
+
+    def run(argv, error, timeout=120):
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                                    env=dict(os.environ, CUDA_VISIBLE_DEVICES=''))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError(f'{error}: argv={argv!r}: {exc}') from exc
+        if result.returncode:
+            raise ValueError(f'{error}: argv={argv!r}; exit={result.returncode}; '
+                             f'stdout={result.stdout[-4000:]}; stderr={result.stderr[-4000:]}')
+        return result
+
+    version_output = run([nvcc, '--version'], 'CUDA_NVCC_INVALID', timeout=10).stdout
+    match = re.search(r'release (\d+)\.(\d+)', version_output)
+    if not match:
+        raise ValueError('CUDA_NVCC_INVALID: cannot parse version: ' + version_output)
+    toolkit = tuple(map(int, match.groups()))
+    import torch
+    torch_cuda = torch.version.cuda
+    match = re.match(r'^(\d+)\.(\d+)', torch_cuda or '')
+    if not match:
+        raise ValueError('CUDA_TORCH_VERSION_MISMATCH: PyTorch has no CUDA runtime')
+    torch_pair = tuple(map(int, match.groups()))
+    if toolkit[0] != torch_pair[0]:
+        raise ValueError(f'CUDA_TORCH_VERSION_MISMATCH: nvcc={toolkit}, torch.version.cuda={torch_cuda}')
+    runtime_match = re.search(r'\.so\.(\d+)', runtime.resolve().name)
+    runtime_major = int(runtime_match.group(1)) if runtime_match else None
+    if runtime_major is not None and runtime_major != toolkit[0]:
+        raise ValueError(f'CUDA_RUNTIME_VERSION_MISMATCH: nvcc={toolkit}, runtime={runtime.resolve()}')
+    warning = None if toolkit == torch_pair else (
+        f'CUDA_MINOR_VERSION_MISMATCH: nvcc={toolkit}, torch.version.cuda={torch_cuda}; '
+        'PyTorch permits a minor mismatch, but this probe does not certify every model JIT kernel')
+    # No -L on the host link: exercise LIBRARY_PATH just as a JIT -lcudart
+    # invocation does. A fresh Python loader exercises LD_LIBRARY_PATH without
+    # accidentally reusing libcudart already imported by this process's torch.
+    source = '''#include <cuda_runtime.h>
+__global__ void stage_e_compile_only() {}
+extern "C" {
+int stage_e_header_version() { return CUDART_VERSION; }
+cudaError_t (*stage_e_runtime_symbol)(int*) = &cudaRuntimeGetVersion;
+}
+'''
+    loader = '''import ctypes,json,os,sys
+lib = ctypes.CDLL(sys.argv[1], mode=os.RTLD_NOW)
+lib.stage_e_header_version.restype = ctypes.c_int
+paths = sorted({line.split(maxsplit=5)[-1].strip() for line in open('/proc/self/maps') if 'libcudart.so' in line})
+print(json.dumps(dict(header_version=lib.stage_e_header_version(), runtime_paths=paths)))
+'''
+    with tempfile.TemporaryDirectory(prefix='kv-ec-cuda-probe-', dir=nearest_existing(output_root)) as tmp:
+        tmp = Path(tmp)
+        src, obj, shared = tmp / 'probe.cu', tmp / 'probe.o', tmp / 'probe.so'
+        src.write_text(source)
+        compile_result = run([nvcc, '-c', '-Xcompiler=-fPIC', str(src), '-o', str(obj)], 'CUDA_JIT_COMPILE_FAILED')
+        link_result = run(['c++', '-shared', str(obj), '-lcudart', '-o', str(shared)], 'CUDA_JIT_LINK_FAILED')
+        loaded = run([sys.executable, '-c', loader, str(shared)], 'CUDA_JIT_LINK_FAILED', timeout=15)
+        try:
+            loaded = json.loads(loaded.stdout)
+            header_pair = (loaded['header_version'] // 1000, loaded['header_version'] % 1000 // 10)
+            resolved = {str(Path(p).resolve()) for p in loaded['runtime_paths']}
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError('CUDA_JIT_LINK_FAILED: invalid loader result') from exc
+        if header_pair != toolkit:
+            raise ValueError(f'CUDA_HEADER_VERSION_MISMATCH: nvcc={toolkit}, header={header_pair}')
+        if resolved != {str(runtime.resolve())}:
+            raise ValueError(f'CUDA_JIT_LINK_FAILED: runtime resolved to {resolved}, expected {runtime.resolve()}')
+    return dict(status='PASS', environment={key: os.environ[key] for key in [*fixed, *prefixes]},
+                nvcc=nvcc, nvcc_version='.'.join(map(str, toolkit)), nvcc_version_output=version_output.strip(),
+                torch_version=torch.__version__, torch_cuda=torch_cuda, compatibility_warning=warning,
+                libcudart=str(runtime), resolved_libcudart=str(runtime.resolve()),
+                runtime_filename_major=runtime_major, probe_cuda_visible_devices='',
+                header_version=loaded['header_version'], nvcc_compile=True, host_link=True, dynamic_load=True,
+                gpu_context_created=False, cuda_api_called=False, temporary_files_removed=True,
+                compiler_output=compile_result.stderr[-4000:], linker_output=link_result.stderr[-4000:])
 
 
 def probe(cfg, node_index, output_root):
@@ -173,6 +302,7 @@ def probe(cfg, node_index, output_root):
             raise ValueError('CONDA_PREFIX_MISMATCH: ' + sys.prefix)
         checks['conda_prefix'] = sys.prefix
         checks['ninja'] = check_ninja(node)
+        checks['cuda_toolchain'] = check_cuda_toolchain(node, output_root)
         addresses = command(['ip', '-j', '-4', 'addr', 'show'])
         if addresses.get('returncode') != 0:
             raise ValueError('LOCAL_IPV4_INSPECTION_FAILED: require iproute2')
@@ -319,22 +449,32 @@ def preflight(cfg, output_root, repeat, expected_epoch=None):
         if expected_epoch and budget['server_epoch'] != expected_epoch:
             raise ValueError('RS_SERVER_EPOCH_CHANGED_DURING_BATCH')
         return dict(status='PASS', nodes=results, rs=budget, metrics=metrics,
-                    creates_protection=False, read_only=True)
+                    creates_protection=False, read_only=False, read_only_services=True, temporary_cuda_probe=True)
     except Exception as exc:
         return dict(status='FAIL', nodes=results, error=f'{type(exc).__name__}: {exc}',
-                    creates_protection=False, read_only=True)
+                    creates_protection=False, read_only=False, read_only_services=True, temporary_cuda_probe=True)
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('command', choices=['probe'])
+    p.add_argument('command', choices=['probe', 'cuda-probe'])
     p.add_argument('--config-base64', required=True)
     p.add_argument('--node', type=int, choices=[0, 1], required=True)
     p.add_argument('--output-root', required=True)
     args = p.parse_args()
     cfg = validate_config(json.loads(base64.urlsafe_b64decode(args.config_base64)))
-    result = probe(cfg, args.node, args.output_root)
+    if args.command == 'cuda-probe':
+        try:
+            result = dict(status='PASS', node=args.node, checks=dict(
+                ninja=check_ninja(cfg['nodes'][args.node]),
+                cuda_toolchain=check_cuda_toolchain(cfg['nodes'][args.node], args.output_root)))
+        except Exception as exc:
+            result = dict(status='FAIL', node=args.node, error=f'{type(exc).__name__}: {exc}')
+    else:
+        result = probe(cfg, args.node, args.output_root)
     print('KV_EC_PREFLIGHT ' + json.dumps(result), flush=True)
+    if args.command == 'cuda-probe' and result['status'] != 'PASS':
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':
