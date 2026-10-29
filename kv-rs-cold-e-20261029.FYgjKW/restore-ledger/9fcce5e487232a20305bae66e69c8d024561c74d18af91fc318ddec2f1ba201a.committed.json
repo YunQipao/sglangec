@@ -1,0 +1,10 @@
+{
+  "output_token_ids_sha256": "0c47ef2c5d7b80a686e9a6cb4be887e1ce6b617b42f6e6ad93fbcbd55de1d3e0",
+  "restore_id": "9fcce5e487232a20305bae66e69c8d024561c74d18af91fc318ddec2f1ba201a",
+  "run_id": "cold-new",
+  "state": "COMMITTED",
+  "tp_ranks": [
+    0,
+    1
+  ]
+}

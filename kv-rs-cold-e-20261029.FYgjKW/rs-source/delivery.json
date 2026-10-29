@@ -1,0 +1,22 @@
+{
+  "archive_bytes": 77129820,
+  "archive_sha256": "b130a2340c737edcc39a91a2068e285e6957d74ce954f50d912573e1c7acd44c",
+  "receive_stats": {
+    "bytes": 77129820,
+    "completion_ms": 91.159,
+    "completion_status": "SUCCESS",
+    "device_setup_ms": 5.265,
+    "elapsed_s": 17.22142787114717,
+    "exchange_ms": 0.761,
+    "gid_index": 3,
+    "helper_stdout": "KV_EC_RDMA_STATS bytes=77129820 device_setup_ms=5.265 memory_registration_ms=33.322 qp_setup_ms=1.111 exchange_ms=0.761 completion_ms=91.159 total_ms=17210.254 qp_num=206 remote_qpn=11600 gid_index=3 port_num=1 completion_status=SUCCESS",
+    "memory_registration_ms": 33.322,
+    "port_num": 1,
+    "qp_num": 206,
+    "qp_setup_ms": 1.111,
+    "rdma_device": "mlx5_0",
+    "remote_qpn": 11600,
+    "total_ms": 17210.254,
+    "transport": "rdma"
+  }
+}

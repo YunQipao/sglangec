@@ -1,0 +1,39 @@
+{
+  "kv_sha256": "f1f5d08aeff0a0c687e9851d2668a0027b0a1606dcaffb65fc4bed652747900c",
+  "origin_processes": [
+    {
+      "boot_id": "eafa6404-2f3e-4305-96d0-357b4de03a69",
+      "host": "disai-4090-3",
+      "pid": 1853236,
+      "start_ticks": 202957272
+    },
+    {
+      "boot_id": "eafa6404-2f3e-4305-96d0-357b4de03a69",
+      "host": "disai-4090-3",
+      "pid": 1853238,
+      "start_ticks": 202957279
+    }
+  ],
+  "origin_server_process": {
+    "boot_id": "eafa6404-2f3e-4305-96d0-357b4de03a69",
+    "host": "disai-4090-3",
+    "pid": 1852361,
+    "start_ticks": 202952317
+  },
+  "rank_capture_sha256": [
+    "acc8f8fae9655e1bc8e9dff36408fa5c2811d5062cce8c4f65cc10db116ca3ad",
+    "9bd050ebeeddbf4f718c9b841bc22b16cd51ff8137d4b8a0e1681f7866ed50eb"
+  ],
+  "rank_payload_sha256": [
+    "5a795d4716f156e9727d2c6921ecec91c2101334f9260a5315fec76918bd5ac3",
+    "56fba33033415bbbb370e12d7a8f61ecb79552b72780244e067bc279935d4d7c"
+  ],
+  "rank_state_sha256": [
+    "450aa4dcd5d5c12ba8ce46877a9d0e0b4d2d9d895f15659036e887fb205addae",
+    "450aa4dcd5d5c12ba8ce46877a9d0e0b4d2d9d895f15659036e887fb205addae"
+  ],
+  "request_state_sha256": "3ceb07938ffbcd36a0bf4ac2655d7d60f7171bbbee8b0e3cc9f87fc279478a06",
+  "restore_id": "9fcce5e487232a20305bae66e69c8d024561c74d18af91fc318ddec2f1ba201a",
+  "schema": "kv-cold-seal-v1",
+  "state": "GLOBAL_COMMITTED"
+}

@@ -1,0 +1,13 @@
+{
+  "cuda_executed": true,
+  "materialized_kv_tokens": 256,
+  "pending_token_id": 20443,
+  "process": {
+    "boot_id": "eafa6404-2f3e-4305-96d0-357b4de03a69",
+    "host": "disai-4090-3",
+    "pid": 1853238,
+    "start_ticks": 202957279
+  },
+  "state_sha256": "450aa4dcd5d5c12ba8ce46877a9d0e0b4d2d9d895f15659036e887fb205addae",
+  "tp_rank": 1
+}

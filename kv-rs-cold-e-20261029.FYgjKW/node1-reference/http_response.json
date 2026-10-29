@@ -1,0 +1,39 @@
+{
+  "text": " artificial public test data. KV cache research with artificial public test data. KV cache research",
+  "output_ids": [
+    20443,
+    584,
+    1273,
+    821,
+    13,
+    84648,
+    6500,
+    3412,
+    448,
+    20443,
+    584,
+    1273,
+    821,
+    13,
+    84648,
+    6500,
+    3412
+  ],
+  "meta_info": {
+    "id": "node1-reference",
+    "finish_reason": {
+      "type": "length",
+      "length": 17
+    },
+    "prompt_tokens": 256,
+    "weight_version": "default",
+    "num_retractions": 0,
+    "reasoning_tokens": 0,
+    "completion_tokens": 17,
+    "cached_tokens": 0,
+    "cached_tokens_details": null,
+    "dp_rank": null,
+    "e2e_latency": 5.492106884019449,
+    "response_sent_to_client_ts": 1793234257.640301
+  }
+}
