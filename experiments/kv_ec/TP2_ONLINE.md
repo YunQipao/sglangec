@@ -1,5 +1,9 @@
 # TP=2 online XOR verification (research only)
 
+配置驱动的 TP2 SHARED/TP4 STRICT/SHARED 最新入口、逐卡准入与两机快照 RS 验证见
+[CONFIGURED_HIERARCHICAL.md](CONFIGURED_HIERARCHICAL.md) 和 [config-example.json](config-example.json)。
+下文旧命令默认 STRICT；共享环境请使用新流程显式选择 SHARED，Oracle PASS 不表示在线 Pool 恢复。
+
 This flow uses artificial input and never writes a running KV pool. CPU Oracle
 verification is transient inside the manager; it is not GPU recovery or continued
 inference after a failure. All EC remains disabled by default. No core scheduler,
@@ -116,7 +120,8 @@ python -m experiments.kv_ec.launch_debug \
   2>&1 | tee "$RUN/server.log"
 ```
 
-This sets `CUDA_VISIBLE_DEVICES=1,2` and `CUDA_DEVICE_ORDER=PCI_BUS_ID`.
+This selects the physical indices 1,2 using their queried GPU UUIDs in
+`CUDA_VISIBLE_DEVICES` and sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`.
 After server readiness, proceed to C. For DEBUG_SAFE online parity, use a fresh
 run/snapshot and replace only `--protection-mode FAST_PARITY` with `DEBUG_SAFE`.
 

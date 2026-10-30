@@ -26,11 +26,11 @@ MODEL_SHA256 = "7b9847a1e1530259c3b60505e32f1c8aa99ca20bd26c8de4ac5ede00262cc347
 
 def make_snapshot(root, *, request, snapshot, layers=tuple(range(36)),
                   model_identifier="/models/Qwen3-8B", model_sha256=MODEL_SHA256,
-                  source_commit=SOURCE_A):
+                  source_commit=SOURCE_A, tp=4):
     directory = Path(root)
     directory.mkdir()
-    for rank in range(4):
-        payload, metadata = rank_fixture(rank, 4, layers=layers, count=256, heads=2)
+    for rank in range(tp):
+        payload, metadata = rank_fixture(rank, tp, layers=layers, count=256, heads=8 // tp)
         metadata.update(snapshot_id=snapshot, request_id=request,
                         pool_class="sglang.srt.mem_cache.memory_pool.MHATokenToKVPool",
                         model_identifier=model_identifier, model_sha256=model_sha256,

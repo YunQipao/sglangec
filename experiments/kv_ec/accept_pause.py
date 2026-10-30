@@ -945,7 +945,8 @@ def main():
         if args.allow_shared_gpu_debug:
             from .gpu_memory_budget import check_shared_gpu_budget
             verdict["gpu_memory_admission"] = check_shared_gpu_budget(
-                gpus, args.model, 4, args.context_length, args.mem_fraction_static)
+                gpus, args.model, 4, args.context_length, args.mem_fraction_static,
+                actual_free_static=True)
             verdict["gpu_tasks_observed"] = {
                 item["gpu_uuid"]: item["other_tasks"]
                 for item in verdict["gpu_memory_admission"]}
@@ -959,10 +960,8 @@ def main():
             "baseline": check_port(baseline_port), "pause": check_port(pause_port)}
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("SGLANG_KV_EC_")}
-        if args.allow_shared_gpu_debug:
-            # This disables only SGLang's early TP free-memory imbalance guard.
-            # KV pool allocation, OOM, capacity, and EC validation stay active.
-            env["SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK"] = "0"
+        from .gpu_admission import environment
+        env.update(environment('shared' if args.allow_shared_gpu_debug else 'strict'))
 
         def server(label, server_env):
             port = baseline_port if label == "baseline" else pause_port

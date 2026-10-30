@@ -1,5 +1,10 @@
 # Qwen3-8B real KV hierarchical EC (prototype)
 
+更新：编解码与验证器现支持 TP=2/4，完整配置驱动命令与共享 GPU 限制见
+[CONFIGURED_HIERARCHICAL.md](../CONFIGURED_HIERARCHICAL.md)。下文原 TP4 示例保持有效；
+TP2 每 Rank 为 4 KV Heads，TP4 为 2，不可混合。两种模式都属于请求完成后的快照 RS，
+不是在线 GPU KV Pool 恢复。
+
 This prototype consumes the existing, completed `rank_snapshot` output. It
 reuses the SGLang capture path, rank-bin schema and validation, then runs local
 XOR and cross-node RS after the request has completed. It does not hook the
@@ -7,16 +12,16 @@ scheduler and does not provide online protection/restore during inference.
 
 ## Encoding choice and failure domains
 
-The cross-node RS data blocks are the complete serialized four-rank node
-snapshots (方案 A). Each serialized block contains its own four TP rank payloads
+The cross-node RS data blocks are the complete serialized TP=2/4 node
+snapshots (方案 A). Each serialized block contains all of its local TP rank payloads
 and rank-local metadata. Node A and Node B may use different request IDs; their
-model fingerprint, BF16/TP4 layout, layer range, 256-token range and per-rank
+model fingerprint, BF16/TP layout, layer range, 256-token range and per-rank
 KV layout must match. TP ranks remain local to their node and do not form a
 fictional TP=8 model.
 
 方案 B (RS over only the local XOR parity) is not used. A node's XOR parity
 cannot recover its four rank payloads by itself: after recovering that parity,
-three original rank blocks are still missing. It could protect parity storage,
+the other original rank blocks are still missing. It could protect parity storage,
 but that is not node-level KV protection.
 
 Current placement is D0 on Node A, D1 on Node B, and P in a separate buffer on
@@ -165,7 +170,7 @@ metadata and checks.
 2. Both live node captures produce all three complete 256-token chunks and
    ordinary Qwen3-8B BF16 TP=4 rank files with checksums.
 3. Run TCP first; require Node B result `state=COMMITTED`, verifier `state=PASS`,
-   four rank checks per node, byte-exact D0/D1 recovery, and P recomputation.
+   all TP rank checks per node, byte-exact D0/D1 recovery, and P recomputation.
 4. Run the same stripe over RDMA; require `transport=rdma`, successful verbs
    completion on both nodes, matching checksums, and verifier `state=PASS`.
 5. Only after correctness passes, compare repeated Baseline, Local-XOR,

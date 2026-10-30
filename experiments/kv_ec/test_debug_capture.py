@@ -114,13 +114,13 @@ class LifetimeTests(unittest.TestCase):
                     "--context-length", "1024"]), \
                 patch.dict(os.environ, {}, clear=True), \
                 patch("experiments.kv_ec.launch_debug.check_port", return_value="available"), \
-                patch("experiments.kv_ec.gpu_memory_budget.check_shared_gpu_budget",
-                      return_value=[{"gpu_index": str(i)} for i in range(4)]) as budget, \
+                patch("experiments.kv_ec.debug_resources.admit",
+                      return_value=[{"gpu_index": str(i), 'gpu_uuid': f'GPU-test-{i}'} for i in range(4)]) as budget, \
                 patch("experiments.kv_ec.launch_debug.os.execv") as execute:
             launch_debug.main()
             budget.assert_called_once_with(["0", "1", "2", "3"],
                                            "/media/sda1/iic_data/luotao/models/Qwen3-8B",
-                                           4, 1024, .3)
+                                           4, 1024, .3, shared=True, minimum=0)
             argv = execute.call_args.args[1]
             self.assertEqual(argv[argv.index("--mem-fraction-static") + 1], "0.3")
             self.assertEqual(argv[argv.index("--context-length") + 1], "1024")
@@ -136,12 +136,14 @@ class LifetimeTests(unittest.TestCase):
                         "--snapshot-id", "tp2", "--parity-socket", "/tmp/test-parity.sock",
                         "--mem-fraction-static", ".24", "--context-length", "1024"]
                 with patch.object(sys, "argv", argv), patch.dict(os.environ, {}, clear=True), \
+                     patch("experiments.kv_ec.debug_resources.admit", return_value=[
+                         {'gpu_index': str(i), 'gpu_uuid': f'GPU-test-{i}'} for i in (1, 2)]), \
                      patch("experiments.kv_ec.launch_debug.socket.socket"), \
                      patch("experiments.kv_ec.parity_manager.manager_hello", return_value="test-epoch"), \
                      patch.object(debug_capture, "source_identity", return_value={}), \
                      patch("experiments.kv_ec.launch_debug.os.execv") as execute:
                     launch_debug.main()
-                    self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "1,2")
+                    self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "GPU-test-1,GPU-test-2")
                     self.assertEqual(os.environ["SGLANG_KV_EC_DEBUG"], "0" if mode == "baseline" else "1")
                     if mode == "parity":
                         self.assertEqual(os.environ["SGLANG_KV_EC_PROTECTION_MODE"], protection)

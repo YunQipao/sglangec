@@ -1,4 +1,4 @@
-"""Offline two-layer protection for captured Qwen3-8B TP=4 KV chunks.
+"""Offline two-layer protection for captured Qwen3-8B TP=2/4 KV chunks.
 
 This deliberately consumes the existing rank snapshot format after capture. It
 does not hook the SGLang scheduler or claim online checkpoint semantics.
@@ -42,17 +42,18 @@ def _validate_node_manifest(manifest):
         if manifest.get(key) != derived[key]:
             raise ValueError(f"node snapshot metadata mismatch: {key}")
     validate_model_identity(manifest)
-    if manifest["tp_size"] != 4 or manifest["dtype"] != "torch.bfloat16":
-        raise ValueError("only verified Qwen3-8B BF16 TP=4 snapshots are supported")
+    tp = manifest["tp_size"]
+    if type(tp) is not int or tp not in (2, 4) or manifest["dtype"] != "torch.bfloat16":
+        raise ValueError("only Qwen3-8B BF16 TP=2/4 snapshots are supported")
     if (manifest["token_count"] != 256 or len(manifest["layers"]) != 36
             or manifest["layers"] != list(range(36))):
         raise ValueError("only complete 36-layer Qwen3-8B 256-token chunks are supported")
     if manifest["pool_class"] != "sglang.srt.mem_cache.memory_pool.MHATokenToKVPool":
         raise ValueError("only the ordinary MHATokenToKVPool is supported")
     for meta in manifest["ranks"]:
-        if any(record["packed_shape"] != {"k": [256, 2, 128], "v": [256, 2, 128]}
+        if any(record["packed_shape"] != {"k": [256, 8 // tp, 128], "v": [256, 8 // tp, 128]}
                for record in meta["layer_records"]):
-            raise ValueError("unsupported Qwen3-8B TP=4 rank KV layout")
+            raise ValueError("unsupported Qwen3-8B TP rank KV layout")
     return capture_compatibility(manifest)
 
 
@@ -80,11 +81,11 @@ def _load_node(directory, node_id):
         "chunk_id": manifest["snapshot_id"],
         "model_fingerprint": manifest["model_sha256"], "checkpoint_version": _checkpoint_version(manifest),
         "capture_compatibility": compatibility,
-        "tp_size": 4, "dtype": manifest["dtype"], "layers": manifest["layers"],
+        "tp_size": manifest["tp_size"], "dtype": manifest["dtype"], "layers": manifest["layers"],
         "layer_range": [min(manifest["layers"]), max(manifest["layers"]) + 1],
         "token_range": [manifest["token_start"], manifest["token_start"] + manifest["token_count"]],
         "rank_blocks": [{"tp_rank": rank, "length": int(block.size),
-                         "kv_head_range": [rank * (8 // 4), (rank + 1) * (8 // 4)],
+                         "kv_head_range": [rank * (8 // manifest['tp_size']), (rank + 1) * (8 // manifest['tp_size'])],
                          "source_checksum": _sha(block.tobytes()),
                          "layer_records": manifest["ranks"][rank]["layer_records"]}
                         for rank, block in enumerate(blocks)],
@@ -109,12 +110,12 @@ def _decode_node(data):
     header = json.loads(bytes(view[offset:offset + hlen]))
     offset += hlen
     if (header.get("format") != "kv-ec-node-block-v1" or
-            type(header.get("tp_size")) is not int or header["tp_size"] != 4):
+            type(header.get("tp_size")) is not int or header["tp_size"] not in (2, 4)):
         raise ValueError("unsupported or incomplete node-block metadata")
     if (not header.get("node_id") or not header.get("request_id")
             or not header.get("model_fingerprint") or not header.get("checkpoint_version")
-            or len(header.get("rank_blocks", [])) != 4
-            or len(header.get("rank_metadata", [])) != 4):
+            or len(header.get("rank_blocks", [])) != header['tp_size']
+            or len(header.get("rank_metadata", [])) != header['tp_size']):
         raise ValueError("incomplete node-block identity or TP metadata")
     manifest = rank_manifest(header["rank_metadata"])
     compatibility = _validate_node_manifest(manifest)
@@ -137,7 +138,7 @@ def _decode_node(data):
     if header.get("capture_compatibility", compatibility) != compatibility:
         raise ValueError("node-block capture compatibility profile mismatch")
     blocks = []
-    for rank in range(4):
+    for rank in range(header['tp_size']):
         if offset + 8 > len(view):
             raise ValueError("truncated node-block length")
         length = struct.unpack_from("!Q", view, offset)[0]
@@ -151,7 +152,8 @@ def _decode_node(data):
                 type(record.get("length")) is not int or record["length"] != length or
                 _sha(block.tobytes()) != record.get("source_checksum")):
             raise ValueError("rank payload checksum/metadata mismatch")
-        if (record.get("kv_head_range") != [rank * 2, (rank + 1) * 2] or
+        heads = 8 // header['tp_size']
+        if (record.get("kv_head_range") != [rank * heads, (rank + 1) * heads] or
                 record.get("layer_records") != header["rank_metadata"][rank]["layer_records"]):
             raise ValueError("rank KV layout/header mismatch")
         validate_payload(block, header["rank_metadata"][rank])
@@ -169,7 +171,7 @@ def _compatible(a, b):
             raise ValueError(f"incompatible node snapshots: {key}")
     if left_profile != right_profile:
         raise ValueError("source_commit compatibility not proven; recapture both nodes at a common reviewed source")
-    for rank in range(4):
+    for rank in range(a['tp_size']):
         left, right = a["ranks"][rank]["layer_records"], b["ranks"][rank]["layer_records"]
         fields = KV_LAYOUT_FIELDS
         if [{key: item.get(key) for key in fields} for item in left] != [
@@ -259,8 +261,13 @@ def run_receive(args):
     report = {
         "experiment_id": args.experiment_id, "global_stripe_id": args.stripe_id,
         "chunk_id": global_chunk_id, "transport": args.transport,
+        "tp_size": local_manifest['tp_size'],
+        "gpu_mode": getattr(args, 'gpu_mode', None),
+        "shared_gpu": getattr(args, 'gpu_mode', None) == 'SHARED' if getattr(args, 'gpu_mode', None) else None,
+        "isolated_performance_eligible": False,
         "shared_node_failure_recovery": False,
-        "encoding_object": "complete_serialized_four_rank_node_snapshot",
+        "encoding_object": ("complete_serialized_four_rank_node_snapshot" if local_manifest['tp_size'] == 4
+                            else "complete_serialized_two_rank_node_snapshot"),
         "snapshot_compatibility": {
             "format": local_manifest["format"], "profile": compatibility,
             "model_sha256": local_manifest["model_sha256"],
@@ -332,6 +339,10 @@ def run_send(args):
         raise ValueError("RDMA transport identity mismatch")
     request_metrics = _request_metrics(args.request_metrics)
     report = {"state": "SENT", "transport": args.transport, "node_id": args.node_id,
+              "tp_size": manifest['tp_size'],
+              "gpu_mode": getattr(args, 'gpu_mode', None),
+              "shared_gpu": getattr(args, 'gpu_mode', None) == 'SHARED' if getattr(args, 'gpu_mode', None) else None,
+              "isolated_performance_eligible": False,
               "request_id": manifest["request_id"], "snapshot_id": manifest["snapshot_id"],
               "global_stripe_id": args.stripe_id, "local_xor_parity_sha256": _sha(parity.tobytes()),
               "local_xor_rank_recovery_checks": checks, "cross_node_bytes": len(envelope),
@@ -373,6 +384,8 @@ def main():
         p.add_argument("--node-id", required=True)
         p.add_argument("--output", type=Path, required=True)
         p.add_argument("--transport", choices=("tcp", "rdma"), required=True)
+        p.add_argument('--gpu-mode', choices=('STRICT', 'SHARED'),
+                       help='origin capture resource policy; omitted means unknown')
         p.add_argument("--data-port", type=int, default=19481)
         p.add_argument("--stripe-id", required=True)
         p.add_argument("--chunk-id", help="shared logical chunk ID; defaults to --stripe-id")

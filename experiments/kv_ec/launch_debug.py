@@ -64,6 +64,9 @@ def main():
     p.add_argument("--port", type=int, default=30281)
     p.add_argument("--host", default="127.0.0.1", help="inference HTTP bind address")
     p.add_argument("--model", default="/media/sda1/iic_data/luotao/models/Qwen3-8B")
+    p.add_argument("--tokenizer", help="local tokenizer directory; defaults to model")
+    p.add_argument("--gpu-mode", choices=("STRICT", "SHARED"))
+    p.add_argument("--min-free-gpu-gb", type=float, default=0)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--snapshot-id", required=True)
     p.add_argument("--request-id", default="kv-ec-artificial-request")
@@ -107,15 +110,19 @@ def main():
         p.error("--mem-fraction-static must be in [0.05, 0.95]")
     if not 784 <= args.context_length <= 131072:
         p.error("--context-length must be in [784, 131072] for the 768+16-token request")
-    if args.allow_shared_gpu_debug:
-        from experiments.kv_ec.gpu_memory_budget import check_shared_gpu_budget
-        try:
-            admission = check_shared_gpu_budget(
-                gpus, args.model, args.tp, args.context_length,
-                args.mem_fraction_static)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            p.error(str(exc))
-        print("Shared GPU debug memory admission:", json.dumps(admission), flush=True)
+    if args.gpu_mode == 'STRICT' and args.allow_shared_gpu_debug:
+        p.error('--gpu-mode STRICT conflicts with --allow-shared-gpu-debug')
+    args.allow_shared_gpu_debug = args.gpu_mode == 'SHARED' or args.allow_shared_gpu_debug
+    from experiments.kv_ec.debug_resources import admit
+    try:
+        admission = admit(gpus, args.model, args.tp, args.context_length,
+            args.mem_fraction_static, shared=args.allow_shared_gpu_debug,
+            minimum=args.min_free_gpu_gb)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        p.error(str(exc))
+    if len(admission) != args.tp or any(not row.get('gpu_uuid', '').startswith('GPU-') for row in admission):
+        p.error('complete physical GPU UUID admission evidence required')
+    print('Debug GPU admission:', json.dumps(admission), flush=True)
     chunk_plan = {}
     for request, snapshot in plan.items():
         if args.chunk_size is None:
@@ -134,12 +141,17 @@ def main():
     except (OSError, ValueError) as exc:
         p.error(str(exc))
     print(f"Port {args.port}: {port_status}", flush=True)
-    os.environ.update(CUDA_VISIBLE_DEVICES=args.gpus, CUDA_DEVICE_ORDER="PCI_BUS_ID",
+    os.environ.update(CUDA_VISIBLE_DEVICES=','.join(row['gpu_uuid'] for row in admission), CUDA_DEVICE_ORDER="PCI_BUS_ID",
                       SGLANG_KV_EC_DEBUG="0" if args.mode == "baseline" else "1",
                       SGLANG_KV_EC_PROTECTION_MODE=(args.protection_mode if args.mode == "parity" else "DEBUG_SAFE"),
                       SGLANG_KV_EC_OUTPUT_DIR=str(args.output), SGLANG_KV_EC_SNAPSHOT_ID=args.snapshot_id,
                       SGLANG_KV_EC_REQUEST_ID=args.request_id, SGLANG_KV_EC_TOKEN_START="0",
                       SGLANG_KV_EC_TOKEN_COUNT=str(args.token_count), SGLANG_KV_EC_LAYERS=args.layers)
+    # Only this launcher and its exec'ed SGLang workers inherit this policy.
+    # Explicitly override both modern and deprecated parent settings.
+    from experiments.kv_ec.gpu_admission import environment
+    os.environ.update(environment('shared' if args.allow_shared_gpu_debug else 'strict'))
+    os.environ['SGLANG_KV_EC_GPU_RESOURCES'] = json.dumps(admission)
     os.environ.update(SGLANG_KV_EC_TRANSFER=args.transfer,
                       SGLANG_KV_EC_PROFILE_DETAIL="1" if args.profile_detail else "0",
                       SGLANG_KV_EC_CUDA_EVENTS="1" if args.cuda_events else "0",
@@ -189,6 +201,8 @@ def main():
             "--disable-radix-cache", "--chunked-prefill-size", "-1", "--disable-overlap-schedule",
             "--max-running-requests", "1", "--skip-server-warmup", "--random-seed", "42",
             "--cuda-graph-config", '{"decode":{"backend":"disabled"},"prefill":{"backend":"disabled"}}']
+    if args.tokenizer:
+        argv += ['--tokenizer-path', args.tokenizer]
     print("Starting isolated", args.mode, "server; shared_gpu_debug=",
           args.allow_shared_gpu_debug, "no existing workers will be stopped or modified.", flush=True)
     os.execv(sys.executable, argv)

@@ -67,6 +67,8 @@ class LauncherOptionsTests(unittest.TestCase):
                 argv = ["launch_debug", "--mode", "baseline", "--tp", "1", "--gpus", "2",
                         "--output", directory, "--snapshot-id", "config-test", *extra]
                 with patch.object(sys, "argv", argv), patch.dict(os.environ, {}, clear=True), \
+                     patch("experiments.kv_ec.debug_resources.admit", return_value=[
+                         {'gpu_index': '2', 'gpu_uuid': 'GPU-test-2'}]), \
                      patch("experiments.kv_ec.launch_debug.socket.socket"), \
                      patch.object(launch_debug.os, "execv") as execute:
                     launch_debug.main()

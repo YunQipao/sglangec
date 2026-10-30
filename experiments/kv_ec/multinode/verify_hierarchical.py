@@ -45,12 +45,26 @@ def verify(result_directory, local_snapshot):
         raise ValueError("RS parity recomputation mismatch")
     if d0restored.tobytes() != d0raw or d1restored.tobytes() != d1raw:
         raise ValueError("RS data-block recovery mismatch")
+    headers = []
     for raw in (d0raw, d1raw):
-        _, ranks = _decode_node(raw)
-        if len(ranks) != 4:
+        header, ranks = _decode_node(raw)
+        headers.append(header)
+        if len(ranks) != header['tp_size']:
             raise ValueError("node snapshot rank count mismatch")
-    from ..rank_snapshot import assemble
-    _, local_blocks = assemble(local_snapshot)
+    from .kv_hierarchical import _load_node, _compatible
+    from ..rank_snapshot import rank_manifest
+    _compatible(*(rank_manifest(header['rank_metadata']) for header in headers))
+    if report.get('tp_size', headers[0]['tp_size']) != headers[0]['tp_size']:
+        raise ValueError('report TP mismatch')
+    _, local_blocks, _, _, _, local_header, _, _ = _load_node(local_snapshot, headers[1]['node_id'])
+    # v1 historically omitted capture_compatibility; decoding already derives
+    # and verifies it. Compare every other field and exact payload bytes.
+    local_identity = {k: v for k, v in local_header.items() if k != 'capture_compatibility'}
+    stored_identity = {k: v for k, v in headers[1].items() if k != 'capture_compatibility'}
+    _, stored_blocks = _decode_node(d1raw)
+    if local_identity != stored_identity or any(
+            not np.array_equal(a, b) for a, b in zip(local_blocks, stored_blocks)):
+        raise ValueError('local snapshot does not match committed D1')
     local_parity = xor_encode(local_blocks)
     if _sha(local_parity.tobytes()) != report["local_xor"]["parity_sha256"]:
         raise ValueError("local XOR parity checksum mismatch")
@@ -60,6 +74,7 @@ def verify(result_directory, local_snapshot):
         if _sha(block.tobytes()) != report_metadata["sha256"]:
             raise ValueError("local rank checksum mismatch")
     return {"state": "PASS", "transport": report["transport"],
+            "tp_size": headers[0]['tp_size'],
             "shared_node_failure_recovery": False, "rs_blocks_sha256": checksums,
             "D0_and_D1_recovery_byte_exact": True, "P_recomputation_verified": True,
             "local_xor_parity_verified": True, "per_rank_snapshot_checksums_verified": True}

@@ -410,6 +410,20 @@ def capture(scheduler, batch, req, config):
                 completion_dependency="device_synchronize_before_read_blocking_d2h_before_return",
                 selected_copy_and_check_ms=(time.perf_counter() - started) * 1000,
                 snapshot_completion_status="complete")
+    # Optional launcher evidence binds CUDA logical Rank to physical selection.
+    # Historical captures without this field retain their original semantics.
+    resources = os.environ.get('SGLANG_KV_EC_GPU_RESOURCES')
+    if resources:
+        from .gpu_admission import normalized_uuid
+        rows = json.loads(resources)
+        require(len(rows) == ps.tp_size, 'gpu_admission_rank_count_mismatch')
+        selected = rows[ps.tp_rank]
+        require(normalized_uuid(selected['gpu_uuid']) == normalized_uuid(meta['gpu_uuid']),
+                'gpu_admission_runtime_uuid_mismatch')
+        meta.update(physical_gpu_index=selected['gpu_index'],
+                    gpu_admission_mode=os.environ['KV_EC_GPU_ADMISSION_MODE'],
+                    shared_gpu=os.environ['KV_EC_GPU_ADMISSION_MODE'] == 'shared',
+                    isolated_performance_eligible=False)
     timing.wall["python_object_construction_ms"] = (time.perf_counter_ns() - object_started) / 1e6
     if detailed:
         timing.thread_cpu["python_object_construction_ms"] = (time.thread_time_ns() - object_cpu_started) / 1e6
@@ -484,6 +498,13 @@ def capture(scheduler, batch, req, config):
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / f"rank_{ps.tp_rank}.timing.json").open("x") as stream:
         json.dump({"snapshot_id": config.snapshot_id, "tp_rank": ps.tp_rank,
+                   "tp_size": ps.tp_size, "gpu_uuid": meta['gpu_uuid'],
+                   "physical_gpu_index": meta.get('physical_gpu_index'),
+                   "gpu_admission_mode": meta.get('gpu_admission_mode'),
+                   "shared_gpu": meta.get('shared_gpu'),
+                   "isolated_performance_eligible": False,
+                   "model_sha256": meta['model_sha256'], "request_id": meta['request_id'],
+                   "token_ids_sha256": meta['token_ids_sha256'],
                    "parity_protection": meta.get("parity_protection", "DEBUG_DISK_ONLY"),
                    "performance_ms": phase,
                    "diagnostic_write_included": False}, stream, indent=2)

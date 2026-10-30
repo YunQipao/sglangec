@@ -74,7 +74,8 @@ class ProfilingTests(unittest.TestCase):
             self.assertEqual([c.args[3].snapshot_id for c in capture.call_args_list],
                              ["snap-ecwarmup-1", "snap-measure-1"])
 
-    def _run_cpu_backed_capture(self, transfer, mode, cuda_events=False, fail_allocation=False):
+    def _run_cpu_backed_capture(self, transfer, mode, cuda_events=False, fail_allocation=False,
+                                admitted_uuid=None):
         scheduler, batch, req, config = lifetime_fixture()
         module = ModuleType("sglang.srt.mem_cache.memory_pool")
         class MHATokenToKVPool:
@@ -111,6 +112,10 @@ class ProfilingTests(unittest.TestCase):
             env = {"SGLANG_KV_EC_PROTECTION_MODE": mode, "SGLANG_KV_EC_TRANSFER": transfer,
                    "SGLANG_KV_EC_PROFILE_DETAIL": "1", "SGLANG_KV_EC_CUDA_EVENTS": str(int(cuda_events)),
                    "SGLANG_KV_EC_PARITY_SOCKET": "/unused"}
+            if admitted_uuid is not None:
+                env.update(SGLANG_KV_EC_GPU_RESOURCES=json.dumps([
+                    dict(gpu_index=str(i + 3), gpu_uuid=admitted_uuid if i == 0 else f'GPU-fixture-{i}')
+                    for i in range(4)]), KV_EC_GPU_ADMISSION_MODE='shared')
             stack.enter_context(patch.dict(os.environ, env, clear=True))
             stack.enter_context(patch.dict("sys.modules", {module.__name__: module}))
             stack.enter_context(patch.object(debug_capture, "source_identity", return_value=identity))
@@ -119,7 +124,7 @@ class ProfilingTests(unittest.TestCase):
             stack.enter_context(patch.object(debug_capture, "_PARITY_CLIENTS", {"/unused": client}))
             stack.enter_context(patch("torch.cuda.is_available", return_value=True))
             stack.enter_context(patch("torch.cuda.is_current_stream_capturing", return_value=False))
-            stack.enter_context(patch("torch.cuda.get_device_properties", return_value=NS(name="mock")))
+            stack.enter_context(patch("torch.cuda.get_device_properties", return_value=NS(name="mock", uuid='GPU-fixture-0')))
             sync = stack.enter_context(patch("torch.cuda.synchronize"))
             stream = stack.enter_context(patch("torch.cuda.current_stream"))
             stack.enter_context(patch("torch.cuda.Event", side_effect=lambda **kw: NS(
@@ -139,6 +144,10 @@ class ProfilingTests(unittest.TestCase):
             debug_capture.capture(scheduler, batch, req, config)
             path = Path(directory) / config.snapshot_id
             record = json.loads((path / "rank_0.timing.json").read_text())
+            if admitted_uuid is not None:
+                self.assertEqual(record['physical_gpu_index'], '3')
+                self.assertEqual(record['gpu_uuid'], admitted_uuid)
+                self.assertTrue(record['shared_gpu'])
             phase = validate_timing(record)
             tail = json.loads((path / "rank_0.diagnostic.json").read_text())
             self.assertGreaterEqual(tail["diagnostic_write_ms"], 0)
@@ -169,6 +178,11 @@ class ProfilingTests(unittest.TestCase):
             for mode in ("FAST_PARITY", "DEBUG_SAFE"):
                 with self.subTest(transfer=transfer, mode=mode):
                     self._run_cpu_backed_capture(transfer, mode)
+
+    def test_actual_capture_binds_runtime_uuid_and_rejects_wrong_device(self):
+        self._run_cpu_backed_capture('blocking', 'FAST_PARITY', admitted_uuid='GPU-fixture-0')
+        with self.assertRaisesRegex(debug_capture.CaptureRejected, 'gpu_admission_runtime_uuid_mismatch'):
+            self._run_cpu_backed_capture('blocking', 'FAST_PARITY', admitted_uuid='GPU-wrong-device')
 
     def test_pinned_failure_does_not_silently_fallback_or_enqueue(self):
         self._run_cpu_backed_capture("pinned", "FAST_PARITY", fail_allocation=True)
