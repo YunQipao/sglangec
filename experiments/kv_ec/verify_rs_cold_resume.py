@@ -311,6 +311,7 @@ def main():
     p.add_argument('--gpus', default='auto')
     p.add_argument('--port', type=int, default=30986)
     p.add_argument('--mem-fraction-static', type=float, default=0.6)
+    p.add_argument('--gpu-admission-mode', choices=('strict', 'shared'), default='strict')
     p.add_argument('--timeout', type=float, default=120)
     p.set_defaults(inject_rank_failure=None)
     p = sub.add_parser('submit', aliases=['restore'])

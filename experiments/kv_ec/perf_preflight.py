@@ -76,6 +76,8 @@ def check_tmpdir(node, minimum_bytes=1):
 
 
 def validate_config(cfg):
+    from .gpu_admission import config_mode
+    config_mode(cfg)
     if (type(cfg.get('prefix_tokens')) is not int or cfg['prefix_tokens'] != 256 or
             type(cfg.get('tp_size')) is not int or cfg['tp_size'] != 2 or
             cfg.get('rs') != [2, 1] or any(type(n) is not int for n in cfg['rs'])):
@@ -93,7 +95,8 @@ def validate_config(cfg):
     for name in ('min_disk_bytes', 'max_node_bytes', 'trial_timeout', 'protection_timeout'):
         if type(cfg[name]) is not int:
             raise ValueError('integer_config_required: ' + name)
-    if not .05 <= cfg.get('mem_fraction_static', .6) <= .95:
+    fraction = cfg.get('mem_fraction_static', .6)
+    if type(fraction) not in (int, float) or not math.isfinite(fraction) or not .05 <= fraction <= .95:
         raise ValueError('invalid_memory_fraction')
     def port(value):
         if type(value) is not int or not 1024 <= value <= 65535:
@@ -315,6 +318,7 @@ print(json.dumps(dict(header_version=lib.stage_e_header_version(), runtime_paths
 
 
 def probe(cfg, node_index, output_root):
+    from .gpu_admission import config_mode, metadata, environment
     """Executed with configured Conda Python on each host; returns only JSON."""
     from .debug_capture import source_identity
     from .gpu_restore_hook import validate_checkpoint
@@ -322,9 +326,13 @@ def probe(cfg, node_index, output_root):
     from .launch_online import check_gpu_resources
     from types import SimpleNamespace
     node = cfg['nodes'][node_index]
-    result = dict(node=node_index, status='FAIL', checks={})
+    selected_mode = config_mode(cfg)
+    result = dict(node=node_index, status='FAIL', checks={},
+                  **metadata(selected_mode, cfg.get('mem_fraction_static', .6)))
     checks = result['checks']
     try:
+        if any(os.environ.get(k) != v for k, v in environment(selected_mode).items()):
+            raise ValueError('GPU_ADMISSION_MODE_MISMATCH: probe environment')
         checks['inventory'] = identity()
         if Path(sys.prefix).resolve() != Path(node['conda_prefix']).resolve():
             raise ValueError('CONDA_PREFIX_MISMATCH: ' + sys.prefix)
@@ -380,8 +388,9 @@ def probe(cfg, node_index, output_root):
         checks['template_sha256'] = digest(template)
         checks['input_sha256'] = digest(node['input_ids'])
         checks['gpu_admission'] = check_gpu_resources(SimpleNamespace(
-            gpus=node['gpus'], model=node['model'], tp=2, allow_shared_gpu_debug=False,
+            gpus=node['gpus'], model=node['model'], tp=2, gpu_admission_mode=selected_mode,
             mem_fraction_static=cfg.get('mem_fraction_static', .6)))
+        result['gpu_resources_before_start'] = checks['gpu_admission']
         if node_index == 1:
             process = server_process(cfg['rs_server']['port'])
             if Path(process['cwd']).resolve() != Path(node['repo']).resolve():
@@ -436,14 +445,17 @@ def capacity(cfg, reports, health, metrics, repeat):
 
 
 def preflight(cfg, output_root, repeat, expected_epoch=None):
+    from .gpu_admission import config_mode, metadata, validate_evidence
     from .perf_stage_e import Host, parallel
     from .remote_rs_client import RemoteRSClient
     validate_config(cfg)
+    selected_mode = config_mode(cfg)
+    policy = metadata(selected_mode, cfg.get('mem_fraction_static', .6))
     results = [None, None]
     encoded = base64.urlsafe_b64encode(json.dumps(cfg).encode()).decode()
     def check(i):
         root = str(output_root) if i == 0 else cfg['remote_root']
-        h = Host(cfg['nodes'][i], root, 'preflight', i)
+        h = Host(cfg['nodes'][i], root, 'preflight', i, selected_mode)
         cmd = h.argv(MODULE, 'probe', '--config-base64', encoded, '--node', i, '--output-root', root)
         completed = subprocess.run(cmd, cwd=cfg['nodes'][0]['repo'] if i == 0 else None,
                                    capture_output=True, text=True, timeout=900)
@@ -454,8 +466,13 @@ def preflight(cfg, output_root, repeat, expected_epoch=None):
     # Preserve both node errors rather than losing the second SSH result.
     try:
         parallel(lambda: check(0), lambda: check(1))
+        policy['gpu_resources_before_start'] = [r.get('gpu_resources_before_start', []) for r in results]
         if any(r['status'] != 'PASS' for r in results):
             raise ValueError('PREFLIGHT_NODE_FAILED: ' + json.dumps([r.get('error') for r in results]))
+        for result in results:
+            validate_evidence(result, selected_mode)
+            if result['mem_fraction_static'] != cfg.get('mem_fraction_static', .6):
+                raise ValueError('GPU_ADMISSION_MODE_MISMATCH: node memory fraction')
         a, b = [r['checks']['inventory'] for r in results]
         if a['host'] == b['host'] or a['boot_id'] == b['boot_id']:
             raise ValueError('TWO_PHYSICAL_HOSTS_REQUIRED')
@@ -477,10 +494,10 @@ def preflight(cfg, output_root, repeat, expected_epoch=None):
             raise ValueError(f'BATCH_DISK_BUDGET: require {disk_required} free bytes per node')
         if expected_epoch and budget['server_epoch'] != expected_epoch:
             raise ValueError('RS_SERVER_EPOCH_CHANGED_DURING_BATCH')
-        return dict(status='PASS', nodes=results, rs=budget, metrics=metrics,
+        return dict(status='PASS', nodes=results, rs=budget, metrics=metrics, **policy,
                     creates_protection=False, read_only=False, read_only_services=True, temporary_cuda_probe=True)
     except Exception as exc:
-        return dict(status='FAIL', nodes=results, error=f'{type(exc).__name__}: {exc}',
+        return dict(status='FAIL', nodes=results, error=f'{type(exc).__name__}: {exc}', **policy,
                     creates_protection=False, read_only=False, read_only_services=True, temporary_cuda_probe=True)
 
 

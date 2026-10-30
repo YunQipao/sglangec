@@ -136,6 +136,23 @@ def health_status(url, timeout):
         return response.status
 
 
+def gpu_failure_reason(log):
+    """Diagnostic only, never converts a failing subprocess into acceptance."""
+    if not Path(log).exists():
+        return None
+    with Path(log).open('rb') as stream:
+        stream.seek(0, 2)
+        stream.seek(max(0, stream.tell() - 65536))
+        tail = stream.read().decode(errors='replace').lower()
+    if 'out of memory' in tail or 'cuda error: memory allocation' in tail:
+        return 'GPU_RUNTIME_OOM: resource competition or allocation exceeded budget; see server.log; new trial required'
+    if 'loaded weights leave no gpu memory' in tail:
+        return 'GPU_STATIC_KV_POOL_INSUFFICIENT: actual post-weight free memory cannot fit KV pool; see server.log'
+    if 'insufficient_gpu_memory' in tail or 'gpu_static_kv_pool_insufficient' in tail:
+        return 'GPU_ADMISSION_RECHECK_FAILED: GPU state changed or budget insufficient; see server.log'
+    return None
+
+
 def wait_health(url, service_root, timeout=900):
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('positive finite health timeout required')
@@ -201,6 +218,7 @@ def service(root, argv, interval):
                     time.sleep(.2)
             proc.wait(timeout=5)
         save(root / 'exit.json', dict(returncode=proc.returncode, reason=reason,
+                                     gpu_failure_reason=gpu_failure_reason(root / 'server.log'),
                                      end_ns=time.monotonic_ns()))
     if reason == 'process_exited' and proc.returncode:
         raise SystemExit(proc.returncode if proc.returncode > 0 else 1)
@@ -209,13 +227,14 @@ def service(root, argv, interval):
 
 
 class Host:
-    def __init__(self, cfg, root, run_id, node):
+    def __init__(self, cfg, root, run_id, node, gpu_admission_mode='strict'):
         from .perf_preflight import cuda_environment
+        from .gpu_admission import environment
         self.cfg, self.root, self.run_id, self.node = cfg, Path(root), run_id, node
         cuda, self.path_prefixes = cuda_environment(cfg)
         self.env = dict(PYTHONPATH=cfg['repo'] + '/python:' + cfg['repo'],
             KV_EC_PERF_DIR=str(self.root / 'perf'), KV_EC_PERF_RUN_ID=run_id,
-            KV_EC_PERF_ROLE=f'node{node}-{232+node}', **cuda)
+            KV_EC_PERF_ROLE=f'node{node}-{232+node}', **cuda, **environment(gpu_admission_mode))
 
     def argv(self, module, *args):
         cmd = [self.cfg['python'], '-m', module, *map(str, args)]
@@ -337,9 +356,12 @@ def native_metrics(root, n0, n1, recovery, delivery):
 
 
 def trial():
+    from .gpu_admission import config_mode, metadata, validate_evidence
     cfg = read(os.environ['KV_EC_BENCH_CONFIG'])
     from .perf_preflight import validate_config
     validate_config(cfg)
+    selected_mode = config_mode(cfg)
+    policy = metadata(selected_mode, cfg.get('mem_fraction_static', .6))
     local = Path(os.environ['KV_EC_BENCH_TRIAL'])
     rid = os.environ['KV_EC_PERF_RUN_ID']
     recovery_mode = os.environ.get('KV_EC_PERF_RECOVERY_MODE', 'two-level')
@@ -348,9 +370,10 @@ def trial():
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', rid) or local.name != rid:
         raise ValueError('invalid_trial_ID_or_directory_binding')
     remote = Path(cfg.get('remote_root', '/tmp/kv-ec-perf')) / rid
-    hosts = [Host(cfg['nodes'][0], local, rid, 0), Host(cfg['nodes'][1], remote, rid, 1)]
+    hosts = [Host(cfg['nodes'][0], local, rid, 0, selected_mode),
+             Host(cfg['nodes'][1], remote, rid, 1, selected_mode)]
     a, b = hosts
-    save(local / 'trial-owner.json', dict(run_id=rid))
+    save(local / 'trial-owner.json', dict(run_id=rid, **policy))
     (local / 'lease').touch(exist_ok=False)
     b.run(SELF, 'prepare', '--root', remote)
     b.run(SELF, 'init-trial', '--root', remote)
@@ -372,6 +395,8 @@ def trial():
         signal.signal(sig, interrupted)
     services, logs, tunnels = [], [], []
     def start(h, name, module, *args):
+        if name in ('origin', 'target'):
+            args = (*args, '--gpu-admission-mode', selected_mode)
         log = (local / f'{name}-node{h.node}.log').open('x')
         logs.append(log)
         proc = subprocess.Popen(h.argv(SELF, 'service', '--root', h.root / name,
@@ -391,6 +416,12 @@ def trial():
         return ['--remote-host', rs['host'], '--remote-port', rs['port'],
                 '--rdma-device', h.cfg.get('rdma_device', 'mlx5_0'),
                 '--rdma-gid-index', h.cfg['gid_index'], '--rdma-port-num', 1, '--timeout', 600]
+    def startup_evidence(path):
+        record = read(path)
+        validate_evidence(record, selected_mode)
+        if record['mem_fraction_static'] != cfg.get('mem_fraction_static', .6):
+            raise ValueError('GPU_ADMISSION_MODE_MISMATCH: startup memory fraction')
+        return record
     try:
         parallel(*[lambda h=h: h.run(B, 'inventory', '--output', h.root / f'inventory-{232+h.node}.json') for h in hosts])
         scp(b, remote / 'inventory-233.json', local / 'inventory-233.json')
@@ -413,6 +444,9 @@ def trial():
             h.run(D, 'reference', '--output', h.root / f'node{h.node}-reference')
             h.run(E, 'claim', '--capture', h.root / 'capture', '--output', h.root / f'claim{h.node}.json')
         parallel(*[lambda h=h: capture(h) for h in hosts])
+        scp(b, remote / 'node1-reference/run.json', local / 'origin-run-233.json')
+        startup_evidence(local / 'node0-reference/run.json')
+        startup_evidence(local / 'origin-run-233.json')
         if recovery_mode == 'reprefill':
             (local / 'node1-reference').mkdir(exist_ok=True)
             scp(b, remote / 'node1-reference/rank_0.json',
@@ -452,6 +486,7 @@ def trial():
                   '--service-root', remote / 'target')
             ready = time.monotonic_ns()
             scp(b, remote / 'cold-reprefill/run.json', local / 'reprefill-target-run.json')
+            startup_evidence(local / 'reprefill-target-run.json')
             from .perf_preflight import free_ports
             free_ports([a.cfg['origin_port']])
             tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'])
@@ -470,6 +505,7 @@ def trial():
             if request['output_token_ids'] != reference['output_token_ids']:
                 raise ValueError('reprefill_output_token_ids_mismatch')
             save(local / 'reprefill.json', dict(schema='kv-ec-cold-reprefill-v1',
+                **policy, functional_correctness_pass=True,
                 pass_reprefill=True, output_token_ids_match=True,
                 commit_sha=identity()['commit_sha'], model_sha256=reference['runtime_identity']['model_sha256'],
                 input_sha256=digest(local / 'node1-reference/submitted_input_ids.json'), target_run_id=rid,
@@ -519,9 +555,11 @@ def trial():
         scp(b, remote / 'cold-new/check.json', local / 'stage-e-check.json')
         verdict = read(local / 'stage-e-check.json')
         scp(b, remote / 'cold-new/run.json', local / 'target-run.json')
+        startup_evidence(local / 'target-run.json')
         binding = target_binding(verdict, read(local / 'target-run.json'),
                                  read(local / 'protection.json'), rid)
-        save(local / 'acceptance.json', dict(run_id=rid, **binding, live_check_exit=0,
+        save(local / 'acceptance.json', dict(run_id=rid, **binding, **policy,
+            functional_correctness_pass=True, live_check_exit=0,
             verdict_sha256=digest(local / 'stage-e-check.json'),
             target_run_sha256=digest(local / 'target-run.json'),
             protection_sha256=digest(local / 'protection.json')))
@@ -556,6 +594,7 @@ def trial():
             if paired['output_token_ids'] != reference['output_token_ids']:
                 raise ValueError('paired_reprefill_output_token_ids_mismatch')
             save(local / 'paired-ready-reprefill.json', dict(
+                **policy, functional_correctness_pass=True,
                 schema='kv-ec-stage-e-same-target-reprefill-v1', pass_reprefill=True,
                 output_token_ids_match=True, stage_e_verdict_sha256=digest(local / 'stage-e-check.json'),
                 target_run_sha256=digest(local / 'target-run.json'), target_run_id=target_run['run_id'],
@@ -586,6 +625,7 @@ def trial():
             delivery_send=read(local / 'delivery-send.json'), delivery_receive=delivery_receive))
     except BaseException as exc:
         save(local / 'failure.json', dict(error=f'{type(exc).__name__}: {exc}', traceback=traceback.format_exc(),
+            **policy, functional_correctness_pass=False,
             remote_root=str(remote), run_id=rid, evidence_preserved=True, retry_checkpoint_allowed=False))
         raise
     finally:

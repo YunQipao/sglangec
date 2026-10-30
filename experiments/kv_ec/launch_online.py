@@ -1,6 +1,7 @@
 """Foreground stage-1 online server. Does not stop or modify existing processes."""
 
 import argparse
+import itertools
 import json
 import os
 from pathlib import Path
@@ -12,17 +13,35 @@ from .checkpoint_protocol import recv_message, send_message
 from .debug_capture import source_identity
 from .gpu_memory_budget import check_shared_gpu_budget, read_gpu_memory, read_gpu_tasks
 from .launch_debug import check_port
+from .gpu_admission import args_mode, environment
 
 
 def check_gpu_resources(args):
     """Read-only admission using physical indices, independent of parent CVD."""
-    gpus = args.gpus.split(",")
+    selected_mode = args_mode(args)
     tasks = read_gpu_tasks()
     rows = read_gpu_memory()
+    if args.gpus == 'auto':
+        candidates = [g for g in rows if selected_mode == 'shared' or not tasks.get(rows[g]['uuid'])]
+        choices = []
+        for pair in itertools.combinations(candidates, args.tp):
+            try:
+                budget = check_shared_gpu_budget(pair, args.model, args.tp, 4096,
+                    args.mem_fraction_static, memory_rows=rows, tasks_by_uuid=tasks,
+                    actual_free_static=selected_mode == 'shared')
+                choices.append((min(r['remaining_safety_margin_bytes'] for r in budget), pair))
+            except ValueError:
+                continue
+        if not choices:
+            raise ValueError('INSUFFICIENT_GPU_MEMORY: no admissible GPU pair in ' + selected_mode)
+        args.gpus = ','.join(max(choices)[1])
+    gpus = args.gpus.split(',')
+    if len(gpus) != args.tp or len(set(gpus)) != args.tp or not all(g.isdigit() for g in gpus):
+        raise ValueError('distinct_physical_gpu_indices_required')
     for gpu in gpus:
         if gpu not in rows:
             raise ValueError(f"GPU index={gpu} reason=GPU_NOT_FOUND")
-    if not args.allow_shared_gpu_debug:
+    if selected_mode == 'strict':
         selected = {rows[gpu]["uuid"] for gpu in gpus}
         if selected.intersection(tasks):
             raise ValueError(
@@ -31,6 +50,7 @@ def check_gpu_resources(args):
     return check_shared_gpu_budget(
         gpus, args.model, args.tp, 4096, args.mem_fraction_static,
         memory_rows=rows, tasks_by_uuid=tasks,
+        actual_free_static=selected_mode == 'shared',
         report=lambda admission: print(
             "GPU memory admission (bytes; required is additional memory; "
             "adjust --mem-fraction-static):", json.dumps(admission), flush=True),
@@ -106,10 +126,10 @@ def main():
         help="-1 disables chunked prefill",
     )
     parser.add_argument("--mem-fraction-static", type=float, default=0.60)
+    parser.add_argument('--gpu-admission-mode', choices=('strict', 'shared'), default=None)
     parser.add_argument(
         "--allow-shared-gpu-debug", action="store_true",
-        help="debug only: allow existing GPU tasks after read-only memory admission; "
-        "set SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0 explicitly if needed",
+        help="legacy alias for shared admission when --gpu-admission-mode is omitted",
     )
     args = parser.parse_args()
     gpus = args.gpus.split(",")
@@ -141,8 +161,9 @@ def main():
         if ready.get("state") != "READY" or ready.get("run_id") != args.run_id:
             parser.error("online manager is not ready for this run id")
     identity = source_identity(args.model) if not args.baseline else {}
-    # execv inherits the caller's environment, including an explicit
-    # SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=0. Never disable it implicitly.
+    check_gpu_resources(args)  # resource competition can change during hashing/handshake
+    # The resource policy is passed explicitly to execve, never exported to
+    # the caller's shell or persisted in the Conda/system environment.
     os.environ.update(
         CUDA_VISIBLE_DEVICES=args.gpus,
         CUDA_DEVICE_ORDER="PCI_BUS_ID",
@@ -154,7 +175,7 @@ def main():
         SGLANG_KV_EC_ONLINE_CAPACITY=str(args.capacity),
         SGLANG_KV_EC_PREPARED_IDENTITY=json.dumps(identity),
     )
-    os.execv(sys.executable, server_argv(args))
+    os.execve(sys.executable, server_argv(args), dict(os.environ, **environment(args_mode(args))))
 
 
 if __name__ == "__main__":

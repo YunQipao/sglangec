@@ -1,0 +1,65 @@
+"""Stage E resource policy only; never changes recovery correctness gates."""
+
+import os
+
+
+def mode(value):
+    if type(value) is not str or value not in ('strict', 'shared'):
+        raise ValueError('GPU_ADMISSION_MODE_INVALID: expected strict or shared')
+    return value
+
+
+def config_mode(cfg):
+    value = cfg.get('gpu_admission', {'mode': 'strict'})
+    if type(value) is not dict or set(value) != {'mode'}:
+        raise ValueError('GPU_ADMISSION_CONFIG_INVALID: expected {"mode": "strict|shared"}')
+    selected = mode(value['mode'])
+    for node in cfg.get('nodes', []):
+        if 'gpu_admission' in node or 'gpu_admission_mode' in node:
+            raise ValueError('GPU_ADMISSION_MODE_MISMATCH: policy must be top-level only')
+    return selected
+
+
+def args_mode(args):
+    selected = getattr(args, 'gpu_admission_mode', None)
+    if selected is None:
+        selected = 'shared' if getattr(args, 'allow_shared_gpu_debug', False) else 'strict'
+    selected = mode(selected)
+    expected = os.environ.get('KV_EC_GPU_ADMISSION_MODE')
+    if expected is not None and mode(expected) != selected:
+        raise ValueError('GPU_ADMISSION_MODE_MISMATCH: coordinator/launcher')
+    return selected
+
+
+def environment(selected):
+    selected = mode(selected)
+    # Explicitly override accidental parent settings, including the old alias.
+    return dict(KV_EC_GPU_ADMISSION_MODE=selected,
+                SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK='1' if selected == 'strict' else '0',
+                SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK='0' if selected == 'strict' else '1')
+
+
+def metadata(selected, fraction, resources=None):
+    selected = mode(selected)
+    return dict(gpu_admission_mode=selected, mem_fraction_static=fraction,
+                tp_memory_imbalance_check=selected == 'strict',
+                shared_resource_environment=selected == 'shared',
+                isolated_performance_eligible=False,  # only set after successful live evidence
+                gpu_resources_before_start=resources or [])
+
+
+def validate_evidence(record, selected):
+    if (record.get('gpu_admission_mode') != selected or
+            record.get('tp_memory_imbalance_check') is not (selected == 'strict') or
+            record.get('shared_resource_environment') is not (selected == 'shared')):
+        raise ValueError('GPU_ADMISSION_MODE_MISMATCH: startup evidence')
+    rows = record.get('gpu_resources_before_start')
+    if not isinstance(rows, list) or len(rows) != 2:
+        raise ValueError('GPU_ADMISSION_EVIDENCE_MISSING: expected TP2 resource snapshot')
+    if len({row['gpu_index'] for row in rows}) != 2 or len({row['gpu_uuid'] for row in rows}) != 2:
+        raise ValueError('GPU_ADMISSION_EVIDENCE_INVALID: duplicate GPU')
+    for row in rows:
+        if (not 0 < row['required_estimated_memory_bytes'] <= row['free_memory_bytes'] <= row['total_memory_bytes'] or
+                not isinstance(row['other_tasks'], list) or
+                (selected == 'strict' and row['other_tasks'])):
+            raise ValueError('GPU_ADMISSION_EVIDENCE_INVALID: insufficient/busy GPU')

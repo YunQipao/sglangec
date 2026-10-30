@@ -2,7 +2,6 @@
 
 import argparse
 import hashlib
-import itertools
 import json
 import os
 from pathlib import Path
@@ -129,37 +128,22 @@ def check_results(output):
 
 
 def launch(args, *, extra_config=None, extra_env=None):
+    from .gpu_admission import args_mode, environment, metadata
     from .debug_capture import source_identity
-    from .gpu_memory_budget import read_gpu_memory, read_gpu_tasks
     from .launch_online import check_gpu_resources, server_argv
     from .launch_debug import check_port
     block = args.checkpoint.resolve().read_bytes()
     validate_checkpoint(block)
-    args.tp, args.prefill_chunk_size, args.allow_shared_gpu_debug = 2, -1, False
+    args.tp, args.prefill_chunk_size = 2, -1
+    selected_mode = args_mode(args)
     _require(0.05 <= args.mem_fraction_static <= 0.95, "invalid_memory_fraction")
-    if args.gpus == "auto":
-        rows, tasks = read_gpu_memory(), read_gpu_tasks()
-        idle = sorted((g for g in rows if not tasks.get(rows[g]["uuid"])),
-                      key=lambda g: rows[g]["free_bytes"], reverse=True)
-        chosen = None
-        for pair in itertools.combinations(idle, 2):
-            args.gpus = ",".join(pair)
-            try:
-                check_gpu_resources(args)
-                chosen = args.gpus
-                break
-            except ValueError:
-                continue
-        _require(chosen is not None, "two_idle_gpus_with_sufficient_memory_required")
-    else:
-        gpus = args.gpus.split(",")
-        _require(len(gpus) == len(set(gpus)) == 2 and all(g.isdigit() for g in gpus),
-                 "two_distinct_gpu_indices_required")
-        check_gpu_resources(args)
+    resources = check_gpu_resources(args)
     check_port(args.port)
     # Do not trust a parent's prepared identity when creating new evidence.
     os.environ.pop("SGLANG_KV_EC_PREPARED_IDENTITY", None)
     identity = source_identity(args.model)
+    # Hashing may take minutes: re-admit immediately before the actual exec.
+    resources = check_gpu_resources(args)
     _require(identity["model_sha256"] == validate_checkpoint(block)["ranks"][0]["model_sha256"],
              "checkpoint_model_hash_mismatch")
     output = args.output.resolve()
@@ -168,6 +152,7 @@ def launch(args, *, extra_config=None, extra_env=None):
                   checkpoint_sha256=sha(block), gpus=args.gpus, model=args.model,
                   runtime_identity=identity, argv=server_argv(args))
     config.update(extra_config or {})
+    config.update(metadata(selected_mode, args.mem_fraction_static, resources))
     with (output / "run.json").open("x") as f:
         json.dump(config, f, indent=2)
     os.environ.update(
@@ -185,7 +170,7 @@ def launch(args, *, extra_config=None, extra_env=None):
     )
     os.environ.update(extra_env or {})
     print(json.dumps(config, indent=2), flush=True)
-    os.execv(sys.executable, server_argv(args))
+    os.execve(sys.executable, server_argv(args), dict(os.environ, **environment(selected_mode)))
 
 
 def submit(args, *, max_new_tokens=1, sampling_overrides=None, request_id=None):
@@ -229,9 +214,10 @@ def main():
     start.add_argument("--model", required=True)
     start.add_argument("--checkpoint", type=Path, required=True)
     start.add_argument("--output", type=Path, required=True, help="new directory only")
-    start.add_argument("--gpus", default="auto", help="two idle physical GPU indices or auto")
+    start.add_argument("--gpus", default="auto", help="two physical GPU indices or policy-aware auto")
     start.add_argument("--port", type=int, default=30481)
     start.add_argument("--mem-fraction-static", type=float, default=0.6)
+    start.add_argument('--gpu-admission-mode', choices=('strict', 'shared'), default='strict')
     start.add_argument("--timeout", type=float, default=120)
     send = sub.add_parser("submit")
     send.add_argument("--output", type=Path, required=True)

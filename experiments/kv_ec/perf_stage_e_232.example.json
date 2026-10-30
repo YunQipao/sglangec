@@ -4,6 +4,7 @@
   "rs": [2, 1],
   "resource_interval": 1.0,
   "mem_fraction_static": 0.6,
+  "gpu_admission": {"mode": "strict"},
   "trial_timeout": 3600,
   "protection_timeout": 1800,
   "min_disk_bytes": 21474836480,

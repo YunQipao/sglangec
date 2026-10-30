@@ -233,6 +233,8 @@ def check_exit_success(command, result):
 
 
 def launch(args, capture=False):
+    from .gpu_admission import args_mode
+    args_mode(args)  # reject coordinator mismatch before creating/claiming state
     _require(args.output.is_absolute(), 'cold_absolute_output_required')
     cfg = dict(experiment='gpu-cold-resume-stage-d', cold_mode='capture' if capture else 'restore',
                timeout=args.timeout, decode_steps=16, mode='reference' if capture else 'resume',
@@ -312,6 +314,7 @@ def main():
         p.add_argument('--gpus', default='auto')
         p.add_argument('--port', type=int, default=30485)
         p.add_argument('--mem-fraction-static', type=float, default=0.6)
+        p.add_argument('--gpu-admission-mode', choices=('strict', 'shared'), default='strict')
         p.add_argument('--timeout', type=float, default=120)
         if name == 'capture':
             p.add_argument('--template-checkpoint', type=Path, required=True)

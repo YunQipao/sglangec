@@ -63,6 +63,8 @@ def identity():
     # Include new observation/benchmark files even before they are committed.
     root = Path(__file__).resolve().parent
     benchmark_paths = list(root.glob('perf_*.py'))
+    benchmark_paths += [root / name for name in ('gpu_admission.py', 'gpu_memory_budget.py',
+        'launch_online.py', 'verify_gpu_restore.py', 'verify_gpu_cold_resume.py', 'verify_rs_cold_resume.py')]
     reprefill = root / 'reprefill_server.py'
     if reprefill.exists():
         benchmark_paths.append(reprefill)
@@ -182,6 +184,13 @@ def inference(args):
                     frequency_penalty=0., presence_penalty=0., repetition_penalty=1.)
     args.output.mkdir(parents=True, exist_ok=False)
     meta = identity()
+    if getattr(args, 'model_identity_evidence', None):
+        evidence = read(args.model_identity_evidence)
+        for field in ('gpu_admission_mode', 'mem_fraction_static', 'tp_memory_imbalance_check',
+                      'shared_resource_environment', 'gpu_resources_before_start'):
+            if field in evidence:
+                meta[field] = evidence[field]
+        meta['isolated_performance_eligible'] = False  # standalone request is not admission proof
     model_files = [Path(args.model) / 'config.json', *sorted(Path(args.model).glob('*.safetensors.index.json'))]
     meta.update(scheme=args.scheme, model=args.model, model_files={str(p): digest(p)
         for p in model_files if p.exists()}, input_sha256=digest(args.input_ids), prefix_tokens=256,
@@ -253,13 +262,18 @@ def collect_inference(args):
                 records.append(record)
             if len(records) != args.expected_trials:
                 raise ValueError(f'expected_{args.expected_trials}_requests_got_{len(records)}')
+            selected = metadata.get('gpu_admission_mode', 'unknown')
+            if selected not in ('strict', 'shared', 'unknown'):
+                raise ValueError('GPU_ADMISSION_MODE_INVALID: inference metadata')
             accepted.append(str(root))
             for metric in ('request_ms', 'prefill_ttft_ms'):
-                groups[metric].extend(r[metric] for r in records)
+                # Unknown historical mode is not evidence of isolation.
+                groups[(selected, metric)].extend(r[metric] for r in records)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             rejected.append(dict(root=str(root), reason=f'{type(exc).__name__}: {exc}'))
-    rows = [dict(scheme=args.scheme, metric=metric, **stats(values))
-            for metric, values in sorted(groups.items())]
+    rows = [dict(scheme=args.scheme, metric=metric, gpu_admission_mode=selected,
+                 isolated_performance_eligible=False, **stats(values))
+            for (selected, metric), values in sorted(groups.items())]
     save(args.output, dict(schema='kv-ec-inference-summary-v1', scheme=args.scheme,
         accepted_roots=accepted, rejected=rejected, rows=rows,
         expected_trials=args.expected_trials,
@@ -337,11 +351,14 @@ def gate_stage_e(output):
 
 
 def repeat(args):
+    from .gpu_admission import config_mode, metadata
     from .perf_preflight import preflight, validate_config
     from .perf_stage_e import process_identity, signal_owned
     import signal
     config = read(args.config)
     validate_config(config)
+    selected_mode = config_mode(config)
+    policy = metadata(selected_mode, config.get('mem_fraction_static', .6))
     if Path.cwd().resolve() != Path(config['nodes'][0]['repo']).resolve():
         raise ValueError('repeat must run from configured node0 repo on 232')
     config['resource_interval'] = args.resource_interval or config['resource_interval']
@@ -355,10 +372,13 @@ def repeat(args):
         raise ValueError('paired_ready_reprefill_requires_two_level')
     if recovery_mode == 'reprefill':
         argv = argv + ['--recovery-mode', 'reprefill']
-    save(args.output / 'metadata.json', dict(**identity(), config=config,
-         repeat=args.repeat, argv=argv, scheme=recovery_mode, resource_interval=config['resource_interval']))
+    batch_metadata = dict(**identity(), config=config, **policy,
+         repeat=args.repeat, argv=argv, scheme=recovery_mode, resource_interval=config['resource_interval'])
     save(args.output / 'config.json', config)
     admission = preflight(config, args.output.resolve(), args.repeat)
+    batch_metadata['gpu_resources_before_start'] = [
+        r.get('gpu_resources_before_start', []) if r else [] for r in admission['nodes']]
+    save(args.output / 'metadata.json', batch_metadata)
     save(args.output / 'preflight.json', admission)
     if admission['status'] != 'PASS':
         print(json.dumps(admission), flush=True)
@@ -373,6 +393,7 @@ def repeat(args):
                    KV_EC_PAIRED_READY_REPREFILL='1' if paired_ready_reprefill else '0')
         started = time.monotonic_ns()
         raw = dict(run_id=run_id, returncode=None, status='failed', pass_fail='FAIL',
+                   **policy, functional_correctness_pass=False,
                    commit_sha=admission['nodes'][0]['checks']['inventory']['commit_sha'],
                    scheme=recovery_mode, real_rdma_eligible=False,
                    remote_root=str(Path(config['remote_root']) / run_id))
@@ -383,6 +404,7 @@ def repeat(args):
             save(root / 'preflight.json', current)
             if current['status'] != 'PASS':
                 raise ValueError('trial preflight failed: ' + current['error'])
+            raw['gpu_resources_before_start'] = [r.get('gpu_resources_before_start', []) for r in current['nodes']]
             with (root / 'driver.log').open('x') as log, Sampler(root / 'resources-232.jsonl', config['resource_interval']):
                 proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 owned = process_identity(proc.pid)
@@ -400,6 +422,10 @@ def repeat(args):
                     raise
             if raw['returncode']:
                 raise ValueError('trial command failed; see driver.log')
+            validate_gpu_startups(root, config, recovery_mode)
+            raw['gpu_startup_evidence'] = {
+                name: read(root / name) for name in ('node0-reference/run.json', 'origin-run-233.json',
+                    'target-run.json' if recovery_mode == 'two-level' else 'reprefill-target-run.json')}
             if recovery_mode == 'two-level':
                 validate_trial(root, run_id)
             else:
@@ -414,6 +440,8 @@ def repeat(args):
                    x['benchmark_files'] != inventories[0]['benchmark_files'] for x in inventories):
                 raise ValueError('two host source identities differ')
             raw.update(status='accepted', pass_fail='PASS',
+                functional_correctness_pass=True,
+                isolated_performance_eligible=selected_mode == 'strict',
                 real_rdma_eligible=(recovery_mode == 'two-level'),
                 decode_correctness=True,
                 verdict_sha256=(digest(root / 'stage-e-check.json')
@@ -425,6 +453,19 @@ def repeat(args):
         print(json.dumps(dict(trial=str(root), **raw)), flush=True)
         if raw['status'] != 'accepted':
             raise SystemExit(1)
+
+
+def validate_gpu_startups(root, config, scheme):
+    """Bind all model startup policies to the coordinator configuration."""
+    from .gpu_admission import config_mode, validate_evidence
+    selected = config_mode(config)
+    files = ['node0-reference/run.json', 'origin-run-233.json',
+             'target-run.json' if scheme == 'two-level' else 'reprefill-target-run.json']
+    for name in files:
+        record = read(Path(root) / name)
+        validate_evidence(record, selected)
+        if record.get('mem_fraction_static') != config.get('mem_fraction_static', .6):
+            raise ValueError('GPU_ADMISSION_MODE_MISMATCH: startup memory fraction')
 
 
 def validate_trial(root, run_id):
@@ -482,6 +523,8 @@ def validate_trial(root, run_id):
         if inventories[0][key] != inventories[1][key]:
             raise ValueError('two host source identities differ: ' + key)
     metadata = read(root.parent / 'metadata.json')
+    if 'gpu_admission_mode' in metadata:
+        validate_gpu_startups(root, metadata['config'], 'two-level')
     for key in ('commit_sha', 'tracked_diff_sha256', 'benchmark_files'):
         if inventories[0][key] != metadata[key]:
             raise ValueError('trial_source_changed_since_batch_admission: ' + key)
@@ -489,15 +532,29 @@ def validate_trial(root, run_id):
 
 
 def collect(args):
+    from .gpu_admission import config_mode
     groups, rejected, accepted, missing = defaultdict(list), [], [], []
+    policies, contexts = {}, {}
     seen = set()
     for root in args.roots:
         metadata = read(root / 'metadata.json')
         # No pooling configurations or schemes. Each group has its own source.
-        key = hashlib.sha256(json.dumps(dict(config=metadata.get('config', metadata.get('server_info',
+        key = hashlib.sha256(json.dumps(dict(gpu_admission_mode=metadata.get('gpu_admission_mode', 'legacy'),
+            config=metadata.get('config', metadata.get('server_info',
             metadata.get('runtime_identity', {}))), source={k: metadata.get(k) for k in
             ('commit_sha', 'tracked_diff_sha256', 'benchmark_files')}), sort_keys=True).encode()).hexdigest()
         scheme = metadata['scheme']
+        selected_mode = (config_mode(metadata['config']) if 'config' in metadata else
+                         metadata.get('gpu_admission_mode', 'unknown'))
+        if metadata.get('gpu_admission_mode', selected_mode) != selected_mode:
+            raise ValueError('GPU_ADMISSION_MODE_MISMATCH: batch metadata')
+        policies[key] = (selected_mode, 'gpu_admission_mode' in metadata and selected_mode == 'strict'
+                         and scheme in ('two-level', 'reprefill') and 'config' in metadata)
+        contexts[key] = dict(gpu_admission_mode=selected_mode,
+            mem_fraction_static=metadata.get('config', {}).get('mem_fraction_static', metadata.get('mem_fraction_static')),
+            tp_memory_imbalance_check=metadata.get('tp_memory_imbalance_check'),
+            shared_resource_environment=selected_mode == 'shared',
+            gpu_resources_before_start=metadata.get('gpu_resources_before_start', []))
         for path in sorted(root.glob('request-*.json')):
             record = read(path)
             if record['warmup']:
@@ -525,6 +582,12 @@ def collect(args):
             path = directory / 'trial.json'
             try:
                 trial = read(path)
+                if 'gpu_admission_mode' in metadata:
+                    if (trial.get('gpu_admission_mode') != selected_mode or
+                            trial.get('functional_correctness_pass') is not True or
+                            trial.get('isolated_performance_eligible') is not (selected_mode == 'strict')):
+                        raise ValueError('GPU_ADMISSION_MODE_MISMATCH: trial labels')
+                    validate_gpu_startups(directory, metadata['config'], scheme)
                 if (trial['status'] != 'accepted' or trial.get('pass_fail') != 'PASS' or
                         (scheme == 'two-level' and trial['real_rdma_eligible'] is not True)):
                     raise ValueError(trial.get('failure_reason', 'not an accepted real trial'))
@@ -572,6 +635,7 @@ def collect(args):
                     raise ValueError('missing required performance observations: ' + ','.join(absent))
                 if scheme == 'reprefill':
                     accepted.append(str(directory))
+                    contexts[key]['functional_correctness_pass'] = True
                     seen.add(fingerprint)
                     for name, value in per_trial.items():
                         groups[(scheme, key, name)].append(value)
@@ -587,12 +651,22 @@ def collect(args):
                 for name, value in per_trial.items():
                     groups[(scheme, key, name)].append(value)
                 accepted.append(str(directory))
+                contexts[key]['functional_correctness_pass'] = True
                 seen.add(fingerprint)
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 rejected.append(dict(trial=str(directory), reason=f'{type(exc).__name__}: {exc}'))
-    rows = [dict(scheme=scheme, config_sha256=key, metric=metric, **stats(values))
+    rows = [dict(scheme=scheme, config_sha256=key, metric=metric,
+                 gpu_admission_mode=policies[key][0],
+                 mem_fraction_static=contexts[key]['mem_fraction_static'],
+                 tp_memory_imbalance_check=contexts[key]['tp_memory_imbalance_check'],
+                 shared_resource_environment=contexts[key]['shared_resource_environment'],
+                 functional_correctness_pass=contexts[key].get('functional_correctness_pass'),
+                 isolated_performance_eligible=policies[key][1], **stats(values))
             for (scheme, key, metric), values in sorted(groups.items())]
     save(args.output, dict(schema='kv-ec-perf-summary-v2', rows=rows, rejected=rejected,
+        gpu_admission_modes=sorted({p[0] for p in policies.values()}),
+        cross_mode_pooling=False,
+        gpu_admission_context=contexts,
         accepted_trials=accepted, missing_metrics=missing,
         quantile_policy='P50 n>=5; P95 n>=20; P99 n>=100; linear interpolation; sample stddev',
         overhead_ratio=None,

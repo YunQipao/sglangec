@@ -20,9 +20,208 @@ from . import perf_benchmark as bench
 from . import perf_preflight as pf
 from . import perf_stage_e as stage
 from . import reprefill_server
+from . import gpu_admission as admission_policy
+
+
+def mock_gpu_policy(selected='strict', fraction=.6):
+    """CPU fixture, not real GPU evidence."""
+    return admission_policy.metadata(selected, fraction, [dict(
+        gpu_index=str(i), gpu_uuid=f'GPU-MOCK-{i}', total_memory_bytes=100,
+        free_memory_bytes=90, required_estimated_memory_bytes=80,
+        other_tasks=[], remaining_safety_margin_bytes=10) for i in range(2)])
 
 
 EXAMPLE = Path(__file__).with_name('perf_stage_e_232.example.json')
+
+
+class GPUAdmissionModeTests(unittest.TestCase):
+    def model(self, directory):
+        from .test_gpu_memory_budget import GPUMemoryBudgetTests
+        return str(GPUMemoryBudgetTests().model(directory))
+
+    def rows(self):
+        from .gpu_memory_budget import GIB
+        return {str(i): dict(index=str(i), uuid=f'GPU-{i}', total_bytes=total * GIB,
+                            free_bytes=free * GIB)
+                for i, (total, free) in enumerate(((80, 64), (64, 50), (80, 60)))}
+
+    def check(self, model, selected, rows=None, gpus='0,1', fraction=.35):
+        from . import launch_online
+        args = NS(gpus=gpus, model=model, tp=2, gpu_admission_mode=selected,
+                  mem_fraction_static=fraction)
+        tasks = {'GPU-0': [dict(pid='987', name='other-user-task')]}
+        with patch.object(launch_online, 'read_gpu_memory', return_value=rows or self.rows()), \
+                patch.object(launch_online, 'read_gpu_tasks', return_value=tasks):
+            return args, launch_online.check_gpu_resources(args)
+
+    def test_default_and_invalid_config(self):
+        cfg = bench.read(EXAMPLE)
+        cfg.pop('gpu_admission')
+        pf.validate_config(cfg)
+        self.assertEqual(admission_policy.config_mode(cfg), 'strict')
+        for value in (None, [], 'shared', {}, {'mode': None}, {'mode': []}, {'mode': 'debug'},
+                      {'mode': 'shared', 'extra': True}):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'GPU_ADMISSION'):
+                pf.validate_config(dict(cfg, gpu_admission=value))
+        for value in (True, None, '0.35', [.35], float('nan')):
+            with self.subTest(fraction=value), self.assertRaises(ValueError):
+                pf.validate_config(dict(cfg, mem_fraction_static=value))
+        cfg['nodes'][1]['gpu_admission_mode'] = 'shared'
+        with self.assertRaisesRegex(ValueError, 'MISMATCH'):
+            pf.validate_config(cfg)
+
+    def test_strict_busy_rejected_shared_busy_and_imbalance_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = self.model(tmp)
+            with self.assertRaisesRegex(ValueError, 'busy'):
+                self.check(model, 'strict')
+            _, resources = self.check(model, 'shared')
+            self.assertEqual(resources[0]['other_tasks'][0]['pid'], '987')
+            self.assertNotEqual(resources[0]['total_memory_bytes'], resources[1]['total_memory_bytes'])
+            self.assertNotEqual(resources[0]['free_memory_bytes'], resources[1]['free_memory_bytes'])
+            self.assertTrue(all(r['remaining_safety_margin_bytes'] > 0 for r in resources))
+
+    def test_one_insufficient_gpu_never_averaged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = self.rows()
+            rows['1']['free_bytes'] = 1
+            with self.assertRaisesRegex(ValueError, 'GPU index=1'):
+                self.check(self.model(tmp), 'shared', rows)
+
+    def test_actual_min_free_static_pool_must_fit_weights(self):
+        from .gpu_memory_budget import GIB
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = self.rows()
+            for row in rows.values():
+                row.update(total_bytes=24 * GIB, free_bytes=20 * GIB)
+            with self.assertRaisesRegex(ValueError, 'GPU_STATIC_KV_POOL_INSUFFICIENT'):
+                self.check(self.model(tmp), 'shared', rows, fraction=.4)
+
+    def test_missing_or_invalid_memory_and_model_rejected(self):
+        from .gpu_memory_budget import parse_gpu_rows
+        for text in ('0, GPU-a, 0, 0', '0, GPU-a, 24, 25', '0, GPU-a, N/A, 10'):
+            with self.assertRaises(ValueError):
+                parse_gpu_rows(text)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises((FileNotFoundError, ValueError)):
+                self.check(tmp, 'shared')
+
+    def test_auto_maximizes_minimum_margin_and_strict_uses_idle_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = self.model(tmp)
+            # GPU0 has the largest margin, GPU2 is next. GPU1 is weakest.
+            args, resources = self.check(model, 'shared', gpus='auto')
+            self.assertEqual(set(args.gpus.split(',')), {'0', '2'})
+            args, _ = self.check(model, 'strict', gpus='auto')
+            self.assertEqual(set(args.gpus.split(',')), {'1', '2'})
+            self.assertEqual(len(resources), 2)
+
+    def test_host_local_and_SSH_override_parent_without_mutating_it(self):
+        for selected in ('strict', 'shared'):
+            with patch.dict(os.environ, SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK='unexpected'):
+                for node in (0, 1):
+                    cfg = bench.read(EXAMPLE)['nodes'][node]
+                    host = stage.Host(cfg, '/tmp/cpu-mode', 'cpu-mode', node, selected)
+                    command = host.argv('module')
+                    self.assertIn('SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK=' +
+                                  ('1' if selected == 'strict' else '0'), ' '.join(command))
+                    self.assertIn('KV_EC_GPU_ADMISSION_MODE=' + selected, ' '.join(command))
+                self.assertEqual(os.environ['SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK'], 'unexpected')
+
+    def test_coordinator_launcher_and_startup_mismatches_reject(self):
+        with patch.dict(os.environ, KV_EC_GPU_ADMISSION_MODE='shared'):
+            with self.assertRaisesRegex(ValueError, 'MISMATCH'):
+                admission_policy.args_mode(NS(gpu_admission_mode='strict'))
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = dict(gpu_admission={'mode': 'shared'}, mem_fraction_static=.6)
+            for name in ('node0-reference/run.json', 'origin-run-233.json', 'target-run.json'):
+                bench.save(Path(tmp) / name, mock_gpu_policy('shared'))
+            bench.validate_gpu_startups(tmp, cfg, 'two-level')
+            (Path(tmp) / 'origin-run-233.json').write_text(json.dumps(mock_gpu_policy('strict')))
+            with self.assertRaisesRegex(ValueError, 'MISMATCH'):
+                bench.validate_gpu_startups(tmp, cfg, 'two-level')
+
+    def test_reprefill_rechecks_before_exec_and_sets_child_only_environment(self):
+        for selected in ('strict', 'shared'):
+            with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
+                args = NS(output=Path(tmp) / 'new', gpus='0,1', model='/mock', tp=2,
+                          mem_fraction_static=.35, gpu_admission_mode=selected,
+                          port=30985, prefill_chunk_size=-1)
+                with patch.object(reprefill_server, 'check_gpu_resources', return_value=mock_gpu_policy(selected)['gpu_resources_before_start']) as check, \
+                        patch.object(reprefill_server, 'source_identity', return_value={}), \
+                        patch.object(reprefill_server, 'check_port'), \
+                        patch.object(reprefill_server.os, 'execve') as execute:
+                    reprefill_server.launch(args)
+                self.assertEqual(check.call_count, 2)
+                env = execute.call_args.args[2]
+                self.assertEqual(env['SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK'], '1' if selected == 'strict' else '0')
+                self.assertNotIn('SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK', os.environ)
+                evidence = bench.read(args.output / 'run.json')
+                self.assertEqual(evidence['gpu_admission_mode'], selected)
+                self.assertFalse(evidence['isolated_performance_eligible'])
+
+    def test_resource_change_during_hashing_refuses_before_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = NS(output=Path(tmp) / 'new', gpu_admission_mode='shared', port=30985, model='/mock')
+            with patch.object(reprefill_server, 'check_gpu_resources', side_effect=[[], ValueError('INSUFFICIENT_GPU_MEMORY: changed')]), \
+                    patch.object(reprefill_server, 'source_identity', return_value={}), \
+                    patch.object(reprefill_server, 'check_port'), \
+                    patch.object(reprefill_server.os, 'execve') as execute:
+                with self.assertRaisesRegex(ValueError, 'changed'):
+                    reprefill_server.launch(args)
+            execute.assert_not_called()
+            self.assertFalse(args.output.exists())
+
+    def test_restore_launch_records_mode_and_overrides_only_child_environment(self):
+        from . import verify_gpu_restore as restore
+        from . import launch_online
+        for selected in ('strict', 'shared'):
+            with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
+                checkpoint = Path(tmp) / 'checkpoint'
+                checkpoint.write_bytes(b'CPU_MOCK_NOT_REAL_KV')
+                args = NS(checkpoint=checkpoint, output=Path(tmp) / 'new', gpus='0,1',
+                    model='/mock', mem_fraction_static=.6, port=30985, timeout=120,
+                    gpu_admission_mode=selected)
+                with patch.object(restore, 'validate_checkpoint', return_value={'ranks': [{'model_sha256': 'mock'}]}), \
+                        patch('experiments.kv_ec.debug_capture.source_identity', return_value={'model_sha256': 'mock'}), \
+                        patch.object(launch_online, 'check_gpu_resources', return_value=mock_gpu_policy(selected)['gpu_resources_before_start']) as check, \
+                        patch('experiments.kv_ec.launch_debug.check_port'), \
+                        patch.object(restore.os, 'execve') as execute:
+                    restore.launch(args)
+                self.assertEqual(check.call_count, 2)
+                self.assertEqual(execute.call_args.args[2]['KV_EC_GPU_ADMISSION_MODE'], selected)
+                self.assertNotIn('KV_EC_GPU_ADMISSION_MODE', os.environ)
+                admission_policy.validate_evidence(bench.read(args.output / 'run.json'), selected)
+
+    def test_preflight_rejects_cross_node_mode_mismatch_before_RS(self):
+        cfg = bench.read(EXAMPLE)
+        reports = []
+        for selected in ('strict', 'shared'):
+            reports.append(dict(status='PASS', checks={}, **mock_gpu_policy(selected)))
+        def run(argv, **kwargs):
+            i = int(argv[argv.index('--node') + 1])
+            return NS(returncode=0, stdout='KV_EC_PREFLIGHT ' + json.dumps(reports[i]), stderr='')
+        with patch.object(pf.subprocess, 'run', side_effect=run), \
+                patch.object(stage.Host, 'argv', lambda host, module, *args: [module, *map(str, args)]), \
+                patch('experiments.kv_ec.remote_rs_client.RemoteRSClient') as client:
+            result = pf.preflight(cfg, '/tmp/not-created-by-test', 1)
+        self.assertEqual(result['status'], 'FAIL')
+        self.assertIn('GPU_ADMISSION_MODE_MISMATCH', result['error'])
+        client.assert_not_called()
+
+    def test_simulated_OOM_preserves_explicit_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bench.save(root / 'trial-owner.json', dict(run_id='cpu-oom'))
+            (root / 'lease').touch()
+            env = dict(os.environ, KV_EC_PERF_RUN_ID='cpu-oom')
+            result = subprocess.run([sys.executable, '-m', stage.SELF, 'service',
+                '--root', str(root / 'origin'), '--', sys.executable, '-c',
+                'import sys; print("CUDA out of memory", flush=True); sys.exit(1)'],
+                env=env, capture_output=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('GPU_RUNTIME_OOM', bench.read(root / 'origin/exit.json')['gpu_failure_reason'])
+            self.assertFalse((root / 'acceptance.json').exists())
 
 
 class HostEnvironmentTests(unittest.TestCase):
@@ -35,7 +234,8 @@ class HostEnvironmentTests(unittest.TestCase):
             (repo / 'env_probe.py').write_text(
                 'import json, os, subprocess, sys\n'
                 'keys = ["PATH", "PYTHONPATH", "KV_EC_PERF_DIR", "KV_EC_PERF_RUN_ID", "KV_EC_PERF_ROLE", '
-                '"TMPDIR", "TMP", "TEMP", '
+                '"TMPDIR", "TMP", "TEMP", "KV_EC_GPU_ADMISSION_MODE", '
+                '"SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK", "SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK", '
                 '"CUDA_HOME", "CUDA_PATH", "CUDACXX", "NVCC", "LIBRARY_PATH", "LD_LIBRARY_PATH", "CPATH", "CPLUS_INCLUDE_PATH"]\n'
                 'env = {k: os.environ[k] for k in keys}\n'
                 'child = json.loads(subprocess.check_output([sys.executable, "-c", '
@@ -114,7 +314,7 @@ class HostEnvironmentTests(unittest.TestCase):
     def test_preflight_rejects_missing_ninja_before_resource_checks(self):
         cfg = bench.read(EXAMPLE)
         node = cfg['nodes'][1]
-        with patch.dict(os.environ, PATH=node['conda_prefix'] + '/bin:/usr/bin:/bin'), \
+        with patch.dict(os.environ, dict(admission_policy.environment('strict'), PATH=node['conda_prefix'] + '/bin:/usr/bin:/bin')), \
                 patch.object(pf.sys, 'prefix', node['conda_prefix']), \
                 patch.object(pf, 'identity', return_value={}), \
                 patch.object(pf.shutil, 'which', return_value=None), \
@@ -239,7 +439,8 @@ class CudaToolchainTests(unittest.TestCase):
     def test_preflight_toolchain_failure_rejects_before_resource_admission(self):
         cfg = bench.read(EXAMPLE)
         node = cfg['nodes'][1]
-        with patch.object(pf.sys, 'prefix', node['conda_prefix']), \
+        with patch.dict(os.environ, admission_policy.environment('strict')), \
+                patch.object(pf.sys, 'prefix', node['conda_prefix']), \
                 patch.object(pf, 'identity', return_value={}), \
                 patch.object(pf, 'check_ninja', return_value={}), \
                 patch.object(pf, 'check_cuda_toolchain', side_effect=ValueError('CUDA_RUNTIME_NOT_FOUND')) as check, \
@@ -493,6 +694,7 @@ class AdmissionTests(unittest.TestCase):
         reports = self.reports()
         for i, report in enumerate(reports):
             report.update(status='PASS')
+            report.update(mock_gpu_policy())
             report['checks'].update(inventory=dict(commit_sha='commit', host=f'h{i}', boot_id=f'b{i}',
                 tracked_diff_sha256='diff', benchmark_files={}), model_identity=dict(model_sha256='model'),
                 disk_free_bytes=100 * 1024**3)
@@ -561,13 +763,14 @@ class BindingTests(unittest.TestCase):
 class CoordinatorMockTests(unittest.TestCase):
     """Run the actual trial() ordering with mock Host/SSH/SCP/processes."""
 
-    def run_trial(self, fail=None):
+    def run_trial(self, fail=None, selected='strict', recovery='two-level'):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             local = base / 'trial-mock-only'
             local.mkdir()
             cfg = bench.read(EXAMPLE)
             cfg['remote_root'] = str(base / 'remote')
+            cfg['gpu_admission'] = {'mode': selected}
             config = base / 'config.json'
             bench.save(config, cfg)
             processes, calls = {}, []
@@ -599,6 +802,10 @@ class CoordinatorMockTests(unittest.TestCase):
                     bench.save(option(args, 'output'), dict(send_stats={}, archive_bytes=100))
                 elif action == 'check':
                     bench.save(option(args, 'output') / 'check.json', dict(schema='MOCK_ONLY', real_rdma=False))
+                elif action == 'inference':
+                    bench.save(option(args, 'output') / 'request-000.json', dict(output_token_ids=[7],
+                        ready_to_first_token_ms=1, ready_to_decode_complete_ms=2,
+                        end_ns=time.monotonic_ns(), request_ms=1, prefill_ttft_ms=1))
                 elif action == 'bundle-json':
                     with zipfile.ZipFile(option(args, 'output'), 'x'):
                         pass
@@ -615,11 +822,17 @@ class CoordinatorMockTests(unittest.TestCase):
                     tail = args[args.index('--') + 1:]
                     if self.name == 'origin':
                         bench.save(option(tail, 'bundle') / 'request_state.json', dict(restore_id='mock-restore'))
-                        bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-origin'))
+                        self_outer.assertEqual(tail[tail.index('--gpu-admission-mode') + 1], selected)
+                        bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-origin', **mock_gpu_policy(selected)))
+                        bench.save(option(tail, 'output') / 'rank_0.json', dict(output_token_ids=[7],
+                            runtime_identity=dict(model_sha256='mock-model')))
+                        bench.save(option(tail, 'output') / 'submitted_input_ids.json', [1] * 256)
                     elif self.name == 'target':
-                        self_outer.assertTrue(option(tail, 'ledger').is_dir())
-                        self_outer.assertEqual(list(option(tail, 'ledger').iterdir()), [])
-                        bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-target'))
+                        if recovery == 'two-level':
+                            self_outer.assertTrue(option(tail, 'ledger').is_dir())
+                            self_outer.assertEqual(list(option(tail, 'ledger').iterdir()), [])
+                        self_outer.assertEqual(tail[tail.index('--gpu-admission-mode') + 1], selected)
+                        bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-target', **mock_gpu_policy(selected)))
                     elif self.name == 'receiver':
                         bench.save(option(tail, 'output') / 'delivery.json', dict(receive_stats={}, archive_bytes=100))
                 def poll(self):
@@ -634,12 +847,15 @@ class CoordinatorMockTests(unittest.TestCase):
                 if fail == 'scp' and Path(remote).name == 'check.json':
                     raise RuntimeError('MOCK_FAILURE_scp')
                 shutil.copy2(local, remote) if upload else shutil.copy2(remote, local)
-            env = dict(KV_EC_BENCH_CONFIG=str(config), KV_EC_BENCH_TRIAL=str(local), KV_EC_PERF_RUN_ID=local.name)
+            env = dict(KV_EC_BENCH_CONFIG=str(config), KV_EC_BENCH_TRIAL=str(local),
+                       KV_EC_PERF_RUN_ID=local.name, KV_EC_PERF_RECOVERY_MODE=recovery)
             with patch.dict(os.environ, env), patch.object(stage.Host, 'run', run), \
                     patch.object(stage.Host, 'argv', argv), patch.object(stage, 'scp', scp), \
                     patch.object(stage.subprocess, 'Popen', Proc), patch.object(stage.signal, 'signal'), \
+                    patch.object(stage, 'identity', return_value=dict(commit_sha='mock-only')), \
                     patch.object(stage, 'target_binding', return_value=dict(target_run_id='mock-target')), \
-                    patch.object(stage, 'native_metrics'), patch('experiments.kv_ec.rs_recovery_source.native_stats'):
+                    patch.object(stage, 'native_metrics'), patch.object(stage, 'local_ssh_tunnel'), \
+                    patch.object(pf, 'free_ports'), patch('experiments.kv_ec.rs_recovery_source.native_stats'):
                 if fail:
                     with self.assertRaisesRegex(RuntimeError, 'MOCK_FAILURE'):
                         stage.trial()
@@ -647,7 +863,10 @@ class CoordinatorMockTests(unittest.TestCase):
                     self.assertFalse((local / 'acceptance.json').exists())
                 else:
                     stage.trial()
-                    self.assertEqual(bench.read(local / 'acceptance.json')['run_id'], local.name)
+                    if recovery == 'two-level':
+                        self.assertEqual(bench.read(local / 'acceptance.json')['run_id'], local.name)
+                    else:
+                        self.assertTrue(bench.read(local / 'reprefill.json')['pass_reprefill'])
                 self.assertTrue((local / 'json-evidence-233.zip').exists())
                 self.assertTrue(all(p.done for p in processes.values()))
                 # No RS process launch/stop action exists in the coordinator.
@@ -663,6 +882,12 @@ class CoordinatorMockTests(unittest.TestCase):
         for stage_name in ('wait-file', 'export', 'recover', 'send-source', 'check-source', 'launch', 'check', 'scp'):
             with self.subTest(stage=stage_name):
                 self.run_trial(stage_name)
+
+    def test_shared_coordinator_propagates_to_origins_and_restore(self):
+        self.run_trial(selected='shared')
+
+    def test_shared_coordinator_propagates_to_cold_reprefill(self):
+        self.run_trial(selected='shared', recovery='reprefill')
 
 
 class ProcessSafetyTests(unittest.TestCase):
@@ -725,11 +950,12 @@ class ProcessSafetyTests(unittest.TestCase):
 
 
 class RepeatMockTests(unittest.TestCase):
-    def exercise(self, count=1, driver_code=0, gate_error=False, timeout=False):
+    def exercise(self, count=1, driver_code=0, gate_error=False, timeout=False, selected='strict'):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             cfg = bench.read(EXAMPLE)
             cfg['nodes'][0]['repo'] = str(Path.cwd())
+            cfg['gpu_admission'] = {'mode': selected}
             bench.save(base / 'config.json', cfg)
             source = dict(commit_sha='commit', tracked_diff_sha256='diff', benchmark_files={})
             admission = dict(status='PASS', nodes=[dict(checks=dict(inventory=source))] * 2,
@@ -741,6 +967,8 @@ class RepeatMockTests(unittest.TestCase):
                     trial = Path(env['KV_EC_BENCH_TRIAL'])
                     for node in (232, 233):
                         bench.save(trial / f'inventory-{node}.json', dict(**source, host=f'host{node}'))
+                    for name in ('node0-reference/run.json', 'origin-run-233.json', 'target-run.json'):
+                        bench.save(trial / name, mock_gpu_policy(selected))
                     bench.save(trial / 'stage-e-check.json', dict(schema='MOCK_ONLY', real_rdma=False))
                 def wait(self, **kwargs):
                     if timeout and not self.waited:
@@ -778,6 +1006,14 @@ class RepeatMockTests(unittest.TestCase):
         records = self.exercise(gate_error=True)
         self.assertEqual(records[0]['pass_fail'], 'FAIL')
 
+    def test_shared_functional_pass_not_isolated_performance(self):
+        records = self.exercise(selected='shared')
+        self.assertTrue(records[0]['functional_correctness_pass'])
+        self.assertFalse(records[0]['isolated_performance_eligible'])
+        self.assertEqual(records[0]['gpu_admission_mode'], 'shared')
+        failed = self.exercise(selected='shared', driver_code=1)
+        self.assertFalse(failed[0]['functional_correctness_pass'])
+
     def test_driver_failure_stops_batch_and_preserves_trial(self):
         records = self.exercise(count=5, driver_code=1)
         self.assertEqual(records[0]['status'], 'failed')
@@ -788,6 +1024,43 @@ class RepeatMockTests(unittest.TestCase):
 
 
 class CollectionTests(unittest.TestCase):
+    def test_shared_and_strict_summaries_never_pool_and_false_eligibility_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roots = []
+            for selected in ('strict', 'shared'):
+                root = Path(tmp) / selected
+                roots.append(root)
+                cfg = dict(gpu_admission={'mode': selected}, mem_fraction_static=.6)
+                bench.save(root / 'metadata.json', dict(scheme='reprefill', config=cfg,
+                    gpu_admission_mode=selected))
+                directory = root / ('trial-' + selected)
+                control = dict(pass_reprefill=True, output_token_ids_match=True)
+                for metric in ('fault_boundary_to_ready_ms', 'ready_to_first_token_ms',
+                               'ready_to_decode_complete_ms', 'fault_boundary_to_decode_complete_ms',
+                               'client_request_ms', 'client_prefill_ttft_ms'):
+                    control[metric] = 1 if selected == 'strict' else 100
+                bench.save(directory / 'reprefill.json', control)
+                bench.save(directory / 'trial.json', dict(status='accepted', pass_fail='PASS',
+                    functional_correctness_pass=True, isolated_performance_eligible=selected == 'strict',
+                    gpu_admission_mode=selected, run_id=directory.name,
+                    verdict_sha256=bench.digest(directory / 'reprefill.json')))
+                for name in ('node0-reference/run.json', 'origin-run-233.json', 'reprefill-target-run.json'):
+                    bench.save(directory / name, mock_gpu_policy(selected))
+            output = Path(tmp) / 'summary.json'
+            bench.collect(NS(roots=roots, output=output))
+            report = bench.read(output)
+            self.assertEqual(len(report['accepted_trials']), 2)
+            self.assertEqual(report['gpu_admission_modes'], ['shared', 'strict'])
+            self.assertTrue(all(r['n'] == 1 for r in report['rows']))
+            self.assertTrue(all(not r['isolated_performance_eligible'] for r in report['rows'] if r['gpu_admission_mode'] == 'shared'))
+            bad = roots[1] / 'trial-shared/trial.json'
+            value = bench.read(bad)
+            value['isolated_performance_eligible'] = True
+            bad.write_text(json.dumps(value))
+            other = Path(tmp) / 'summary-rejected.json'
+            bench.collect(NS(roots=roots, output=other))
+            self.assertEqual(len(bench.read(other)['accepted_trials']), 1)
+
     def test_no_partial_statistics_or_duplicate_trials(self):
         # Acceptance itself is mocked here: test collector transactionality,
         # not GPU/RDMA authenticity. Temporary artifacts are discarded.

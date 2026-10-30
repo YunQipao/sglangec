@@ -2,16 +2,15 @@
 
 import argparse
 import hashlib
-import itertools
 import json
 import os
 from pathlib import Path
 import sys
 
 from .debug_capture import source_identity
-from .gpu_memory_budget import read_gpu_memory, read_gpu_tasks
 from .launch_online import check_gpu_resources, server_argv
 from .launch_debug import check_port
+from .gpu_admission import args_mode, environment, metadata
 
 
 def read_ids(path):
@@ -46,32 +45,18 @@ def validate_generation(result):
 def launch(args):
     if not args.output.is_absolute():
         raise ValueError('absolute_output_required')
-    args.allow_shared_gpu_debug = False
-    if args.gpus == 'auto':
-        rows, tasks = read_gpu_memory(), read_gpu_tasks()
-        idle = sorted((g for g in rows if not tasks.get(rows[g]['uuid'])),
-                      key=lambda g: rows[g]['free_bytes'], reverse=True)
-        chosen = None
-        for pair in itertools.combinations(idle, 2):
-            args.gpus = ','.join(pair)
-            try:
-                check_gpu_resources(args)
-                chosen = args.gpus
-                break
-            except ValueError:
-                continue
-        if chosen is None:
-            raise ValueError('two_idle_gpus_with_sufficient_memory_required')
-    else:
-        check_gpu_resources(args)
+    selected_mode = args_mode(args)
+    check_gpu_resources(args)
     check_port(args.port)
     identity = source_identity(args.model)
+    resources = check_gpu_resources(args)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     cfg = dict(schema='kv-ec-reprefill-target-v1', run_id=output.name,
                model=args.model, model_identity=identity, gpus=args.gpus,
                tp_size=2, prefix_tokens=256, generation_tokens=17,
                sampling=sampling(), argv=server_argv(args))
+    cfg.update(metadata(selected_mode, args.mem_fraction_static, resources))
     (output / 'run.json').write_text(json.dumps(cfg, indent=2, sort_keys=True))
     os.environ.update(CUDA_VISIBLE_DEVICES=args.gpus, CUDA_DEVICE_ORDER='PCI_BUS_ID',
         SGLANG_KV_EC_ONLINE='0', SGLANG_KV_EC_DEBUG='0',
@@ -79,7 +64,7 @@ def launch(args):
         SGLANG_KV_EC_GPU_RESUME='0', SGLANG_KV_EC_GPU_COLD_RESUME='0',
         SGLANG_KV_EC_RS_RESUME='0', SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION='0',
         SGLANG_KV_EC_PREPARED_IDENTITY=json.dumps(identity))
-    os.execv(sys.executable, server_argv(args))
+    os.execve(sys.executable, server_argv(args), dict(os.environ, **environment(selected_mode)))
 
 
 def main():
@@ -91,6 +76,7 @@ def main():
     q.add_argument('--gpus', default='auto')
     q.add_argument('--port', type=int, required=True)
     q.add_argument('--mem-fraction-static', type=float, default=.6)
+    q.add_argument('--gpu-admission-mode', choices=('strict', 'shared'), default='strict')
     q.add_argument('--prefill-chunk-size', type=int, default=-1)
     q.add_argument('--tp', type=int, choices=(2,), default=2)
     args = parser.parse_args()

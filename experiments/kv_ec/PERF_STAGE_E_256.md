@@ -1,5 +1,9 @@
 # Stage E 256-token TP2 性能基线
 
+GPU 准入默认 strict。共享 GPU 的配置、预算规则、两机验证、单轮和五轮命令见
+[GPU_ADMISSION_STAGE_E.md](GPU_ADMISSION_STAGE_E.md)。shared 可得到真实功能 PASS，
+但不能作为独占 GPU 的正式性能样本，汇总不会跨模式合并。
+
 本方案只接受两台物理机上的真实 Stage E PASS。默认观测关闭；启用时只
 设置 `KV_EC_PERF_DIR`、`KV_EC_PERF_RUN_ID` 和 `KV_EC_PERF_ROLE`，不会改变
 Scheduler、GPU KV 写回、RS 或 RDMA 数据通路。每个进程使用自己的

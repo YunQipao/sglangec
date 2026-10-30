@@ -1,6 +1,7 @@
 """Read-only per-GPU memory admission for explicitly shared debug runs."""
 
 import json
+import math
 from pathlib import Path
 import subprocess
 
@@ -15,6 +16,9 @@ def parse_gpu_rows(text):
         if len(fields) != 4:
             raise ValueError("invalid_nvidia_smi_memory_row")
         index, uuid, total, free = fields
+        if (not index.isdigit() or not uuid.startswith('GPU-') or
+                int(total) <= 0 or not 0 <= int(free) <= int(total) or index in rows):
+            raise ValueError('GPU_MEMORY_INFORMATION_INVALID: ' + line)
         rows[index] = dict(index=index, uuid=uuid, total_bytes=int(total) * MIB,
                            free_bytes=int(free) * MIB)
     return rows
@@ -33,9 +37,12 @@ def read_gpu_tasks():
         "--format=csv,noheader"], text=True, stderr=subprocess.STDOUT)
     tasks = {}
     for line in result.splitlines():
+        if not line.strip():
+            continue
         fields = [part.strip() for part in line.split(",", 2)]
-        if len(fields) == 3:
-            tasks.setdefault(fields[0], []).append(dict(pid=fields[1], name=fields[2]))
+        if len(fields) != 3 or not fields[0].startswith('GPU-') or not fields[1].isdigit():
+            raise ValueError('GPU_PROCESS_INFORMATION_INVALID: ' + line)
+        tasks.setdefault(fields[0], []).append(dict(pid=fields[1], name=fields[2]))
     return tasks
 
 
@@ -57,7 +64,8 @@ def model_weight_bytes(model):
 
 
 def estimate_required_bytes(model, tp, context_length, total_bytes, mem_fraction_static):
-    if not (1 <= tp <= 4 and context_length >= 1
+    if not (1 <= tp <= 4 and context_length >= 1 and total_bytes > 0
+            and type(mem_fraction_static) in (int, float) and math.isfinite(mem_fraction_static)
             and 0 < mem_fraction_static <= 1):
         raise ValueError("invalid_gpu_memory_budget_inputs")
     config_path = Path(model) / "config.json"
@@ -69,6 +77,8 @@ def estimate_required_bytes(model, tp, context_length, total_bytes, mem_fraction
     # larger than their count; the supported Qwen3-8B TP4 path shards them.
     kv_bytes = layers * 2 * context_length * kv_heads * head_dim * 2
     weight_bytes = model_weight_bytes(model)
+    if min(layers, kv_heads, head_dim, weight_bytes) <= 0:
+        raise ValueError('GPU_MEMORY_BUDGET_INPUT_INVALID')
     weight_per_rank = (weight_bytes + tp - 1) // tp
     # Explicit headroom: weight loading/fragmentation (+20%), CUDA context,
     # batch-1 prefill/decode temporaries, plus one protected chunk and recovery
@@ -82,6 +92,7 @@ def estimate_required_bytes(model, tp, context_length, total_bytes, mem_fraction
     estimated = max(estimated, requested_static + fixed_runtime)
     return estimated, dict(
         model_weights_per_rank_bytes=weight_per_rank,
+        model_weights_with_margin_bytes=weight_with_margin,
         cuda_context_reserve_bytes=2 * GIB,
         compute_temporary_reserve_bytes=2 * GIB,
         ec_snapshot_restore_reserve_bytes=512 * 1024 * 1024,
@@ -92,7 +103,8 @@ def estimate_required_bytes(model, tp, context_length, total_bytes, mem_fraction
 
 
 def check_shared_gpu_budget(gpus, model, tp, context_length, mem_fraction_static,
-                            *, memory_rows=None, tasks_by_uuid=None, report=None):
+                            *, memory_rows=None, tasks_by_uuid=None, report=None,
+                            actual_free_static=False):
     """Inspect physical nvidia-smi indices; optionally report before admission.
 
     ``report`` receives all selected GPUs, including their estimates, before
@@ -105,6 +117,9 @@ def check_shared_gpu_budget(gpus, model, tp, context_length, mem_fraction_static
         row = memory_rows.get(str(index))
         if row is None:
             raise ValueError(f"INSUFFICIENT_GPU_MEMORY GPU index={index} reason=GPU_NOT_FOUND")
+        if (type(row['total_bytes']) is not int or type(row['free_bytes']) is not int or
+                not 0 <= row['free_bytes'] <= row['total_bytes'] or row['total_bytes'] <= 0):
+            raise ValueError('GPU_MEMORY_INFORMATION_INVALID: ' + str(index))
         required, details = estimate_required_bytes(
             model, tp, context_length, row["total_bytes"], mem_fraction_static)
         accepted.append(dict(
@@ -112,6 +127,7 @@ def check_shared_gpu_budget(gpus, model, tp, context_length, mem_fraction_static
             total_memory_bytes=row["total_bytes"],
             used_memory_bytes=row["total_bytes"] - row["free_bytes"],
             free_memory_bytes=row["free_bytes"], required_estimated_memory_bytes=required,
+            remaining_safety_margin_bytes=row['free_bytes'] - required,
             other_tasks=tasks_by_uuid.get(row["uuid"], []), estimate=details))
     if report is not None:
         report(accepted)
@@ -133,4 +149,26 @@ def check_shared_gpu_budget(gpus, model, tp, context_length, mem_fraction_static
                 f"GPU index={index} free_memory_bytes={free} "
                 f"required_estimated_memory_bytes={required} "
                 "rejection_reason=per_gpu_free_memory_below_estimate")
+    if actual_free_static:
+        # Bootstrap all-reduces MIN free memory before weights. KV configurator
+        # then subtracts pre_free*(1-fraction) from post-weight free memory.
+        snapshot_min_free = min(item['free_memory_bytes'] for item in accepted)
+        # nvidia-smi snapshot precedes our CUDA context/bootstrap allocations.
+        minimum_free = min(item['free_memory_bytes'] - item['estimate']['cuda_context_reserve_bytes']
+                           for item in accepted)
+        for item in accepted:
+            details = item['estimate']
+            static = int(minimum_free * mem_fraction_static)
+            details['actual_min_free_static_budget_bytes'] = static
+            details['snapshot_min_free_bytes'] = snapshot_min_free
+            details['estimated_pre_model_min_free_bytes'] = minimum_free
+            minimum_static = details['model_weights_with_margin_bytes'] + details['kv_context_estimate_bytes']
+            details['actual_minimum_static_with_weight_margin_bytes'] = minimum_static
+            if static < minimum_static:
+                raise ValueError('GPU_STATIC_KV_POOL_INSUFFICIENT: '
+                    f"GPU index={item['gpu_index']} min_free_bytes={minimum_free} "
+                    f"static_budget_bytes={static} required_bytes="
+                    f"{minimum_static}; "
+                    'weights+KV exceed min-rank-free * mem_fraction_static; choose other GPUs '
+                    'or a feasible fraction (lower is not always better)')
     return accepted
