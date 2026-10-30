@@ -1,6 +1,7 @@
 """Stage E resource policy only; never changes recovery correctness gates."""
 
 import os
+import re
 
 
 def mode(value):
@@ -72,6 +73,11 @@ def normalized_uuid(value):
     return str(value).lower().removeprefix('gpu-').replace('-', '')
 
 
+def _valid_uuid(value):
+    # Missing/placeholder identities must never compare equal to one another.
+    return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{32}', normalized_uuid(value)) is not None
+
+
 def runtime_rank_binding(scheduler, resources):
     """Bind the actual CUDA KV pool to the admitted physical device per rank."""
     import torch
@@ -85,6 +91,7 @@ def runtime_rank_binding(scheduler, resources):
     row = resources[rank]
     actual_uuid = str(getattr(torch.cuda.get_device_properties(device), 'uuid', 'unavailable'))
     if (visible[rank] != row['gpu_index'] or
+            not _valid_uuid(actual_uuid) or not _valid_uuid(row.get('gpu_uuid')) or
             normalized_uuid(actual_uuid) != normalized_uuid(row['gpu_uuid'])):
         raise ValueError('GPU_RANK_UUID_BINDING_MISMATCH')
     return dict(tp_rank=rank, gpu_index=row['gpu_index'], gpu_uuid=row['gpu_uuid'],
@@ -99,6 +106,36 @@ def validate_rank_binding(binding, record, rank):
     if (binding.get('tp_rank') != rank or binding.get('gpu_index') != selected[rank] or
             binding.get('gpu_index') != expected['gpu_index'] or
             binding.get('gpu_uuid') != expected['gpu_uuid'] or
+            not _valid_uuid(expected.get('gpu_uuid')) or
+            not _valid_uuid(binding.get('runtime_gpu_uuid')) or
             binding.get('cuda_device') != f'cuda:{rank}' or
             normalized_uuid(binding.get('runtime_gpu_uuid')) != normalized_uuid(expected['gpu_uuid'])):
         raise ValueError('GPU_RANK_DEVICE_BINDING_MISMATCH')
+
+
+def capture_rank_binding(scheduler, record):
+    """Observe the actual KV pool device at capture, not just at startup."""
+    binding = runtime_rank_binding(scheduler, record['gpu_resources_before_start'])
+    rank = binding['tp_rank']
+    validate_rank_binding(binding, record, rank)
+    return dict(tp_rank=rank, tp_size=int(scheduler.model_worker.ps.tp_size),
+                gpu_id=int(scheduler.model_worker.ps.gpu_id),
+                cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'),
+                cuda_device=binding['cuda_device'], gpu_uuid=binding['runtime_gpu_uuid'],
+                physical_gpu_index=binding['gpu_index'])
+
+
+def validate_capture_rank_binding(captured, binding, record, rank):
+    """Return every failed comparison; all identities are local to this node."""
+    validate_rank_binding(binding, record, rank)
+    expected = dict(tp_rank=rank, tp_size=record.get('tp_size', 2), gpu_id=rank,
+                    cuda_visible_devices=record['gpus'], cuda_device=f'cuda:{rank}',
+                    physical_gpu_index=binding['gpu_index'], gpu_uuid=binding['gpu_uuid'])
+    failures = {}
+    for field, value in expected.items():
+        actual = captured.get(field)
+        matches = (actual == value if field != 'gpu_uuid' else
+                   _valid_uuid(actual) and normalized_uuid(actual) == normalized_uuid(value))
+        if not matches:
+            failures[field] = dict(actual=actual, expected=value)
+    return failures

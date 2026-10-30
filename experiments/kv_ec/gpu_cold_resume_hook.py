@@ -375,6 +375,11 @@ class GPUColdResumeHook(GPUResumeHook):
                          duration_ms=item.begin.elapsed_time(item.done), tp_rank=self.rank,
                          bytes=item.host.numel())
                 payload = item.host.numpy().tobytes()
+                if self.cfg.get('rank_gpu_binding_required'):
+                    from .gpu_admission import capture_rank_binding
+                    # The online exporter does not supply device identity. Observe
+                    # it after the copy fence and seal it with this rank's bytes.
+                    item.metadata.update(capture_rank_binding(self.scheduler, self.cfg))
                 meta = finish_metadata(item.metadata, payload)
                 bundle = Path(self.cfg['capture_bundle'])
                 with (bundle / f'rank_{self.rank}.bin').open('xb') as handle:

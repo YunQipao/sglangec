@@ -47,15 +47,14 @@ def read_evidence(output, mode):
     for rank in range(tp_size):
         report = json.loads((root / f'rank_{rank}.json').read_text())
         if config.get('rank_gpu_binding_required'):
-            from .gpu_admission import validate_rank_binding, normalized_uuid
+            from .gpu_admission import validate_rank_binding, validate_capture_rank_binding
             validate_rank_binding(report.get('rank_gpu_binding', {}), config, rank)
             if mode == 'capture':
                 captured = meta['ranks'][rank]
                 binding = report['rank_gpu_binding']
-                _require(captured.get('gpu_id') == rank and
-                         captured.get('cuda_visible_devices') == config['gpus'] and
-                         normalized_uuid(captured.get('gpu_uuid')) == normalized_uuid(binding['gpu_uuid']),
-                         'cold_capture_gpu_binding_failed')
+                failures = validate_capture_rank_binding(captured, binding, config, rank)
+                _require(not failures, 'cold_capture_gpu_binding_failed:' +
+                         json.dumps(dict(tp_rank=rank, fields=failures), sort_keys=True))
         _require(report['schema'] == 'kv-gpu-cold-resume-stage-d-v1' and
                  report['cold_mode'] == mode and report['tp_rank'] == rank and
                  report['tp_size'] == tp_size and report['run_id'] == config['run_id'] and
