@@ -36,8 +36,8 @@ def capture_claim(directory):
         descriptor=descriptor(source.load()),
         state_document=(root / 'request_state.json').read_text(),
         seal_document=(root / 'COMMITTED.json').read_text(),
-        proof_documents=[(root / f'rank_{r}.capture.json').read_text() for r in (0, 1)],
-        proofs=[json.loads((root / f'rank_{r}.capture.json').read_text()) for r in (0, 1)],
+        proof_documents=[(root / f'rank_{r}.capture.json').read_text() for r in range(state['tp_size'])],
+        proofs=[json.loads((root / f'rank_{r}.capture.json').read_text()) for r in range(state['tp_size'])],
         request_state_sha256=sha((root / 'request_state.json').read_bytes()),
         capture_seal_sha256=sha(canonical(seal)),
         capture_seal_file_sha256=sha((root / 'COMMITTED.json').read_bytes()))
@@ -73,7 +73,7 @@ def export_capture(args):
     try:
         manager = OnlineChunkManager(args.output, claim['state']['capture_run_id'],
             test_recovery=True, global_exporter=exporter)
-        for rank in (0, 1):
+        for rank in range(len(meta['ranks'])):
             result = manager.submit(meta['ranks'][rank], np.frombuffer(payloads[rank], dtype=np.uint8))
         _require(result['state'] == 'COMMITTED', 'stage_e_local_xor_not_committed')
         directory = args.output / claim['state']['restore_id']
@@ -245,7 +245,7 @@ def check_results(output):
              check_source(bundle, cfg['state_checkpoint']), 'stage_e_source_changed')
     live = live_protection(report)
     result = cold.check_results(output)
-    committed = len(result['ranks']) == 2 and all(
+    committed = len(result['ranks']) == result['tp_size'] and all(
         r['committed'] is True and r['transaction_state'] == 'COMMITTED' and
         r['rs_source'] == binding and r['runtime_original_local_file_used'] is False
         for r in result['ranks'])
@@ -255,6 +255,7 @@ def check_results(output):
         result['recomputed_prefix_tokens'] == result['original_prefix_prefill_tokens'] == 0
     receipt = report['protection']['receipts'][1]
     result.update(schema='kv-rs-cold-resume-stage-e-v1', pass_stage_e=bool(passed),
+        functional_correctness_pass=bool(passed), isolated_performance_eligible=False,
         real_rdma=True, rs_recovery_byte_exact=True, gpu_restore_committed=committed,
         runtime_original_local_file_used=False, stripe_id=receipt['stripe_id'],
         handle=receipt['handle'], manifest_sha256=receipt['manifest_sha256'],
@@ -354,7 +355,7 @@ def main():
         try:
             result = check_results(args.output)
         except Exception as exc:
-            result = dict(pass_stage_e=False, failure_reason=f'{type(exc).__name__}:{exc}')
+            result = cold.failure_result(args.output, exc)
         cold.save_verdict(args.output, result)
         print(json.dumps(result, indent=2))
         raise SystemExit(0 if result.get('pass_stage_e') is True else 1)

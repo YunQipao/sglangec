@@ -47,7 +47,10 @@ def target_binding(verdict, run, protection, trial_id):
     if verdict['stripe_id'] != stripe_id(identity):
         raise ValueError('trial_stripe_identity_mismatch')
     ranks = verdict.get('ranks', [])
-    if (len(ranks) != 2 or {r['tp_rank'] for r in ranks} != {0, 1} or
+    tp_size = run.get('tp_size', 2)
+    if (tp_size not in (2, 4) or verdict.get('tp_size', 2) != tp_size or
+            len(ranks) != tp_size or {r['tp_rank'] for r in ranks} != set(range(tp_size)) or
+            any(r.get('tp_size', 2) != tp_size for r in ranks) or
             any(r.get('run_id') != run['run_id'] for r in ranks) or
             run.get('restore_id') != verdict.get('restore_id') or
             run.get('rs_source_binding') != verdict.get('rs_source')):
@@ -358,10 +361,11 @@ def native_metrics(root, n0, n1, recovery, delivery):
 def trial():
     from .gpu_admission import config_mode, metadata, validate_evidence
     cfg = read(os.environ['KV_EC_BENCH_CONFIG'])
-    from .perf_preflight import validate_config
+    from .perf_preflight import template_path, validate_config
     validate_config(cfg)
     selected_mode = config_mode(cfg)
     policy = metadata(selected_mode, cfg.get('mem_fraction_static', .6))
+    policy.update(tp_size=cfg['tp_size'], prefix_tokens=cfg['prefix_tokens'])
     local = Path(os.environ['KV_EC_BENCH_TRIAL'])
     rid = os.environ['KV_EC_PERF_RUN_ID']
     recovery_mode = os.environ.get('KV_EC_PERF_RECOVERY_MODE', 'two-level')
@@ -418,7 +422,7 @@ def trial():
                 '--rdma-gid-index', h.cfg['gid_index'], '--rdma-port-num', 1, '--timeout', 600]
     def startup_evidence(path):
         record = read(path)
-        validate_evidence(record, selected_mode)
+        validate_evidence(record, selected_mode, cfg['tp_size'])
         if record['mem_fraction_static'] != cfg.get('mem_fraction_static', .6):
             raise ValueError('GPU_ADMISSION_MODE_MISMATCH: startup memory fraction')
         return record
@@ -428,7 +432,7 @@ def trial():
         for h in hosts:
             n = h.node
             start(h, 'origin', D, 'capture', '--model', h.cfg['model'],
-                '--template-checkpoint', h.cfg['template'], '--input-ids', h.cfg['input_ids'],
+                '--template-checkpoint', template_path(cfg, n), '--input-ids', h.cfg['input_ids'],
                 '--bundle', h.root / 'capture', '--output', h.root / f'node{n}-reference',
                 '--gpus', h.cfg['gpus'], '--port', h.cfg['origin_port'],
                 '--mem-fraction-static', cfg.get('mem_fraction_static', .60), '--timeout', 120)
@@ -478,7 +482,7 @@ def trial():
             target_started = time.monotonic_ns()
             start(b, 'target', 'experiments.kv_ec.reprefill_server', 'launch',
                 '--model', b.cfg['model'], '--output', remote / 'cold-reprefill',
-                '--gpus', b.cfg['gpus'], '--port', cfg['target_port'],
+                '--gpus', b.cfg['gpus'], '--tp', cfg['tp_size'], '--port', cfg['target_port'],
                 '--mem-fraction-static', cfg.get('mem_fraction_static', .60))
             b.run(SELF, 'wait-file', '--path', remote / 'cold-reprefill/run.json',
                   '--service-root', remote / 'target')
@@ -486,7 +490,7 @@ def trial():
                   '--service-root', remote / 'target')
             ready = time.monotonic_ns()
             scp(b, remote / 'cold-reprefill/run.json', local / 'reprefill-target-run.json')
-            startup_evidence(local / 'reprefill-target-run.json')
+            target_admission = startup_evidence(local / 'reprefill-target-run.json')
             from .perf_preflight import free_ports
             free_ports([a.cfg['origin_port']])
             tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'])
@@ -495,9 +499,10 @@ def trial():
                 f'http://127.0.0.1:{a.cfg["origin_port"]}', '--model', a.cfg['model'],
                 '--server-model', b.cfg['model'],
                 '--input-ids', local / 'node1-reference/submitted_input_ids.json',
-                '--output', local / 'reprefill-inference', '--warmup', 0, '--repeat', 1,
+                '--output', local / 'reprefill-inference', '--tp', cfg['tp_size'], '--warmup', 0, '--repeat', 1,
                 '--expected-model-sha256',
                 read(local / 'node1-reference/rank_0.json')['runtime_identity']['model_sha256'],
+                '--expected-input-ids-sha256', read(local / 'node1-reference/rank_0.json')['token_ids_sha256'],
                 '--model-identity-evidence', local / 'reprefill-target-run.json',
                 '--ready-monotonic-ns', ready)
             request = read(local / 'reprefill-inference/request-000.json')
@@ -505,7 +510,8 @@ def trial():
             if request['output_token_ids'] != reference['output_token_ids']:
                 raise ValueError('reprefill_output_token_ids_mismatch')
             save(local / 'reprefill.json', dict(schema='kv-ec-cold-reprefill-v1',
-                **policy, functional_correctness_pass=True,
+                **dict(policy, gpu_resources_before_start=target_admission['gpu_resources_before_start']),
+                functional_correctness_pass=True,
                 pass_reprefill=True, output_token_ids_match=True,
                 commit_sha=identity()['commit_sha'], model_sha256=reference['runtime_identity']['model_sha256'],
                 input_sha256=digest(local / 'node1-reference/submitted_input_ids.json'), target_run_id=rid,
@@ -585,8 +591,9 @@ def trial():
                 f'http://127.0.0.1:{a.cfg["origin_port"]}', '--model', a.cfg['model'],
                 '--server-model', b.cfg['model'], '--input-ids',
                 local / 'node1-reference/submitted_input_ids.json', '--output',
-                local / 'paired-ready-reprefill', '--warmup', 0, '--repeat', 1,
+                local / 'paired-ready-reprefill', '--tp', cfg['tp_size'], '--warmup', 0, '--repeat', 1,
                 '--expected-model-sha256', target_run['runtime_identity']['model_sha256'],
+                '--expected-input-ids-sha256', read(local / 'node1-reference/rank_0.json')['token_ids_sha256'],
                 '--model-identity-evidence', local / 'target-run.json',
                 '--ready-monotonic-ns', ready)
             paired = read(local / 'paired-ready-reprefill/request-000.json')

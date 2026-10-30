@@ -48,18 +48,57 @@ def metadata(selected, fraction, resources=None):
                 gpu_resources_before_start=resources or [])
 
 
-def validate_evidence(record, selected):
+def validate_evidence(record, selected, tp_size=None):
     if (record.get('gpu_admission_mode') != selected or
             record.get('tp_memory_imbalance_check') is not (selected == 'strict') or
             record.get('shared_resource_environment') is not (selected == 'shared')):
         raise ValueError('GPU_ADMISSION_MODE_MISMATCH: startup evidence')
     rows = record.get('gpu_resources_before_start')
-    if not isinstance(rows, list) or len(rows) != 2:
-        raise ValueError('GPU_ADMISSION_EVIDENCE_MISSING: expected TP2 resource snapshot')
-    if len({row['gpu_index'] for row in rows}) != 2 or len({row['gpu_uuid'] for row in rows}) != 2:
+    tp_size = record.get('tp_size', 2) if tp_size is None else tp_size
+    if tp_size not in (2, 4) or record.get('tp_size', 2) != tp_size:
+        raise ValueError('GPU_ADMISSION_TP_SIZE_MISMATCH')
+    if not isinstance(rows, list) or len(rows) != tp_size:
+        raise ValueError('GPU_ADMISSION_EVIDENCE_MISSING: expected complete TP resource snapshot')
+    if len({row['gpu_index'] for row in rows}) != tp_size or len({row['gpu_uuid'] for row in rows}) != tp_size:
         raise ValueError('GPU_ADMISSION_EVIDENCE_INVALID: duplicate GPU')
     for row in rows:
         if (not 0 < row['required_estimated_memory_bytes'] <= row['free_memory_bytes'] <= row['total_memory_bytes'] or
                 not isinstance(row['other_tasks'], list) or
                 (selected == 'strict' and row['other_tasks'])):
             raise ValueError('GPU_ADMISSION_EVIDENCE_INVALID: insufficient/busy GPU')
+
+
+def normalized_uuid(value):
+    return str(value).lower().removeprefix('gpu-').replace('-', '')
+
+
+def runtime_rank_binding(scheduler, resources):
+    """Bind the actual CUDA KV pool to the admitted physical device per rank."""
+    import torch
+    ps = scheduler.model_worker.ps
+    device = scheduler.model_worker.model_runner.token_to_kv_pool.k_buffer[0].device
+    visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
+    rank, tp = int(ps.tp_rank), int(ps.tp_size)
+    if (tp not in (2, 4) or len(resources) != tp or len(visible) != tp or
+            device.type != 'cuda' or device.index != rank or int(ps.gpu_id) != rank):
+        raise ValueError('GPU_RANK_DEVICE_BINDING_MISMATCH')
+    row = resources[rank]
+    actual_uuid = str(getattr(torch.cuda.get_device_properties(device), 'uuid', 'unavailable'))
+    if (visible[rank] != row['gpu_index'] or
+            normalized_uuid(actual_uuid) != normalized_uuid(row['gpu_uuid'])):
+        raise ValueError('GPU_RANK_UUID_BINDING_MISMATCH')
+    return dict(tp_rank=rank, gpu_index=row['gpu_index'], gpu_uuid=row['gpu_uuid'],
+                cuda_device=str(device), runtime_gpu_uuid=actual_uuid)
+
+
+def validate_rank_binding(binding, record, rank):
+    """Independent checker for new reports; legacy archives remain readable."""
+    rows = record['gpu_resources_before_start']
+    selected = record['gpus'].split(',')
+    expected = rows[rank]
+    if (binding.get('tp_rank') != rank or binding.get('gpu_index') != selected[rank] or
+            binding.get('gpu_index') != expected['gpu_index'] or
+            binding.get('gpu_uuid') != expected['gpu_uuid'] or
+            binding.get('cuda_device') != f'cuda:{rank}' or
+            normalized_uuid(binding.get('runtime_gpu_uuid')) != normalized_uuid(expected['gpu_uuid'])):
+        raise ValueError('GPU_RANK_DEVICE_BINDING_MISMATCH')

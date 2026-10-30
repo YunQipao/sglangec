@@ -15,6 +15,7 @@ from pathlib import Path
 import platform
 import socket
 import statistics
+import struct
 import subprocess
 import sys
 import threading
@@ -62,13 +63,14 @@ def identity():
     diff = command(['git', 'diff', '--binary', 'HEAD'], timeout=30)
     # Include new observation/benchmark files even before they are committed.
     root = Path(__file__).resolve().parent
-    benchmark_paths = list(root.glob('perf_*.py'))
-    benchmark_paths += [root / name for name in ('gpu_admission.py', 'gpu_memory_budget.py',
-        'launch_online.py', 'verify_gpu_restore.py', 'verify_gpu_cold_resume.py', 'verify_rs_cold_resume.py')]
-    reprefill = root / 'reprefill_server.py'
-    if reprefill.exists():
-        benchmark_paths.append(reprefill)
+    # Include untracked adapters/codecs as well as the coordinator. A commit
+    # and tracked diff alone cannot detect different new files on two hosts.
+    benchmark_paths = [p for p in root.rglob('*') if p.is_file() and
+                       p.suffix in ('.py', '.c', '.h', '.cpp', '.cu', '.cuh')]
     files = {str(p.relative_to(root)): digest(p) for p in sorted(benchmark_paths)}
+    runtime = root.parents[1] / 'python/sglang/srt'
+    files.update({str(p.relative_to(root.parents[1])): digest(p)
+                  for p in sorted(runtime.rglob('*.py'))})
     return dict(commit_sha=sha['stdout'],
         git_status=command(['git', 'status', '--short'])['stdout'],
         tracked_diff_sha256=hashlib.sha256(diff['stdout'].encode()).hexdigest(),
@@ -157,8 +159,13 @@ def inference(args):
         ids = ids['input_ids']
     if len(ids) != 256 or any(type(x) is not int or x < 0 for x in ids):
         raise ValueError('first baseline requires exactly 256 token IDs')
+    input_ids_sha256 = hashlib.sha256(struct.pack('<256q', *ids)).hexdigest()
+    expected_input = getattr(args, 'expected_input_ids_sha256', None)
+    if expected_input is not None and input_ids_sha256 != expected_input:
+        raise ValueError('baseline_input_ids_sha256_mismatch')
     info = http(args.url.rstrip('/') + '/server_info')
-    required = dict(tp_size=2, disable_radix_cache=True, disable_overlap_schedule=True,
+    tp_size = getattr(args, 'tp', 2)
+    required = dict(tp_size=tp_size, disable_radix_cache=True, disable_overlap_schedule=True,
                     chunked_prefill_size=-1, max_running_requests=1, attention_backend='triton')
     if any(info.get(k) != v for k, v in required.items()):
         raise ValueError('baseline server flags do not match Stage E: ' + str(required))
@@ -171,7 +178,9 @@ def inference(args):
     if args.expected_model_sha256:
         if getattr(args, 'model_identity_evidence', None):
             evidence = read(args.model_identity_evidence)
-            actual = evidence.get('model_identity', {}).get('model_sha256')
+            actual = evidence.get('model_identity', evidence.get('runtime_identity', {})).get('model_sha256')
+            if evidence.get('tp_size', 2) != tp_size:
+                raise ValueError('baseline_tp_identity_mismatch')
         else:
             from .debug_capture import source_identity
             actual = source_identity(args.model).get('model_sha256')
@@ -186,15 +195,20 @@ def inference(args):
     meta = identity()
     if getattr(args, 'model_identity_evidence', None):
         evidence = read(args.model_identity_evidence)
+        if 'gpu_admission_mode' in evidence:
+            from .gpu_admission import validate_evidence
+            validate_evidence(evidence, evidence['gpu_admission_mode'], tp_size)
         for field in ('gpu_admission_mode', 'mem_fraction_static', 'tp_memory_imbalance_check',
                       'shared_resource_environment', 'gpu_resources_before_start'):
             if field in evidence:
                 meta[field] = evidence[field]
         meta['isolated_performance_eligible'] = False  # standalone request is not admission proof
     model_files = [Path(args.model) / 'config.json', *sorted(Path(args.model).glob('*.safetensors.index.json'))]
-    meta.update(scheme=args.scheme, model=args.model, model_files={str(p): digest(p)
+    meta.update(scheme=args.scheme, model=args.model,
+        model_sha256=getattr(args, 'expected_model_sha256', None), model_files={str(p): digest(p)
         for p in model_files if p.exists()}, input_sha256=digest(args.input_ids), prefix_tokens=256,
-        tp_size=2, generation_tokens=17, sampling=sampling, server_info=info,
+        tp_size=tp_size, input_ids_sha256=input_ids_sha256,
+        generation_tokens=17, sampling=sampling, server_info=info,
         repeat=args.repeat, warmup=args.warmup, cache_policy='server radix disabled; cached_tokens must be zero',
         limitation='reprefill starts at explicit client resubmission, excludes detection and startup')
     save(args.output / 'metadata.json', meta)
@@ -240,13 +254,13 @@ def inference(args):
 def collect_inference(args):
     """Collect independent ready-server inference roots without pooling identities."""
     groups = defaultdict(list)
-    accepted, rejected = [], []
+    accepted, rejected, contexts = [], [], {}
     for root in args.roots:
         try:
             metadata = read(root / 'metadata.json')
             if metadata.get('scheme') != args.scheme:
                 raise ValueError('scheme_mismatch')
-            if metadata.get('prefix_tokens') != 256 or metadata.get('tp_size') != 2:
+            if metadata.get('prefix_tokens') != 256 or metadata.get('tp_size') not in (2, 4):
                 raise ValueError('baseline_identity_mismatch')
             records = []
             for path in sorted(root.glob('request-*.json')):
@@ -265,18 +279,30 @@ def collect_inference(args):
             selected = metadata.get('gpu_admission_mode', 'unknown')
             if selected not in ('strict', 'shared', 'unknown'):
                 raise ValueError('GPU_ADMISSION_MODE_INVALID: inference metadata')
+            # A ready-server request is a different timing boundary from a
+            # cold recovery. Keep model/input/source/device identities apart,
+            # even when TP and admission policy happen to be identical.
+            context = {k: metadata.get(k) for k in (
+                'scheme', 'tp_size', 'gpu_admission_mode', 'mem_fraction_static',
+                'model', 'model_sha256', 'model_files', 'input_sha256', 'input_ids_sha256',
+                'prefix_tokens', 'generation_tokens', 'sampling', 'server_info',
+                'commit_sha', 'tracked_diff_sha256', 'benchmark_files',
+                'gpu_resources_before_start')}
+            key = hashlib.sha256(json.dumps(context, sort_keys=True, allow_nan=False).encode()).hexdigest()
+            contexts[key] = context
             accepted.append(str(root))
             for metric in ('request_ms', 'prefill_ttft_ms'):
                 # Unknown historical mode is not evidence of isolation.
-                groups[(selected, metric)].extend(r[metric] for r in records)
+                groups[(selected, metadata['tp_size'], key, metric)].extend(r[metric] for r in records)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             rejected.append(dict(root=str(root), reason=f'{type(exc).__name__}: {exc}'))
-    rows = [dict(scheme=args.scheme, metric=metric, gpu_admission_mode=selected,
+    rows = [dict(scheme=args.scheme, metric=metric, identity_sha256=key,
+                 gpu_admission_mode=selected, tp_size=tp_size,
                  isolated_performance_eligible=False, **stats(values))
-            for (selected, metric), values in sorted(groups.items())]
+            for (selected, tp_size, key, metric), values in sorted(groups.items())]
     save(args.output, dict(schema='kv-ec-inference-summary-v1', scheme=args.scheme,
         accepted_roots=accepted, rejected=rejected, rows=rows,
-        expected_trials=args.expected_trials,
+        expected_trials=args.expected_trials, identity_contexts=contexts,
         warning='request latency is ready-server client timing; it excludes cold startup and fault detection'))
     print(json.dumps(dict(output=str(args.output), series=len(rows), rejected=len(rejected))))
 
@@ -291,11 +317,11 @@ def local_xor(args):
     source, state, _, _ = load_checkpoint(args.capture)
     meta, payloads = unpack(source.load())  # production validator; fixtures rejected
     blocks = [np.frombuffer(p, dtype=np.uint8) for p in payloads]
-    if meta['tp_size'] != 2 or state['token_count'] != 256:
-        raise ValueError('real TP2/256 capture required')
+    if len(meta['ranks']) not in (2, 4) or state['token_count'] != 256 or not 0 <= args.lost_rank < len(blocks):
+        raise ValueError('real TP2_or_TP4/256 capture and valid lost rank required')
     save(args.output / 'metadata.json', dict(**identity(), scheme='xor-only',
         capture=str(args.capture), capture_sha256=hashlib.sha256(source.load()).hexdigest(),
-        runtime_identity=state['runtime_identity'], prefix_tokens=256, tp_size=2,
+        runtime_identity=state['runtime_identity'], prefix_tokens=256, tp_size=len(meta['ranks']),
         limitation='CPU codec on authentic GPU capture; controlled single TP-rank byte loss; '
                    'no Scheduler/GPU resume, not native-RDMA end-to-end performance'))
     with Sampler(args.output / 'resources.jsonl', args.resource_interval):
@@ -359,6 +385,7 @@ def repeat(args):
     validate_config(config)
     selected_mode = config_mode(config)
     policy = metadata(selected_mode, config.get('mem_fraction_static', .6))
+    policy.update(tp_size=config['tp_size'], prefix_tokens=config['prefix_tokens'])
     if Path.cwd().resolve() != Path(config['nodes'][0]['repo']).resolve():
         raise ValueError('repeat must run from configured node0 repo on 232')
     config['resource_interval'] = args.resource_interval or config['resource_interval']
@@ -405,6 +432,8 @@ def repeat(args):
             if current['status'] != 'PASS':
                 raise ValueError('trial preflight failed: ' + current['error'])
             raw['gpu_resources_before_start'] = [r.get('gpu_resources_before_start', []) for r in current['nodes']]
+            raw['capture_prefix_identity'] = [r.get('checks', {}).get('model_tp_prefix_identity')
+                                               for r in current['nodes']]
             with (root / 'driver.log').open('x') as log, Sampler(root / 'resources-232.jsonl', config['resource_interval']):
                 proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 owned = process_identity(proc.pid)
@@ -426,8 +455,13 @@ def repeat(args):
             raw['gpu_startup_evidence'] = {
                 name: read(root / name) for name in ('node0-reference/run.json', 'origin-run-233.json',
                     'target-run.json' if recovery_mode == 'two-level' else 'reprefill-target-run.json')}
+            raw['model_tp_prefix_identity'] = [dict(tp_size=config['tp_size'], prefix_tokens=256,
+                runtime_identity=record.get('runtime_identity', record.get('model_identity')))
+                for record in raw['gpu_startup_evidence'].values()]
             if recovery_mode == 'two-level':
-                validate_trial(root, run_id)
+                verdict = validate_trial(root, run_id)
+                raw['rank_correctness'] = (verdict or {}).get('rank_correctness', [])
+                raw['rank_gpu_kv_mapping'] = (verdict or {}).get('rank_gpu_kv_mapping', [])
             else:
                 reprefill = read(root / 'reprefill.json')
                 if reprefill.get('pass_reprefill') is not True or reprefill.get('output_token_ids_match') is not True:
@@ -463,7 +497,11 @@ def validate_gpu_startups(root, config, scheme):
              'target-run.json' if scheme == 'two-level' else 'reprefill-target-run.json']
     for name in files:
         record = read(Path(root) / name)
-        validate_evidence(record, selected)
+        validate_evidence(record, selected, config.get('tp_size', 2))
+        if 'nodes' in config:
+            node = config['nodes'][0 if name == 'node0-reference/run.json' else 1]
+            if record.get('gpus') != node['gpus'] or [r['gpu_index'] for r in record['gpu_resources_before_start']] != node['gpus'].split(','):
+                raise ValueError('GPU_ADMISSION_PHYSICAL_MAPPING_MISMATCH')
         if record.get('mem_fraction_static') != config.get('mem_fraction_static', .6):
             raise ValueError('GPU_ADMISSION_MODE_MISMATCH: startup memory fraction')
 
@@ -489,7 +527,7 @@ def validate_trial(root, run_id):
         if verdict.get(key) is not True:
             raise ValueError('Stage E gate failed: ' + key)
     for key, value in (('resume_decode_forward_count', 16), ('original_prefix_prefill_tokens', 0),
-                       ('recomputed_prefix_tokens', 0), ('tp_size', 2)):
+                       ('recomputed_prefix_tokens', 0), ('tp_size', read(root / 'target-run.json').get('tp_size', 2))):
         if type(verdict.get(key)) is not int or verdict[key] != value:
             raise ValueError('Stage E gate failed: ' + key)
     binding = target_binding(verdict, read(root / 'target-run.json'), read(root / 'protection.json'), run_id)
@@ -550,11 +588,12 @@ def collect(args):
             raise ValueError('GPU_ADMISSION_MODE_MISMATCH: batch metadata')
         policies[key] = (selected_mode, 'gpu_admission_mode' in metadata and selected_mode == 'strict'
                          and scheme in ('two-level', 'reprefill') and 'config' in metadata)
-        contexts[key] = dict(gpu_admission_mode=selected_mode,
+        contexts.setdefault(key, dict(gpu_admission_mode=selected_mode,
+            tp_size=metadata.get('config', {}).get('tp_size', metadata.get('tp_size', 2)),
             mem_fraction_static=metadata.get('config', {}).get('mem_fraction_static', metadata.get('mem_fraction_static')),
             tp_memory_imbalance_check=metadata.get('tp_memory_imbalance_check'),
             shared_resource_environment=selected_mode == 'shared',
-            gpu_resources_before_start=metadata.get('gpu_resources_before_start', []))
+            gpu_resources_before_start=metadata.get('gpu_resources_before_start', [])))
         for path in sorted(root.glob('request-*.json')):
             record = read(path)
             if record['warmup']:
@@ -593,7 +632,7 @@ def collect(args):
                     raise ValueError(trial.get('failure_reason', 'not an accepted real trial'))
                 per_trial = defaultdict(float)
                 if scheme == 'two-level':
-                    validate_trial(directory, trial['run_id'])
+                    verdict = validate_trial(directory, trial['run_id'])
                 else:
                     control = read(directory / 'reprefill.json')
                     if control.get('pass_reprefill') is not True or control.get('output_token_ids_match') is not True:
@@ -652,10 +691,16 @@ def collect(args):
                     groups[(scheme, key, name)].append(value)
                 accepted.append(str(directory))
                 contexts[key]['functional_correctness_pass'] = True
+                contexts[key].setdefault('recovery_by_trial', {})[trial['run_id']] = dict(
+                    rank_correctness=(verdict or {}).get('rank_correctness', []),
+                    rank_gpu_kv_mapping=(verdict or {}).get('rank_gpu_kv_mapping', []),
+                    model_tp_prefix_identity=(verdict or {}).get('model_tp_prefix_identity'),
+                    gpu_startup_evidence=trial.get('gpu_startup_evidence', {}))
                 seen.add(fingerprint)
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 rejected.append(dict(trial=str(directory), reason=f'{type(exc).__name__}: {exc}'))
     rows = [dict(scheme=scheme, config_sha256=key, metric=metric,
+                 tp_size=contexts[key]['tp_size'],
                  gpu_admission_mode=policies[key][0],
                  mem_fraction_static=contexts[key]['mem_fraction_static'],
                  tp_memory_imbalance_check=contexts[key]['tp_memory_imbalance_check'],
@@ -695,6 +740,7 @@ def main():
             p.add_argument('--paired-ready-reprefill', action='store_true',
                            help='run a token-bound Re-Prefill request on the same accepted Stage E target')
         if name == 'inference':
+            p.add_argument('--tp', type=int, choices=(2, 4), default=2)
             p.add_argument('--scheme', choices=('no-ec', 'reprefill'), required=True)
             p.add_argument('--url', required=True)
             p.add_argument('--model', required=True)
@@ -703,12 +749,13 @@ def main():
             p.add_argument('--warmup', type=int, default=2)
             p.add_argument('--timeout', type=float, default=600)
             p.add_argument('--expected-model-sha256')
+            p.add_argument('--expected-input-ids-sha256')
             p.add_argument('--model-identity-evidence', type=Path)
             p.add_argument('--ready-monotonic-ns', type=int,
                            help='same-host coordinator monotonic timestamp for cold-start control')
         elif name == 'xor-only':
             p.add_argument('--capture', type=Path, required=True)
-            p.add_argument('--lost-rank', type=int, choices=(0, 1), default=1)
+            p.add_argument('--lost-rank', type=int, choices=(0, 1, 2, 3), default=1)
         elif name == 'rs-only':
             p.add_argument('--report', type=Path, required=True)
         else:

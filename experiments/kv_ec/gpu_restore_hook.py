@@ -25,7 +25,7 @@ from .online_chunk import validate_runtime
 
 
 def coordinated_restore(prepare, vote, observe=lambda phase, tx: None):
-    """Fixed-order two-rank prepare / map / release / finish votes.
+    """Fixed-order all-TP-rank prepare / map / release / finish votes.
 
     All ranks keep the allocator undo journal while any peer could fail its
     mapping or old-slot release. A negative vote compensates even a locally
@@ -64,7 +64,8 @@ def coordinated_restore(prepare, vote, observe=lambda phase, tx: None):
 
 def validate_checkpoint(block):
     meta, payloads = unpack(block)  # fixtures never accepted
-    _require(len(payloads) == 2, "stage_a_requires_tp2_checkpoint")
+    _require(len(meta['ranks']) in (2, 4) and len(payloads) == len(meta['ranks']),
+             "stage_a_requires_complete_tp2_or_tp4_checkpoint")
     for rank in meta["ranks"]:
         _require(rank["token_start"] == 0 and rank["token_count"] == 256,
                  "stage_a_requires_first_256_token_chunk")
@@ -85,9 +86,10 @@ class GPURestoreHook:
             "SGLANG_KV_EC_ONLINE", "SGLANG_KV_EC_PAUSE_RESUME", "SGLANG_KV_EC_DEBUG")),
             "restore_conflicting_experiment")
         _require(torch.cuda.is_available(), "cuda_required_for_stage_a")
-        _require(scheduler.model_worker.ps.tp_size == 2, "stage_a_requires_tp2")
-        _require(torch.distributed.get_world_size(scheduler.tp_cpu_group) == 2,
-                 "stage_a_requires_two_rank_cpu_group")
+        self.tp_size = int(scheduler.model_worker.ps.tp_size)
+        _require(self.tp_size in (2, 4), "stage_a_requires_tp2_or_tp4")
+        _require(torch.distributed.get_world_size(scheduler.tp_cpu_group) == self.tp_size,
+                 "stage_a_requires_complete_tp_cpu_group")
         self.scheduler = scheduler
         self.rank = int(scheduler.model_worker.ps.tp_rank)
         self.source = source if source is not None else LocalCheckpointSource(Path(checkpoint))
@@ -95,6 +97,7 @@ class GPURestoreHook:
         block = self.source.load()
         self.block_hash = sha(block)
         self.meta = validate_checkpoint(block)
+        _require(len(self.meta['ranks']) == self.tp_size, 'checkpoint_tp_size_mismatch')
         if source is None:
             self.source = LocalCheckpointSource(Path(checkpoint), self.block_hash)
         self.output, self.run_id, self.timeout = Path(output), run_id, timeout
@@ -107,11 +110,18 @@ class GPURestoreHook:
         self.deadline = None
         self.evidence = dict(
             schema="kv-gpu-restore-stage-a-v1", run_id=run_id, tp_rank=self.rank,
-            tp_size=2, checkpoint_sha256=self.block_hash, checkpoint=str(checkpoint),
+            tp_size=self.tp_size, checkpoint_sha256=self.block_hash, checkpoint=str(checkpoint),
             cuda_executed=False, verified=False, committed=False, pass_stage_a=False,
             failure_reason=None, decode_forward_count=0,
             restore_forward_count=0, original_prefill_tokens=0,
         )
+        run_file = self.output / 'run.json'
+        if run_file.is_file():
+            config = json.loads(run_file.read_text())
+            if config.get('rank_gpu_binding_required'):
+                from .gpu_admission import runtime_rank_binding
+                self.evidence['rank_gpu_binding'] = runtime_rank_binding(
+                    scheduler, config['gpu_resources_before_start'])
 
     @classmethod
     def from_env(cls, scheduler):
@@ -141,13 +151,13 @@ class GPURestoreHook:
             identity["request_state_binding"] = self.request_state_binding
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).digest()
         value = torch.tensor([int(ready), *digest], dtype=torch.int32)
-        gathered = [torch.empty_like(value) for _ in range(2)]
+        gathered = [torch.empty_like(value) for _ in range(self.tp_size)]
         work = torch.distributed.all_gather(gathered, value,
             group=self.scheduler.tp_cpu_group, async_op=True)
         if work.wait(timeout=timedelta(seconds=remaining)) is False:
             raise TimeoutError("stage_a_tp_vote_timeout:" + phase)
         result = (all(int(v[0]) == 1 for v in gathered)
-                  and torch.equal(gathered[0][1:], gathered[1][1:]))
+                  and all(torch.equal(gathered[0][1:], v[1:]) for v in gathered[1:]))
         self._event("GLOBAL_" + phase + ("_OK" if result else "_FAILED"))
         return result
 

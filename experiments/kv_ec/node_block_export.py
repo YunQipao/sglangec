@@ -222,6 +222,7 @@ def unpack(block, *, allow_fixture=False):
     lengths = meta["rank_lengths"]
     if (
         len(lengths) not in (2, 4)
+        or len(meta['ranks']) != len(lengths)
         or any(type(n) is not int or n <= 0 for n in lengths)
         or 12 + n + sum(lengths) != len(block)
     ):

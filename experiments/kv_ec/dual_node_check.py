@@ -1,4 +1,4 @@
-"""Read-only dual TP2 health/commit check and isolated log collection."""
+"""Read-only dual TP2/TP4 health/commit check and isolated log collection."""
 
 import argparse
 import hashlib
@@ -10,7 +10,9 @@ import urllib.request
 from .parity_manager import manager_hello, submit_once
 
 
-def check(nodes, timeout):
+def check(nodes, timeout, tp_size=2):
+    if type(tp_size) is not int or tp_size not in (2, 4):
+        raise ValueError('TP must be 2 or 4')
     if len({n["socket"] for n in nodes}) != 2 or len({n["url"] for n in nodes}) != 2:
         raise ValueError("nodes require independent sockets and URLs")
     if (
@@ -40,10 +42,10 @@ def check(nodes, timeout):
             time.sleep(0.1)
         if (
             status.get("manager_epoch") != epoch
-            or status.get("tp_size") != 2
+            or status.get("tp_size") != tp_size
             or status.get("request_id")
             != hashlib.sha256(node["request"].encode()).hexdigest()
-            or set(status.get("rank_hashes", {})) != {"0", "1"}
+            or set(status.get("rank_hashes", {})) != {str(r) for r in range(tp_size)}
         ):
             raise ValueError("committed node binding mismatch")
         results.append(dict(node=node, status=status))
@@ -54,6 +56,7 @@ def check(nodes, timeout):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--tp', type=int, choices=(2, 4), default=2)
     for i, port in enumerate((30292, 30294)):
         p.add_argument(f"--node{i}-url", default=f"http://127.0.0.1:{port}")
         for field in ("socket", "snapshot", "request"):
@@ -69,7 +72,7 @@ def main():
         }
         for i in range(2)
     ]
-    results = check(nodes, args.timeout)
+    results = check(nodes, args.timeout, args.tp)
     args.output.mkdir(parents=True, exist_ok=False)
     with (args.output / "checks.json").open("x") as f:
         json.dump(results, f, indent=2)

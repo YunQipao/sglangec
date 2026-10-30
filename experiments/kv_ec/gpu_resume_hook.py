@@ -186,7 +186,7 @@ class GPUResumeHook(GPURestoreHook):
                 self.original_slots = validate_live_ownership(self.scheduler, self.req, 0, 256)
                 self.prefix_slots = self.original_slots
                 _metadata_identity(self.meta["ranks"][self.rank], self.scheduler, self.req,
-                                   rank=self.rank, tp_size=2, token_start=0, token_count=256)
+                                   rank=self.rank, tp_size=self.tp_size, token_start=0, token_count=256)
                 self.evidence.update(row=self.row, generation_before=self.generation,
                                      old_slots=list(self.original_slots))
             else:

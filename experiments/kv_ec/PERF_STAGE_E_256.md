@@ -1,5 +1,11 @@
 # Stage E 256-token TP2 性能基线
 
+同一框架的 TP2/TP4 × strict/shared 配置与审计见
+[TP_SELECTABLE_STAGE_E.md](TP_SELECTABLE_STAGE_E.md)。本页保留历史 TP2 基线口径。
+
+新增每机 TP4 shared 功能验证，完整运行命令见
+[TP4_SHARED_STAGE_E.md](TP4_SHARED_STAGE_E.md)。历史 TP2 实验保持独立。
+
 GPU 准入默认 strict。共享 GPU 的配置、预算规则、两机验证、单轮和五轮命令见
 [GPU_ADMISSION_STAGE_E.md](GPU_ADMISSION_STAGE_E.md)。shared 可得到真实功能 PASS，
 但不能作为独占 GPU 的正式性能样本，汇总不会跨模式合并。

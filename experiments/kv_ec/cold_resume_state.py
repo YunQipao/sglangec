@@ -63,7 +63,8 @@ def validate_state(state, meta, block_hash):
     _require(isinstance(state, dict) and required.issubset(state),
              'cold_state_required_field_missing')
     _require(state['schema'] == SCHEMA and state['checkpoint_version'] == 1 and
-             state['request_version'] == 1 and state['tp_size'] == 2 and
+             state['request_version'] == 1 and state['tp_size'] in (2, 4) and
+             state['tp_size'] == len(meta['ranks']) and
              state['boundary'] == 'post_prefill_result_before_decode',
              'cold_state_version_or_boundary_mismatch')
     ids, outputs = state['origin_input_ids'], state['output_ids']
@@ -130,23 +131,23 @@ def load_checkpoint(directory, rs_source=None):
     # RS restore validates the reconstructed rank bytes, never reads the lost
     # target's original rank payloads. Local Stage D retains its original checks.
     rank_payloads = unpack(block)[1] if rs_source is not None else None
-    for rank in (0, 1):
+    for rank in range(state['tp_size']):
         rank_meta = json.loads((root / f'rank_{rank}.meta.json').read_text())
         payload = rank_payloads[rank] if rank_payloads is not None else (root / f'rank_{rank}.bin').read_bytes()
         _require(sha(payload) == meta['ranks'][rank]['sha256'] and
                  sha(canonical(rank_meta)) == sha(canonical(meta['ranks'][rank])),
                  'cold_rank_payload_or_metadata_mismatch')
     _require(state['restore_id'] == receipt['restore_id'] and
-             receipt['rank_state_sha256'] == [sha(canonical(state))] * 2 and
-             len(receipt['origin_processes']) == 2 and
-             receipt['origin_processes'][0] != receipt['origin_processes'][1],
+             receipt['rank_state_sha256'] == [sha(canonical(state))] * state['tp_size'] and
+             len(receipt['origin_processes']) == state['tp_size'] and
+             len({canonical(p) for p in receipt['origin_processes']}) == state['tp_size'],
              'cold_tp_state_commit_mismatch')
     server_process = receipt.get('origin_server_process')
     _require(isinstance(server_process, dict) and
              {'host', 'boot_id', 'pid', 'start_ticks'}.issubset(server_process) and
              all(server_process != p for p in receipt['origin_processes']),
              'cold_origin_server_process_missing')
-    for rank in (0, 1):
+    for rank in range(state['tp_size']):
         proof_path = root / f'rank_{rank}.capture.json'
         _require(sha(proof_path.read_bytes()) == receipt['rank_capture_sha256'][rank],
                  'cold_capture_proof_changed')
@@ -157,7 +158,7 @@ def load_checkpoint(directory, rs_source=None):
                  proof['materialized_kv_tokens'] == 256 and proof['pending_token_id'] ==
                  state['pending_token_id'], 'cold_capture_proof_invalid')
     _require([sha(rank_payloads[rank] if rank_payloads is not None else
-                  (root / f'rank_{rank}.bin').read_bytes()) for rank in (0, 1)] ==
+                  (root / f'rank_{rank}.bin').read_bytes()) for rank in range(state['tp_size'])] ==
              receipt['rank_payload_sha256'], 'cold_rank_payload_changed')
     return BytesCheckpointSource(block), state, receipt, binding
 

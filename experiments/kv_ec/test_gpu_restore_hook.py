@@ -251,6 +251,7 @@ class TPCoordinationTests(unittest.TestCase):
                         outputs[1][0] = 0
                     return NS(wait=Mock(return_value=True))
                 with patch("torch.distributed.all_gather", side_effect=gather):
+                    hook.tp_size = 2
                     self.assertEqual(hook._vote("VERIFIED", True), failure is None)
 
     def run_ranks(self, failure=None):

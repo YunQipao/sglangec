@@ -1,5 +1,8 @@
 # Stage E GPU 资源准入：strict / shared
 
+TP=4 的完整配置、真实模板准备、两机 Preflight/单轮/五轮命令与兼容性说明见
+[TP4_SHARED_STAGE_E.md](TP4_SHARED_STAGE_E.md)。下列旧 TP2 示例继续可用。
+
 两台机器必须部署相同代码（包括 `gpu_admission.py`）；不自动 commit、push、
 同步代码、启动 GPU 实验、重启 RS 或终止他人进程。以下真实实验命令由操作者执行。
 
@@ -46,10 +49,10 @@ CUDA context 保留量，实际 F 由 SGLang 初始化后测量。预算是保�
 
 ### 自动选卡
 
-Stage E 批量配置仍要求每个 node 显式指定两个不同物理编号，如 `"gpus":"0,1"`，
+Stage E 批量配置要求每个 node 的物理编号数量严格等于 tp_size（2 或 4），如 `"gpus":"0,1,2,3"`，
 便于可重复实验；不接受配置中的 auto。独立 Capture/Restore/Re-Prefill 启动 CLI
-支持 `--gpus auto`：strict 只看空闲卡；shared 可选忙卡。先逐对验证预算，再最大化
-两卡中最小的 `free-required` 安全余量，不使用平均值掩盖单卡不足。
+支持 `--gpus auto`：strict 只看空闲卡；shared 可选忙卡。先逐组验证预算，再最大化
+所有 Rank 中最小的 `free-required` 安全余量，不使用平均值掩盖单卡不足。
 
 ## CPU 验证（232 和 233 各执行一次）
 

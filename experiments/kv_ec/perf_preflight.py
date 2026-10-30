@@ -75,13 +75,21 @@ def check_tmpdir(node, minimum_bytes=1):
                 writable=True, tempfile_probe=True)
 
 
+def template_path(cfg, node_index):
+    """Resolve an explicit TP-specific real template, never convert old KV."""
+    value = cfg['nodes'][node_index]['template']
+    if not isinstance(value, str):
+        raise ValueError('template_path_string_required')
+    return value.replace('{tp_size}', str(cfg['tp_size']))
+
+
 def validate_config(cfg):
     from .gpu_admission import config_mode
     config_mode(cfg)
     if (type(cfg.get('prefix_tokens')) is not int or cfg['prefix_tokens'] != 256 or
-            type(cfg.get('tp_size')) is not int or cfg['tp_size'] != 2 or
+            type(cfg.get('tp_size')) is not int or cfg['tp_size'] not in (2, 4) or
             cfg.get('rs') != [2, 1] or any(type(n) is not int for n in cfg['rs'])):
-        raise ValueError('config_requires_256_tokens_TP2_RS_2_1')
+        raise ValueError('config_requires_256_tokens_TP2_or_TP4_RS_2_1')
     if len(cfg.get('nodes', [])) != 2:
         raise ValueError('config_requires_two_nodes')
     if cfg['nodes'][0].get('ssh') or not cfg['nodes'][1].get('ssh'):
@@ -112,7 +120,7 @@ def validate_config(cfg):
     for i, node in enumerate(cfg['nodes']):
         cuda_environment(node)
         for key in ('repo', 'python', 'model', 'template', 'input_ids', 'conda_prefix'):
-            value = node.get(key, '')
+            value = template_path(cfg, i) if key == 'template' else node.get(key, '')
             if not value or not Path(value).is_absolute() or '..' in Path(value).parts:
                 raise ValueError(f'node{i}_absolute_path_required: {key}')
             # SCP legacy remote paths are shell-interpreted. Restrict paths.
@@ -120,8 +128,9 @@ def validate_config(cfg):
                 raise ValueError(f'node{i}_unsafe_path: {key}')
         if node.get('ssh') and not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+', node['ssh']):
             raise ValueError('unsafe_ssh_destination')
-        if not re.fullmatch(r'\d+,\d+', node.get('gpus', '')) or len(set(node['gpus'].split(','))) != 2:
-            raise ValueError('two_explicit_distinct_gpu_indices_required')
+        gpus = node.get('gpus', '').split(',')
+        if len(gpus) != cfg['tp_size'] or len(set(gpus)) != cfg['tp_size'] or not all(g.isdigit() for g in gpus):
+            raise ValueError('tp_size_explicit_distinct_gpu_indices_required')
         if type(node.get('gid_index')) is not int or node['gid_index'] < 0:
             raise ValueError('invalid_gid_index')
         if not re.fullmatch(r'[A-Za-z0-9_-]+', node.get('rdma_device', '')):
@@ -327,7 +336,9 @@ def probe(cfg, node_index, output_root):
     from types import SimpleNamespace
     node = cfg['nodes'][node_index]
     selected_mode = config_mode(cfg)
+    from .node_block_export import canonical, sha
     result = dict(node=node_index, status='FAIL', checks={},
+                  tp_size=cfg['tp_size'], config_sha256=sha(canonical(cfg)),
                   **metadata(selected_mode, cfg.get('mem_fraction_static', .6)))
     checks = result['checks']
     try:
@@ -373,13 +384,18 @@ def probe(cfg, node_index, output_root):
             raise ValueError('MODEL_PATH_INVALID: config.json/safetensors missing at ' + str(model))
         os.environ.pop('SGLANG_KV_EC_PREPARED_IDENTITY', None)
         checks['model_identity'] = source_identity(node['model'])
-        template = Path(node['template'])
+        template = Path(template_path(cfg, node_index))
         meta = validate_checkpoint(template.read_bytes())
-        if (meta['node_id'] != node_index or len(meta['ranks']) != 2 or
+        if (meta['node_id'] != node_index or len(meta['ranks']) != cfg['tp_size'] or
                 any(r['token_start'] != 0 or r['token_count'] != 256 for r in meta['ranks'])):
             raise ValueError('TEMPLATE_NODE_TP_OR_TOKEN_RANGE_MISMATCH')
         read_input_ids(node['input_ids'], meta)
         checks['template_bytes'] = template.stat().st_size
+        checks['model_tp_prefix_identity'] = dict(tp_size=cfg['tp_size'], prefix_tokens=256,
+            model_sha256=checks['model_identity']['model_sha256'],
+            input_ids_sha256=meta['ranks'][0]['token_ids_sha256'],
+            rank_bytes=[r['packed_byte_count'] for r in meta['ranks']],
+            rank_layouts=[r['layer_records'] for r in meta['ranks']])
         if template.stat().st_size + 1024**2 > cfg['max_node_bytes']:
             raise ValueError('NODE_RESERVATION_TOO_SMALL: template + 1MiB envelope margin')
         if meta['ranks'][0]['model_sha256'] != checks['model_identity']['model_sha256']:
@@ -388,7 +404,7 @@ def probe(cfg, node_index, output_root):
         checks['template_sha256'] = digest(template)
         checks['input_sha256'] = digest(node['input_ids'])
         checks['gpu_admission'] = check_gpu_resources(SimpleNamespace(
-            gpus=node['gpus'], model=node['model'], tp=2, gpu_admission_mode=selected_mode,
+            gpus=node['gpus'], model=node['model'], tp=cfg['tp_size'], gpu_admission_mode=selected_mode,
             mem_fraction_static=cfg.get('mem_fraction_static', .6)))
         result['gpu_resources_before_start'] = checks['gpu_admission']
         if node_index == 1:
@@ -451,6 +467,8 @@ def preflight(cfg, output_root, repeat, expected_epoch=None):
     validate_config(cfg)
     selected_mode = config_mode(cfg)
     policy = metadata(selected_mode, cfg.get('mem_fraction_static', .6))
+    policy.update(tp_size=cfg['tp_size'], prefix_tokens=cfg['prefix_tokens'],
+                  functional_correctness_pass=False)
     results = [None, None]
     encoded = base64.urlsafe_b64encode(json.dumps(cfg).encode()).decode()
     def check(i):
@@ -470,7 +488,11 @@ def preflight(cfg, output_root, repeat, expected_epoch=None):
         if any(r['status'] != 'PASS' for r in results):
             raise ValueError('PREFLIGHT_NODE_FAILED: ' + json.dumps([r.get('error') for r in results]))
         for result in results:
-            validate_evidence(result, selected_mode)
+            validate_evidence(result, selected_mode, cfg['tp_size'])
+        for result in results:
+            from .node_block_export import canonical, sha
+            if result.get('config_sha256') != sha(canonical(cfg)):
+                raise ValueError('CONFIG_IDENTITY_MISMATCH')
             if result['mem_fraction_static'] != cfg.get('mem_fraction_static', .6):
                 raise ValueError('GPU_ADMISSION_MODE_MISMATCH: node memory fraction')
         a, b = [r['checks']['inventory'] for r in results]

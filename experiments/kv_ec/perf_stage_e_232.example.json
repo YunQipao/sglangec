@@ -1,4 +1,11 @@
 {
+  "_configuration_notes": {
+    "supported": "tp_size integer 2 or 4; gpu_admission.mode strict (default) or shared",
+    "gpus": "Each node needs exactly tp_size distinct physical indices; node selections may differ",
+    "mem_fraction_static": "One finite scalar ratio, not a per-rank array; every GPU must pass the budget",
+    "template": "Existing literal TP2 paths are preserved. For four-field switching, provision real TP2 and TP4 captures, then use /tmp/kv-ec-tp{tp_size}-template-node0/node.bin and node1/node.bin respectively",
+    "instructions": "TP_SELECTABLE_STAGE_E.md; never reinterpret a TP2 checkpoint as TP4"
+  },
   "prefix_tokens": 256,
   "tp_size": 2,
   "rs": [2, 1],

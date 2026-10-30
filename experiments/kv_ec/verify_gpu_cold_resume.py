@@ -41,11 +41,24 @@ def read_evidence(output, mode):
     from .gpu_restore_hook import validate_checkpoint
     meta = validate_checkpoint(source.load())
     reports, logits = [], []
-    for rank in (0, 1):
+    tp_size = state['tp_size']
+    stage_a.require_complete_rank_reports(root, tp_size)
+    _require(config.get('tp_size', 2) == tp_size, 'cold_launch_tp_size_mismatch')
+    for rank in range(tp_size):
         report = json.loads((root / f'rank_{rank}.json').read_text())
+        if config.get('rank_gpu_binding_required'):
+            from .gpu_admission import validate_rank_binding, normalized_uuid
+            validate_rank_binding(report.get('rank_gpu_binding', {}), config, rank)
+            if mode == 'capture':
+                captured = meta['ranks'][rank]
+                binding = report['rank_gpu_binding']
+                _require(captured.get('gpu_id') == rank and
+                         captured.get('cuda_visible_devices') == config['gpus'] and
+                         normalized_uuid(captured.get('gpu_uuid')) == normalized_uuid(binding['gpu_uuid']),
+                         'cold_capture_gpu_binding_failed')
         _require(report['schema'] == 'kv-gpu-cold-resume-stage-d-v1' and
                  report['cold_mode'] == mode and report['tp_rank'] == rank and
-                 report['tp_size'] == 2 and report['run_id'] == config['run_id'] and
+                 report['tp_size'] == tp_size and report['run_id'] == config['run_id'] and
                      report.get('failure_reason') is None and
                      report['runtime_identity'] == config['runtime_identity'] == state['runtime_identity'],
                  'cold_rank_identity_failed')
@@ -147,8 +160,8 @@ def read_evidence(output, mode):
         logits.append(arrays)
     for key in ('output_token_ids', 'output_token_ids_sha256', 'row', 'generation_before',
                 'generation_after', 'resume_decode_forward_count', 'mapping_version'):
-        _require(reports[0][key] == reports[1][key], 'cold_rank_disagreement:' + key)
-    _require(reports[0]['process'] != reports[1]['process'], 'cold_tp_process_identity_invalid')
+        _require(all(reports[0][key] == r[key] for r in reports[1:]), 'cold_rank_disagreement:' + key)
+    _require(len({canonical(r['process']) for r in reports}) == tp_size, 'cold_tp_process_identity_invalid')
     return config, state, reports, logits
 
 
@@ -157,17 +170,26 @@ def check_results(output):
     mode = config['cold_mode']
     cfg, state, reports, logits = read_evidence(output, mode)
     result = dict(pass_stage_d=False, pass_reference=mode == 'capture', cuda_executed=True,
-        tp_size=2, restored_kv_tokens=256 if mode == 'restore' else 0,
+        tp_size=state['tp_size'], restored_kv_tokens=256 if mode == 'restore' else 0,
         restored_slots_used_by_decode=mode == 'restore', resume_decode_forward_count=16,
         recomputed_prefix_tokens=0, generation_unchanged=True, no_slot_leak=True,
         no_request_row_leak=True, output_token_ids_match=False, ranks=reports)
+    from .gpu_admission import metadata, validate_evidence
+    selected = cfg.get('gpu_admission_mode', 'strict')
+    if 'gpu_admission_mode' in cfg:
+        validate_evidence(cfg, selected, state['tp_size'])
+    result.update(metadata(selected, cfg.get('mem_fraction_static', .6),
+                           cfg.get('gpu_resources_before_start', [])),
+        functional_correctness_pass=False, prefix_tokens=256,
+        model_tp_prefix_identity=dict(runtime_identity=state['runtime_identity'],
+            tp_size=state['tp_size'], input_ids_sha256=state['input_ids_sha256'], prefix_tokens=256))
     if mode == 'capture':
         return result
     marker = json.loads((Path(cfg['ledger']) /
         (state['restore_id'] + '.committed.json')).read_text())
     _require(marker == dict(restore_id=state['restore_id'], run_id=cfg['run_id'],
         output_token_ids_sha256=reports[0]['output_token_ids_sha256'],
-        state='COMMITTED', tp_ranks=[0, 1]), 'cold_replay_commit_marker_invalid')
+        state='COMMITTED', tp_ranks=list(range(state['tp_size']))), 'cold_replay_commit_marker_invalid')
     path = cfg['reference']['path']
     _require(reference_identity(path) == cfg['reference'], 'cold_reference_changed')
     ref_cfg, ref_state, refs, ref_logits = read_evidence(path, 'capture')
@@ -181,9 +203,19 @@ def check_results(output):
                                   reports[r]['output_token_ids'][1:],
                                   ref_logits[r][1:], logits[r],
                                   output_offset=1, step_offset=1)
-                   for r in (0, 1)]
+                   for r in range(state['tp_size'])]
     passed = all(c['output_token_ids_match'] for c in comparisons)
+    from .gpu_restore_hook import validate_checkpoint
+    source, _, _, _ = load_checkpoint(cfg['state_checkpoint'], cfg.get('rs_source'))
     result.update(pass_stage_d=passed, new_instance=True, original_prefix_prefill_tokens=0,
+        functional_correctness_pass=passed,
+        rank_gpu_kv_mapping=[dict(tp_rank=r, gpu_binding=reports[r].get('rank_gpu_binding'),
+            kv_shard_sha256=meta['sha256'], packed_byte_count=meta['packed_byte_count'],
+            layer_records=meta['layer_records'])
+            for r, meta in enumerate(validate_checkpoint(source.load())['ranks'])],
+        rank_correctness=[dict(tp_rank=r, byte_exact=True,
+            scheduler_state_consistent=True, output_token_ids_match=comparisons[r]['output_token_ids_match'])
+            for r in range(state['tp_size'])],
         output_token_ids_match=passed,
         reference_token_ids_sha256=token_digest(refs[0]['output_token_ids']),
         resumed_token_ids_sha256=token_digest(reports[0]['output_token_ids']),
@@ -194,7 +226,8 @@ def check_results(output):
 def check_failed_restore(output):
     root = Path(output).resolve()
     cfg = json.loads((root / 'run.json').read_text())
-    _require(cfg['cold_mode'] == 'restore' and cfg.get('inject_rank_failure') in (0, 1),
+    tp_size = cfg.get('tp_size', 2)
+    _require(cfg['cold_mode'] == 'restore' and cfg.get('inject_rank_failure') in range(tp_size),
              'cold_failure_injection_run_required')
     ledger = Path(cfg['ledger'])
     restore_id = cfg['restore_id']
@@ -203,7 +236,7 @@ def check_failed_restore(output):
              not (ledger / (restore_id + '.committed.json')).exists(),
              'cold_failure_replay_ledger_invalid')
     reports = []
-    for rank in (0, 1):
+    for rank in range(tp_size):
         path = root / f'rank_{rank}.json'
         _require(path.is_file(), 'cold_missing_rank_failure_report')
         r = json.loads(path.read_text())
@@ -221,7 +254,7 @@ def check_failed_restore(output):
                  reports[cfg['inject_rank_failure']].get('failure_chain', [])),
              'cold_injected_rank_did_not_fail')
     return dict(pass_stage_d=False, negative_test_pass=True, cuda_executed=True,
-        tp_size=2, transaction_state=[r['transaction_state'] for r in reports],
+        tp_size=tp_size, transaction_state=[r['transaction_state'] for r in reports],
         decode_forward_count=0, recomputed_prefix_tokens=0, no_slot_leak=True,
         no_request_row_leak=True, ranks=reports)
 
@@ -230,6 +263,21 @@ def check_exit_success(command, result):
     """Return success only for the selected check's independently validated verdict."""
     return (result.get('pass_stage_d') is True or result.get('pass_reference') is True or
             (command == 'check-failure' and result.get('negative_test_pass') is True))
+
+
+def failure_result(output, exc):
+    """Preserve diagnostic identity on failure; never infer hardware success."""
+    try:
+        cfg = json.loads((Path(output) / 'run.json').read_text())
+    except (OSError, ValueError):
+        cfg = {}
+    return dict(pass_stage_d=False, pass_reference=False, pass_stage_e=False,
+        functional_correctness_pass=False, isolated_performance_eligible=False,
+        tp_size=cfg.get('tp_size'), gpu_admission_mode=cfg.get('gpu_admission_mode'),
+        mem_fraction_static=cfg.get('mem_fraction_static'),
+        gpu_resources_before_start=cfg.get('gpu_resources_before_start', []),
+        runtime_identity=cfg.get('runtime_identity'), prefix_tokens=cfg.get('prefix_tokens'),
+        failure_reason=f'{type(exc).__name__}:{exc}')
 
 
 def launch(args, capture=False):
@@ -289,14 +337,14 @@ def submit(args):
     deadline = time.monotonic() + args.timeout
     while True:
         reports = []
-        for rank in (0, 1):
+        for rank in range(cfg.get('tp_size', 2)):
             try:
                 report = json.loads((args.output / f'rank_{rank}.json').read_text())
             except (FileNotFoundError, json.JSONDecodeError):
                 continue
             _require(report.get('failure_reason') is None, 'cold_rank_reported_failure')
             reports.append(report)
-        if len(reports) == 2:
+        if len(reports) == cfg.get('tp_size', 2):
             break
         _require(time.monotonic() < deadline, 'cold_result_report_timeout')
         time.sleep(0.1)
@@ -323,7 +371,7 @@ def main():
             p.add_argument('--reference', type=Path, required=True)
             p.add_argument('--ledger', type=Path, required=True)
             p.add_argument('--rs-source', type=Path)
-            p.add_argument('--inject-rank-failure', type=int, choices=(0, 1))
+            p.add_argument('--inject-rank-failure', type=int, choices=(0, 1, 2, 3))
     p = sub.add_parser('submit', aliases=['restore'])
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--url', default='http://127.0.0.1:30485')
@@ -355,8 +403,7 @@ def main():
             else:
                 result = check_results(args.output)
         except Exception as exc:
-            result = dict(pass_stage_d=False, pass_reference=False,
-                          failure_reason=f'{type(exc).__name__}:{exc}')
+            result = failure_result(args.output, exc)
         save_verdict(args.output, result)
         print(json.dumps(result, indent=2))
         if not check_exit_success(args.command, result):

@@ -1,5 +1,9 @@
 # Stage E: Native RDMA/RS To New-Instance TP2 Cold Resume
 
+TP2/TP4 are now supported through the same real capture/restore path. For the
+complete TP4 shared configuration and two-host commands, see
+[TP4_SHARED_STAGE_E.md](TP4_SHARED_STAGE_E.md). The historical TP2 procedure below remains valid.
+
 Stage E is opt-in and reuses Stage C's `RemoteRSClient` reconstruction and
 Stage D's request injection, one-shot ledger, GPU transaction, TP voting,
 attention observations, logits comparison and cleanup checker. It adds no

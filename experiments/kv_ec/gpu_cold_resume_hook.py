@@ -392,11 +392,11 @@ class GPUColdResumeHook(GPUResumeHook):
                      'cold_capture_boundary_not_consistent')
             validate_sampling(self.req.sampling_params)
             self._live()
-            metas = [json.loads((bundle / f'rank_{r}.meta.json').read_text()) for r in (0, 1)]
+            metas = [json.loads((bundle / f'rank_{r}.meta.json').read_text()) for r in range(self.tp_size)]
             block = pack(self.meta['node_id'], [(bundle / f'rank_{r}.bin').read_bytes()
-                for r in (0, 1)], metas)
+                for r in range(self.tp_size)], metas)
             self.state = dict(schema=SCHEMA, checkpoint_version=1, request_version=1,
-                boundary='post_prefill_result_before_decode', tp_size=2,
+                boundary='post_prefill_result_before_decode', tp_size=self.tp_size,
                 origin_input_ids=list(self.req.origin_input_ids), output_ids=list(self.req.output_ids),
                 materialized_kv_tokens=256, kv_allocated_len=256,
                 pending_token_id=self.req.output_ids[0], pending_token_has_kv=False,
@@ -427,13 +427,13 @@ class GPUColdResumeHook(GPUResumeHook):
                 with (bundle / 'global_node.bin').open('xb') as handle:
                     handle.write(self.captured_block)
                 write_json(bundle / 'request_state.json', self.state)
-                proofs = [json.loads((bundle / f'rank_{r}.capture.json').read_text()) for r in (0, 1)]
+                proofs = [json.loads((bundle / f'rank_{r}.capture.json').read_text()) for r in range(self.tp_size)]
                 write_json(bundle / 'COMMITTED.json', dict(schema='kv-cold-seal-v1',
                     state='GLOBAL_COMMITTED', restore_id=self.state['restore_id'],
                     request_state_sha256=sha((bundle / 'request_state.json').read_bytes()),
                     rank_state_sha256=[p['state_sha256'] for p in proofs],
-                    rank_capture_sha256=[sha((bundle / f'rank_{r}.capture.json').read_bytes()) for r in (0, 1)],
-                    rank_payload_sha256=[sha((bundle / f'rank_{r}.bin').read_bytes()) for r in (0, 1)],
+                    rank_capture_sha256=[sha((bundle / f'rank_{r}.capture.json').read_bytes()) for r in range(self.tp_size)],
+                    rank_payload_sha256=[sha((bundle / f'rank_{r}.bin').read_bytes()) for r in range(self.tp_size)],
                     kv_sha256=sha(self.captured_block), origin_processes=[p['process'] for p in proofs],
                     origin_server_process=self.cfg['origin_server_process']))
         self._barrier('CAPTURE_PUBLISHED', publish)
@@ -477,7 +477,7 @@ class GPUColdResumeHook(GPUResumeHook):
                 if self.rank == 0:
                     write_json(marker, dict(restore_id=self.state['restore_id'],
                         run_id=self.run_id, output_token_ids_sha256=token_digest(self.req.output_ids),
-                        state='COMMITTED', tp_ranks=[0, 1]))
+                        state='COMMITTED', tp_ranks=list(range(self.tp_size))))
             self._barrier('RESTORE_LEDGER_COMMITTED', publish_commit)
             self._barrier('RESTORE_LEDGER_VISIBLE',
                           lambda: _require(marker.exists(), 'cold_commit_marker_missing'))

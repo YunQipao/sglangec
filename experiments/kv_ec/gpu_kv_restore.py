@@ -1,4 +1,4 @@
-"""Explicit GPU KV checkpoint restore for the single-request TP2 experiment.
+"""Explicit GPU KV checkpoint restore for the single-request TP2/TP4 experiment.
 
 This module is deliberately not imported by the normal scheduler.  It is a
 fail-closed experiment hook: callers provide a scheduler, a live request and a
@@ -255,7 +255,7 @@ def _metadata_identity(meta: dict, scheduler, req, *, rank: int, tp_size: int,
     ps = scheduler.model_worker.ps
     pool = scheduler.model_worker.model_runner.token_to_kv_pool
     _require(ps.tp_rank == rank and ps.tp_size == tp_size, "tp_rank_or_size_mismatch")
-    _require(tp_size == 2, "restore_experiment_requires_tp2")
+    _require(tp_size in (2, 4), "restore_experiment_requires_tp2_or_tp4")
     _require(meta["tp_rank"] == rank and meta["tp_size"] == tp_size,
              "checkpoint_rank_or_size_mismatch")
     _require(meta["dtype"] == "torch.bfloat16", "checkpoint_dtype_mismatch")
@@ -417,6 +417,8 @@ def restore_to_gpu(scheduler, req, source: CheckpointSource, *, token_start: int
     meta, rank_blocks = unpack(block)
     rank = int(scheduler.model_worker.ps.tp_rank)
     tp_size = int(scheduler.model_worker.ps.tp_size)
+    _require(tp_size in (2, 4) and len(rank_blocks) == tp_size and 0 <= rank < tp_size,
+             'checkpoint_rank_or_size_mismatch')
     raw = rank_blocks[rank] if rank < len(rank_blocks) else b""
     token_count = int(meta["ranks"][rank]["token_count"])
     rank_meta = meta["ranks"][rank]

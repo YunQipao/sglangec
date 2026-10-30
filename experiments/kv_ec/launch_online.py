@@ -33,7 +33,7 @@ def check_gpu_resources(args):
             except ValueError:
                 continue
         if not choices:
-            raise ValueError('INSUFFICIENT_GPU_MEMORY: no admissible GPU pair in ' + selected_mode)
+            raise ValueError('INSUFFICIENT_GPU_MEMORY: no admissible GPU rank set in ' + selected_mode)
         args.gpus = ','.join(max(choices)[1])
     gpus = args.gpus.split(',')
     if len(gpus) != args.tp or len(set(gpus)) != args.tp or not all(g.isdigit() for g in gpus):

@@ -36,10 +36,10 @@ def validate_claim(claim):
              seal['schema'] == 'kv-cold-seal-v1' and seal['state'] == 'GLOBAL_COMMITTED' and
              seal['kv_sha256'] == own['sha256'] == state['kv_sha256'] and
              seal['restore_id'] == state['restore_id'] and
-             seal['rank_state_sha256'] == [sha(canonical(state))] * 2,
+             seal['rank_state_sha256'] == [sha(canonical(state))] * state['tp_size'],
              'stage_e_capture_claim_invalid')
-    _require(len(seal['origin_processes']) == 2 and
-             seal['origin_processes'][0] != seal['origin_processes'][1],
+    _require(len(seal['origin_processes']) == state['tp_size'] and
+             len({canonical(p) for p in seal['origin_processes']}) == state['tp_size'],
              'stage_e_capture_processes_invalid')
     for rank, proof in enumerate(claim['proofs']):
         _require(proof['tp_rank'] == rank and proof['cuda_executed'] is True and
@@ -51,7 +51,8 @@ def validate_claim(claim):
                  proof['materialized_kv_tokens'] == 256 and
                  proof['pending_token_id'] == state['pending_token_id'],
                  'stage_e_capture_proof_invalid')
-    _require(len(claim['proofs']) == 2, 'stage_e_capture_proof_count')
+    _require(len(claim['proofs']) == len(claim['proof_documents']) == state['tp_size'],
+             'stage_e_capture_proof_count')
     return claim
 
 
@@ -99,7 +100,7 @@ def validate_protection(protection):
                  export['plan_sha256'] == sha(canonical(plan)) and
                  export['node_id'] == node and export['receipt'] == receipt and
                  len(export['local_xor_sha256']) == 64 and
-                 checks == [dict(lost_rank=r, byte_exact=True) for r in (0, 1)],
+                 checks == [dict(lost_rank=r, byte_exact=True) for r in range(len(expected['ranks']))],
                  'stage_e_local_xor_evidence_invalid')
     _require(protection['control_transfers'] and all(t['transport'] == 'tcp' and
                  t['tx']['payload_bytes'] == t['rx']['payload_bytes'] == 0

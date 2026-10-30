@@ -41,16 +41,16 @@ def save(path, value):
     path.write_text(json.dumps(value))
 
 
-def capture(root, node_id):
+def capture(root, node_id, tp=2):
     root.mkdir()
-    arrays, ranks = fixture(node_id, tp=2)
+    arrays, ranks = fixture(node_id, tp=tp)
     ids, pending = [11] * 256, 7
     for rank in ranks:
         rank.update(req_pool_idx=3, req_generation=4, token_ids_sha256=token_digest(ids))
     block = node.pack(node_id, [a.tobytes() for a in arrays], ranks, allow_fixture=True)
     first = ranks[0]
     state = dict(schema='kv-cold-request-v1', checkpoint_version=1, request_version=1,
-        tp_size=2, boundary='post_prefill_result_before_decode', origin_input_ids=ids,
+        tp_size=tp, boundary='post_prefill_result_before_decode', origin_input_ids=ids,
         output_ids=[pending], materialized_kv_tokens=256, kv_allocated_len=256,
         pending_token_id=pending, pending_token_has_kv=False, next_decode_input_ids=[pending],
         next_decode_position=256, next_decode_seq_len=257, sampling=SAMPLING,
@@ -61,8 +61,8 @@ def capture(root, node_id):
         kv_sha256=node.sha(block), runtime_identity={k: first[k] for k in
             ('model_sha256', 'source_commit', 'core_diff_sha256')}, origin_row=3, origin_generation=4)
     origins = [dict(host=f'node{node_id}', boot_id='boot', pid=100 + r, start_ticks=10 + r)
-               for r in range(3)]
-    for r in (0, 1):
+               for r in range(tp + 1)]
+    for r in range(tp):
         (root / f'rank_{r}.bin').write_bytes(arrays[r].tobytes())
         save(root / f'rank_{r}.meta.json', ranks[r])
         save(root / f'rank_{r}.capture.json', dict(tp_rank=r, cuda_executed=True,
@@ -71,9 +71,9 @@ def capture(root, node_id):
     save(root / 'request_state.json', state)
     seal = dict(schema='kv-cold-seal-v1', state='GLOBAL_COMMITTED', restore_id=state['restore_id'],
         request_state_sha256=node.sha((root / 'request_state.json').read_bytes()),
-        kv_sha256=node.sha(block), rank_state_sha256=[node.sha(node.canonical(state))] * 2,
-        origin_processes=origins[:2], origin_server_process=origins[2],
-        rank_capture_sha256=[node.sha((root / f'rank_{r}.capture.json').read_bytes()) for r in (0, 1)],
+        kv_sha256=node.sha(block), rank_state_sha256=[node.sha(node.canonical(state))] * tp,
+        origin_processes=origins[:tp], origin_server_process=origins[tp],
+        rank_capture_sha256=[node.sha((root / f'rank_{r}.capture.json').read_bytes()) for r in range(tp)],
         rank_payload_sha256=[node.sha(a.tobytes()) for a in arrays])
     save(root / 'COMMITTED.json', seal)
     (root / 'global_node.bin').write_bytes(block)
@@ -81,6 +81,8 @@ def capture(root, node_id):
 
 
 class RSColdResumeTests(unittest.TestCase):
+    tp_size = 2
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -103,7 +105,7 @@ class RSColdResumeTests(unittest.TestCase):
         self.enterContext(patch('experiments.kv_ec.rs_recovery_source.validate_checkpoint',
                                 side_effect=lambda b: fixture_unpack(b)[0]))
         self.enterContext(patch('experiments.kv_ec.rs_recovery_source.descriptor', fixture_descriptor))
-        self.blocks = [capture(self.root / f'capture{n}', n) for n in (0, 1)]
+        self.blocks = [capture(self.root / f'capture{n}', n, self.tp_size) for n in (0, 1)]
         self.claims = [cli.capture_claim(self.root / f'capture{n}') for n in (0, 1)]
         self.plan = dict(schema='kv-cold-rs-plan-v1', run_id='cpu-only', captures=self.claims)
         self.identity = source.plan_identity(self.plan)
@@ -133,7 +135,7 @@ class RSColdResumeTests(unittest.TestCase):
             exports=[dict(schema='kv-cold-rs-export-v1', node_id=n,
                 plan_sha256=node.sha(node.canonical(self.plan)), receipt=self.receipts[n],
                 local_xor_sha256=node.sha(node.xor(*node.unpack(self.blocks[n], allow_fixture=True)[1])),
-                local_xor_recovery_checks=[dict(lost_rank=r, byte_exact=True) for r in (0, 1)])
+                local_xor_recovery_checks=[dict(lost_rank=r, byte_exact=True) for r in range(self.tp_size)])
                 for n in (0, 1)], remote_host='cpu-only', remote_port=30700,
             control_transfers=[dict(transport='tcp', tx=dict(payload_bytes=0), rx=dict(payload_bytes=0))])
         # Actual codec recovers Node 1 from D0 and P; target is not passed.
@@ -165,7 +167,7 @@ class RSColdResumeTests(unittest.TestCase):
     def test_rs_envelope_reproduces_exact_sealed_capture_and_runtime_needs_no_original(self):
         original = self.root / 'capture1'
         (original / 'global_node.bin').unlink()
-        for r in (0, 1):
+        for r in range(self.tp_size):
             (original / f'rank_{r}.bin').unlink()
         restored, state, _, binding = load_checkpoint(original, self.bundle)
         self.assertEqual(restored.load(), self.blocks[1])
@@ -197,7 +199,7 @@ class RSColdResumeTests(unittest.TestCase):
             self.assertEqual(source.unwrap_node(wrapped, self.claims[n], self.identity), self.blocks[n])
             export = json.loads((self.root / f'export{n}' / 'export.json').read_text())
             self.assertEqual(export['local_xor_recovery_checks'],
-                [dict(lost_rank=r, byte_exact=True) for r in (0, 1)])
+                [dict(lost_rank=r, byte_exact=True) for r in range(self.tp_size)])
             self.assertEqual(export['receipt']['global_state'], 'GLOBAL_COMMITTED')
             self.assertEqual(export['receipt']['transport'], 'CPU_MOCK')
             self.assertNotEqual(node.sha(wrapped), node.sha(self.blocks[n]))
@@ -330,12 +332,12 @@ class RSColdResumeTests(unittest.TestCase):
         output.mkdir()
         save(output / 'run.json', dict(cold_mode='restore', rs_source=str(self.bundle),
             rs_source_binding=binding, state_checkpoint=str(self.root / 'capture1')))
-        passed = dict(pass_stage_d=True, cuda_executed=True, new_instance=True,
+        passed = dict(pass_stage_d=True, cuda_executed=True, new_instance=True, tp_size=self.tp_size,
             restored_slots_used_by_decode=True, output_token_ids_match=True,
             no_slot_leak=True, no_request_row_leak=True, resume_decode_forward_count=16,
             recomputed_prefix_tokens=0, original_prefix_prefill_tokens=0,
             ranks=[dict(committed=True, transaction_state='COMMITTED', rs_source=binding,
-                        runtime_original_local_file_used=False) for _ in (0, 1)])
+                        runtime_original_local_file_used=False) for _ in range(self.tp_size)])
         with patch.object(cli, 'live_protection', return_value=dict(query_completed=True)), \
                 patch.object(cli.cold, 'check_results') as cold:
             cold.return_value = deepcopy(passed)
@@ -347,13 +349,22 @@ class RSColdResumeTests(unittest.TestCase):
             cases += [dict(passed, resume_decode_forward_count=15),
                       dict(passed, original_prefix_prefill_tokens=256),
                       dict(passed, ranks=[])]
-            for rank in (0, 1):
+            for rank in range(self.tp_size):
                 bad = deepcopy(passed)
                 bad['ranks'][rank]['transaction_state'] = 'ABORTED'
                 cases.append(bad)
             for bad in cases:
                 cold.return_value = deepcopy(bad)
                 self.assertFalse(cli.check_results(output)['pass_stage_e'])
+
+
+class RSColdResumeTP4Tests(RSColdResumeTests):
+    """Same production adapters/codecs, FOUR independent CPU fixture ranks.
+
+    Native transport is injected explicitly by the base suite; never GPU/RDMA
+    evidence. Each inherited fault case also runs against the TP4 envelope.
+    """
+    tp_size = 4
 
 
 if __name__ == '__main__':

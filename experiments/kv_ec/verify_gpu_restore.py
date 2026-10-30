@@ -1,4 +1,4 @@
-"""Launch, submit and inspect the real TP2 Stage A scheduler experiment."""
+"""Launch, submit and inspect the real TP2/TP4 Stage A scheduler experiment."""
 
 import argparse
 import hashlib
@@ -53,12 +53,26 @@ def inspect_checkpoint(path):
     block = Path(path).read_bytes()
     meta = validate_checkpoint(block)
     return dict(checkpoint=str(Path(path).resolve()), checkpoint_sha256=sha(block),
-                node_id=meta["node_id"], tp_size=2, token_start=0, token_count=256,
+                node_id=meta["node_id"], tp_size=len(meta['ranks']), token_start=0, token_count=256,
                 model_sha256=meta["ranks"][0]["model_sha256"],
                 token_ids_sha256=meta["ranks"][0]["token_ids_sha256"],
                 rank_bytes=[r["packed_byte_count"] for r in meta["ranks"]],
                 provenance=[r["provenance"] for r in meta["ranks"]],
                 cpu_checkpoint_validation=True, gpu_acceptance=False)
+
+
+def require_complete_rank_reports(output, tp_size):
+    """Reject missing or unexpected rank reports before reading success flags."""
+    _require(type(tp_size) is int and tp_size in (2, 4), 'invalid_report_tp_size')
+    # Preserve the old missing-file exception contract for TP2 callers.
+    for rank in range(tp_size):
+        path = Path(output) / f'rank_{rank}.json'
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    actual = {p.name for p in Path(output).glob('rank_*.json')
+              if p.is_file() and p.stem[5:].isdigit()}
+    _require(actual == {f'rank_{r}.json' for r in range(tp_size)},
+             'complete_tp_rank_reports_required')
 
 
 def check_results(output):
@@ -68,11 +82,16 @@ def check_results(output):
     block = Path(config["checkpoint"]).read_bytes()
     meta = validate_checkpoint(block)
     _require(sha(block) == config["checkpoint_sha256"], "checkpoint_reference_changed")
-    results = [json.loads((output / f"rank_{r}.json").read_text()) for r in (0, 1)]
+    tp_size = len(meta['ranks'])
+    require_complete_rank_reports(output, tp_size)
+    results = [json.loads((output / f"rank_{r}.json").read_text()) for r in range(tp_size)]
     for rank, result in enumerate(results):
+        if config.get('rank_gpu_binding_required'):
+            from .gpu_admission import validate_rank_binding
+            validate_rank_binding(result.get('rank_gpu_binding', {}), config, rank)
         expected = meta["ranks"][rank]
         _require(result["schema"] == "kv-gpu-restore-stage-a-v1" and
-                 result["tp_rank"] == rank and result["tp_size"] == 2 and
+                 result["tp_rank"] == rank and result["tp_size"] == tp_size and
                  result["run_id"] == config["run_id"] and
                  result["checkpoint_sha256"] == sha(block), "result_identity_mismatch")
         _require(all(result.get(k) is True for k in (
@@ -100,7 +119,7 @@ def check_results(output):
                  stats["token_start"] == stats["recomputed_tokens"] == 0 and
                  stats["unexpected_prefill"] is False and
                  stats["written_bytes"] == expected["packed_byte_count"] and
-                 stats["tp_rank"] == rank and stats["tp_size"] == 2 and
+                 stats["tp_rank"] == rank and stats["tp_size"] == tp_size and
                  result["token_ids_sha256"] == expected["token_ids_sha256"] and
                  result["runtime_identity"]["model_sha256"] == expected["model_sha256"],
                  "rank_restore_stats_mismatch")
@@ -120,8 +139,8 @@ def check_results(output):
                  "tp_event_identity_mismatch")
     for key in ("checkpoint_sha256", "token_ids_sha256", "original_prefill_tokens",
                 "generation_before", "generation_after", "row", "transaction_state"):
-        _require(results[0][key] == results[1][key], "tp_rank_results_disagree:" + key)
-    return dict(pass_stage_a=True, cuda_executed=True, tp_ranks=[0, 1],
+        _require(all(results[0][key] == r[key] for r in results[1:]), "tp_rank_results_disagree:" + key)
+    return dict(pass_stage_a=True, cuda_executed=True, tp_size=tp_size, tp_ranks=list(range(tp_size)),
                 loaded_kv_tokens=256, recomputed_tokens=0, unexpected_prefill=False,
                 original_prefill_tokens=256, decode_forward_count=0,
                 checkpoint_sha256=sha(block), run_id=config["run_id"], ranks=results)
@@ -133,8 +152,8 @@ def launch(args, *, extra_config=None, extra_env=None):
     from .launch_online import check_gpu_resources, server_argv
     from .launch_debug import check_port
     block = args.checkpoint.resolve().read_bytes()
-    validate_checkpoint(block)
-    args.tp, args.prefill_chunk_size = 2, -1
+    meta = validate_checkpoint(block)
+    args.tp, args.prefill_chunk_size = len(meta['ranks']), -1
     selected_mode = args_mode(args)
     _require(0.05 <= args.mem_fraction_static <= 0.95, "invalid_memory_fraction")
     resources = check_gpu_resources(args)
@@ -150,7 +169,8 @@ def launch(args, *, extra_config=None, extra_env=None):
     output.mkdir(exist_ok=False)  # no existing results can be overwritten
     config = dict(run_id=output.name, checkpoint=str(args.checkpoint.resolve()),
                   checkpoint_sha256=sha(block), gpus=args.gpus, model=args.model,
-                  runtime_identity=identity, argv=server_argv(args))
+                  runtime_identity=identity, tp_size=args.tp, prefix_tokens=256,
+                  argv=server_argv(args), rank_gpu_binding_required=True)
     config.update(extra_config or {})
     config.update(metadata(selected_mode, args.mem_fraction_static, resources))
     with (output / "run.json").open("x") as f:
@@ -214,7 +234,7 @@ def main():
     start.add_argument("--model", required=True)
     start.add_argument("--checkpoint", type=Path, required=True)
     start.add_argument("--output", type=Path, required=True, help="new directory only")
-    start.add_argument("--gpus", default="auto", help="two physical GPU indices or policy-aware auto")
+    start.add_argument("--gpus", default="auto", help="TP-count physical GPU indices or policy-aware auto")
     start.add_argument("--port", type=int, default=30481)
     start.add_argument("--mem-fraction-static", type=float, default=0.6)
     start.add_argument('--gpu-admission-mode', choices=('strict', 'shared'), default='strict')

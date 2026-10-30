@@ -54,7 +54,7 @@ def launch(args):
     output.mkdir(parents=True, exist_ok=False)
     cfg = dict(schema='kv-ec-reprefill-target-v1', run_id=output.name,
                model=args.model, model_identity=identity, gpus=args.gpus,
-               tp_size=2, prefix_tokens=256, generation_tokens=17,
+               tp_size=args.tp, prefix_tokens=256, generation_tokens=17,
                sampling=sampling(), argv=server_argv(args))
     cfg.update(metadata(selected_mode, args.mem_fraction_static, resources))
     (output / 'run.json').write_text(json.dumps(cfg, indent=2, sort_keys=True))
@@ -78,7 +78,7 @@ def main():
     q.add_argument('--mem-fraction-static', type=float, default=.6)
     q.add_argument('--gpu-admission-mode', choices=('strict', 'shared'), default='strict')
     q.add_argument('--prefill-chunk-size', type=int, default=-1)
-    q.add_argument('--tp', type=int, choices=(2,), default=2)
+    q.add_argument('--tp', type=int, choices=(2, 4), default=2)
     args = parser.parse_args()
     launch(args)
 

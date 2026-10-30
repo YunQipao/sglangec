@@ -50,8 +50,8 @@ class OnlineGPUAdmissionTests(unittest.TestCase):
         self.errors = io.StringIO()
         self.launches = []
 
-        def execute(executable, command):
-            self.launches.append((executable, command, dict(os.environ)))
+        def execute(executable, command, child_env):
+            self.launches.append((executable, command, dict(child_env)))
 
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(sys, "argv", argv))
@@ -66,14 +66,14 @@ class OnlineGPUAdmissionTests(unittest.TestCase):
             else:
                 stack.enter_context(patch(
                     "experiments.kv_ec.gpu_memory_budget.subprocess.check_output",
-                    side_effect=inventory))
+                    side_effect=inventory * 2 if isinstance(inventory, list) else inventory))
             self.port_check = stack.enter_context(patch.object(launch_online, "check_port"))
             self.manager_socket = stack.enter_context(patch.object(launch_online.socket, "socket"))
             stack.enter_context(patch.object(launch_online, "send_message"))
             stack.enter_context(patch.object(launch_online, "recv_message", return_value=(
                 {"state": "READY", "run_id": "test-online-run"}, b"")))
             stack.enter_context(patch.object(launch_online, "source_identity", return_value={}))
-            stack.enter_context(patch.object(launch_online.os, "execv", side_effect=execute))
+            stack.enter_context(patch.object(launch_online.os, "execve", side_effect=execute))
             launch_online.main()
 
     def test_default_rejects_busy_gpu_for_both_tp_and_modes(self):
@@ -99,7 +99,7 @@ class OnlineGPUAdmissionTests(unittest.TestCase):
                     self.assertEqual(command[command.index("--tp-size") + 1], str(tp))
                     self.assertEqual(command[command.index("--mem-fraction-static") + 1], "0.35")
                     self.assertEqual(env["SGLANG_KV_EC_ONLINE"], "0" if baseline else "1")
-                    report = json.loads(self.output.getvalue().split(":", 1)[1])
+                    report = json.loads(self.output.getvalue().splitlines()[-1].split(":", 1)[1])
                     self.assertEqual(len(report), tp)
                     self.assertEqual(report[0]["other_tasks"], original["GPU-physical-3"])
                     for item in report:
@@ -119,7 +119,7 @@ class OnlineGPUAdmissionTests(unittest.TestCase):
                         self.invoke(tp=tp, baseline=baseline, shared=True)
                     self.assertIn("GPU index=1", self.errors.getvalue())
                     self.assertIn("per_gpu_free_memory_below_estimate", self.errors.getvalue())
-                    report = json.loads(self.output.getvalue().split(":", 1)[1])
+                    report = json.loads(self.output.getvalue().splitlines()[-1].split(":", 1)[1])
                     self.assertEqual(len(report), tp)  # Also report cards after the failing one.
                     self.assertEqual(self.launches, [])
                     self.manager_socket.assert_not_called()
@@ -127,7 +127,7 @@ class OnlineGPUAdmissionTests(unittest.TestCase):
     def test_static_fraction_below_model_and_context_rejects(self):
         with self.assertRaises(SystemExit):
             self.invoke(tp=2, shared=True, fraction="0.05")
-        self.assertIn("mem_fraction_static_below_weights_plus_context_kv", self.errors.getvalue())
+        self.assertIn("GPU_STATIC_KV_POOL_INSUFFICIENT", self.errors.getvalue())
         self.assertEqual(self.launches, [])
 
     def test_physical_uuid_selection_overrides_parent_cuda_visible_devices(self):
@@ -143,7 +143,7 @@ class OnlineGPUAdmissionTests(unittest.TestCase):
         env = self.launches[0][2]
         self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "3,1")
         self.assertEqual(env["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
-        report = json.loads(self.output.getvalue().split(":", 1)[1])
+        report = json.loads(self.output.getvalue().splitlines()[-1].split(":", 1)[1])
         self.assertEqual([item["gpu_uuid"] for item in report],
                          ["GPU-physical-3", "GPU-physical-1"])
 
@@ -152,7 +152,7 @@ class OnlineGPUAdmissionTests(unittest.TestCase):
         self.invoke(tp=2, baseline=True)
         self.assertEqual(len(self.launches), 1)
 
-    def test_imbalance_env_is_inherited_without_implicit_disable(self):
+    def test_policy_explicitly_overrides_child_imbalance_without_parent_leak(self):
         for tp in (2, 4):
             for baseline in (False, True):
                 for shared in (False, True):
@@ -163,9 +163,8 @@ class OnlineGPUAdmissionTests(unittest.TestCase):
                                 "SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK": value}
                             self.invoke(tp=tp, baseline=baseline, shared=shared, env=env)
                             child_env = self.launches[0][2]
-                            self.assertEqual(child_env.get("SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK"), value)
-                            if value is None:
-                                self.assertNotIn("SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK", child_env)
+                            self.assertEqual(child_env['SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK'],
+                                             '0' if shared else '1')
 
     def test_missing_gpu_rejects_cleanly(self):
         del self.rows["3"]

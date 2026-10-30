@@ -17,7 +17,8 @@ from . import verify_gpu_restore as stage_a
 def reference_identity(path):
     path = Path(path).resolve()
     return dict(path=str(path), run_sha256=sha((path / "run.json").read_bytes()),
-                rank_sha256=[sha((path / f"rank_{r}.json").read_bytes()) for r in (0, 1)])
+                rank_sha256=[sha((path / f"rank_{r}.json").read_bytes())
+                             for r in range(json.loads((path / 'run.json').read_text()).get('tp_size', 2))])
 
 
 def validate_restore_evidence(result, expected, rank):
@@ -30,7 +31,7 @@ def validate_restore_evidence(result, expected, rank):
              stats["token_start"] == stats["recomputed_tokens"] == 0 and
              stats["unexpected_prefill"] is False and
              stats["written_bytes"] == expected["packed_byte_count"] and
-             stats["tp_rank"] == rank and stats["tp_size"] == 2,
+             stats["tp_rank"] == rank and stats["tp_size"] == expected['tp_size'],
              "stage_b_restore_stats_invalid")
     layers = stats["layers_verified"]
     _require([x["layer_id"] for x in layers] == list(range(36)), "stage_b_missing_layers")
@@ -53,11 +54,16 @@ def read_run(output, expected_mode=None):
     meta = validate_checkpoint(block)
     _require(sha(block) == config["checkpoint_sha256"], "stage_b_checkpoint_changed")
     reports, all_logits = [], []
-    for rank in (0, 1):
+    tp_size = len(meta['ranks'])
+    stage_a.require_complete_rank_reports(output, tp_size)
+    for rank in range(tp_size):
         r = json.loads((output / f"rank_{rank}.json").read_text())
+        if config.get('rank_gpu_binding_required'):
+            from .gpu_admission import validate_rank_binding
+            validate_rank_binding(r.get('rank_gpu_binding', {}), config, rank)
         _require(r["schema"] == "kv-gpu-resume-stage-b-v1" and r["mode"] == mode and
                  r["run_id"] == config["run_id"] and r["tp_rank"] == rank and
-                 r["tp_size"] == 2 and r["checkpoint_sha256"] == sha(block) and
+                 r["tp_size"] == tp_size and r["checkpoint_sha256"] == sha(block) and
                  r["decode_steps"] == steps, "stage_b_rank_identity_invalid")
         _require(r.get("failure_reason") is None and all(r.get(k) is True for k in (
             "cuda_executed", "generation_unchanged", "row_released", "no_slot_leak",
@@ -174,7 +180,7 @@ def read_run(output, expected_mode=None):
         all_logits.append(logits)
     for key in ("output_token_ids", "output_token_ids_sha256", "generation_before",
                 "generation_after", "row", "resume_decode_forward_count", "mapping_version"):
-        _require(reports[0][key] == reports[1][key], "stage_b_rank_disagreement:" + key)
+        _require(all(reports[0][key] == r[key] for r in reports[1:]), "stage_b_rank_disagreement:" + key)
     return config, reports, all_logits
 
 
@@ -206,7 +212,7 @@ def check_results(output, reference=None):
     config, reports, logits = read_run(output)
     mode = config["mode"]
     verdict = dict(pass_stage_b=False, pass_reference=mode == "reference",
-        negative_test_pass=mode == "corrupt", cuda_executed=True, tp_size=2,
+        negative_test_pass=mode == "corrupt", cuda_executed=True, tp_size=len(reports),
         restored_kv_tokens=reports[0]["restored_kv_tokens"],
         restored_slots_used_by_decode=reports[0]["restored_slots_used_by_decode"],
         resume_decode_forward_count=reports[0]["resume_decode_forward_count"],
@@ -229,7 +235,7 @@ def check_results(output, reference=None):
              normalized_argv(ref_config) == normalized_argv(config),
              "stage_b_reference_runtime_mismatch")
     comparisons = [compare_outputs(refs[r]["output_token_ids"], reports[r]["output_token_ids"],
-                                  ref_logits[r], logits[r]) for r in (0, 1)]
+                                  ref_logits[r], logits[r]) for r in range(len(reports))]
     passed = all(c["output_token_ids_match"] for c in comparisons)
     for r, comparison in zip(reports, comparisons):
         r.update(comparison, pass_stage_b=passed)
@@ -279,7 +285,7 @@ def submit(args):
     deadline = time.monotonic() + args.timeout
     while True:
         reports = []
-        for rank in (0, 1):
+        for rank in range(config.get('tp_size', 2)):
             try:
                 report = json.loads((args.output / f"rank_{rank}.json").read_text())
             except (FileNotFoundError, json.JSONDecodeError):
@@ -287,7 +293,7 @@ def submit(args):
             _require(report.get("failure_reason") is None, "stage_b_rank_reported_failure")
             reports.append(report)
         _require(not list(args.output.glob("rank_*.failure.json")), "stage_b_late_rank_failure")
-        if len(reports) == 2:
+        if len(reports) == config.get('tp_size', 2):
             break
         if time.monotonic() >= deadline:
             raise TimeoutError("stage_b_rank_cleanup_reports_timeout")

@@ -23,12 +23,12 @@ from . import reprefill_server
 from . import gpu_admission as admission_policy
 
 
-def mock_gpu_policy(selected='strict', fraction=.6):
+def mock_gpu_policy(selected='strict', fraction=.6, tp=2):
     """CPU fixture, not real GPU evidence."""
-    return admission_policy.metadata(selected, fraction, [dict(
+    return dict(tp_size=tp, gpus=','.join(map(str, range(tp))), **admission_policy.metadata(selected, fraction, [dict(
         gpu_index=str(i), gpu_uuid=f'GPU-MOCK-{i}', total_memory_bytes=100,
         free_memory_bytes=90, required_estimated_memory_bytes=80,
-        other_tasks=[], remaining_safety_margin_bytes=10) for i in range(2)])
+        other_tasks=[], remaining_safety_margin_bytes=10) for i in range(tp)]))
 
 
 EXAMPLE = Path(__file__).with_name('perf_stage_e_232.example.json')
@@ -182,7 +182,7 @@ class GPUAdmissionModeTests(unittest.TestCase):
                 args = NS(checkpoint=checkpoint, output=Path(tmp) / 'new', gpus='0,1',
                     model='/mock', mem_fraction_static=.6, port=30985, timeout=120,
                     gpu_admission_mode=selected)
-                with patch.object(restore, 'validate_checkpoint', return_value={'ranks': [{'model_sha256': 'mock'}]}), \
+                with patch.object(restore, 'validate_checkpoint', return_value={'ranks': [{'model_sha256': 'mock'}] * 2}), \
                         patch('experiments.kv_ec.debug_capture.source_identity', return_value={'model_sha256': 'mock'}), \
                         patch.object(launch_online, 'check_gpu_resources', return_value=mock_gpu_policy(selected)['gpu_resources_before_start']) as check, \
                         patch('experiments.kv_ec.launch_debug.check_port'), \
@@ -692,8 +692,9 @@ class AdmissionTests(unittest.TestCase):
     def test_preflight_only_readonly_RPC(self):
         cfg = bench.read(EXAMPLE)
         reports = self.reports()
+        from .node_block_export import canonical, sha
         for i, report in enumerate(reports):
-            report.update(status='PASS')
+            report.update(status='PASS', config_sha256=sha(canonical(cfg)))
             report.update(mock_gpu_policy())
             report['checks'].update(inventory=dict(commit_sha='commit', host=f'h{i}', boot_id=f'b{i}',
                 tracked_diff_sha256='diff', benchmark_files={}), model_identity=dict(model_sha256='model'),
@@ -763,7 +764,7 @@ class BindingTests(unittest.TestCase):
 class CoordinatorMockTests(unittest.TestCase):
     """Run the actual trial() ordering with mock Host/SSH/SCP/processes."""
 
-    def run_trial(self, fail=None, selected='strict', recovery='two-level'):
+    def run_trial(self, fail=None, selected='strict', recovery='two-level', tp=2, paired=False):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             local = base / 'trial-mock-only'
@@ -771,6 +772,9 @@ class CoordinatorMockTests(unittest.TestCase):
             cfg = bench.read(EXAMPLE)
             cfg['remote_root'] = str(base / 'remote')
             cfg['gpu_admission'] = {'mode': selected}
+            cfg['tp_size'] = tp
+            for node in cfg['nodes']:
+                node['gpus'] = ','.join(map(str, range(tp)))
             config = base / 'config.json'
             bench.save(config, cfg)
             processes, calls = {}, []
@@ -803,8 +807,10 @@ class CoordinatorMockTests(unittest.TestCase):
                 elif action == 'check':
                     bench.save(option(args, 'output') / 'check.json', dict(schema='MOCK_ONLY', real_rdma=False))
                 elif action == 'inference':
+                    self.assertEqual(args[args.index('--tp') + 1], str(tp))
                     bench.save(option(args, 'output') / 'request-000.json', dict(output_token_ids=[7],
                         ready_to_first_token_ms=1, ready_to_decode_complete_ms=2,
+                        response=dict(meta_info=dict(cached_tokens=0, prompt_tokens=256, completion_tokens=17)),
                         end_ns=time.monotonic_ns(), request_ms=1, prefill_ttft_ms=1))
                 elif action == 'bundle-json':
                     with zipfile.ZipFile(option(args, 'output'), 'x'):
@@ -823,8 +829,9 @@ class CoordinatorMockTests(unittest.TestCase):
                     if self.name == 'origin':
                         bench.save(option(tail, 'bundle') / 'request_state.json', dict(restore_id='mock-restore'))
                         self_outer.assertEqual(tail[tail.index('--gpu-admission-mode') + 1], selected)
-                        bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-origin', **mock_gpu_policy(selected)))
+                        bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-origin', **mock_gpu_policy(selected, tp=tp)))
                         bench.save(option(tail, 'output') / 'rank_0.json', dict(output_token_ids=[7],
+                            token_ids_sha256=bench.hashlib.sha256(bench.struct.pack('<256q', *([1] * 256))).hexdigest(),
                             runtime_identity=dict(model_sha256='mock-model')))
                         bench.save(option(tail, 'output') / 'submitted_input_ids.json', [1] * 256)
                     elif self.name == 'target':
@@ -832,7 +839,8 @@ class CoordinatorMockTests(unittest.TestCase):
                             self_outer.assertTrue(option(tail, 'ledger').is_dir())
                             self_outer.assertEqual(list(option(tail, 'ledger').iterdir()), [])
                         self_outer.assertEqual(tail[tail.index('--gpu-admission-mode') + 1], selected)
-                        bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-target', **mock_gpu_policy(selected)))
+                        bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-target',
+                            runtime_identity=dict(model_sha256='mock-model'), **mock_gpu_policy(selected, tp=tp)))
                     elif self.name == 'receiver':
                         bench.save(option(tail, 'output') / 'delivery.json', dict(receive_stats={}, archive_bytes=100))
                 def poll(self):
@@ -848,7 +856,8 @@ class CoordinatorMockTests(unittest.TestCase):
                     raise RuntimeError('MOCK_FAILURE_scp')
                 shutil.copy2(local, remote) if upload else shutil.copy2(remote, local)
             env = dict(KV_EC_BENCH_CONFIG=str(config), KV_EC_BENCH_TRIAL=str(local),
-                       KV_EC_PERF_RUN_ID=local.name, KV_EC_PERF_RECOVERY_MODE=recovery)
+                       KV_EC_PERF_RUN_ID=local.name, KV_EC_PERF_RECOVERY_MODE=recovery,
+                       KV_EC_PAIRED_READY_REPREFILL='1' if paired else '0')
             with patch.dict(os.environ, env), patch.object(stage.Host, 'run', run), \
                     patch.object(stage.Host, 'argv', argv), patch.object(stage, 'scp', scp), \
                     patch.object(stage.subprocess, 'Popen', Proc), patch.object(stage.signal, 'signal'), \
@@ -865,6 +874,11 @@ class CoordinatorMockTests(unittest.TestCase):
                     stage.trial()
                     if recovery == 'two-level':
                         self.assertEqual(bench.read(local / 'acceptance.json')['run_id'], local.name)
+                        if paired:
+                            report = bench.read(local / 'paired-ready-reprefill.json')
+                            self.assertEqual(report['tp_size'], tp)
+                            self.assertEqual(report['gpu_admission_mode'], selected)
+                            self.assertTrue(report['output_token_ids_match'])
                     else:
                         self.assertTrue(bench.read(local / 'reprefill.json')['pass_reprefill'])
                 self.assertTrue((local / 'json-evidence-233.zip').exists())
@@ -888,6 +902,13 @@ class CoordinatorMockTests(unittest.TestCase):
 
     def test_shared_coordinator_propagates_to_cold_reprefill(self):
         self.run_trial(selected='shared', recovery='reprefill')
+
+    def test_four_modes_reach_cold_and_paired_reprefill_with_same_tp(self):
+        for tp in (2, 4):
+            for selected in ('strict', 'shared'):
+                with self.subTest(tp=tp, selected=selected):
+                    self.run_trial(selected=selected, recovery='reprefill', tp=tp)
+                    self.run_trial(selected=selected, tp=tp, paired=True)
 
 
 class ProcessSafetyTests(unittest.TestCase):
@@ -981,7 +1002,8 @@ class RepeatMockTests(unittest.TestCase):
                     patch.object(bench, 'Sampler'), patch.object(bench.subprocess, 'Popen', Proc), \
                     patch.object(stage, 'process_identity', return_value=dict(pid=12345)), \
                     patch.object(stage, 'signal_owned') as stop, \
-                    patch.object(bench, 'validate_trial', side_effect=ValueError('MOCK_GATE_REJECT') if gate_error else None) as gate:
+                    patch.object(bench, 'validate_trial', return_value={},
+                                 side_effect=ValueError('MOCK_GATE_REJECT') if gate_error else None) as gate:
                 if driver_code or gate_error or timeout:
                     with self.assertRaises(SystemExit):
                         bench.repeat(args)
@@ -1082,7 +1104,7 @@ class CollectionTests(unittest.TestCase):
                     duration_ms=7, role='mock', host='mock', start_ns=999, end_ns=1)) + '\n' for s in stages))
                 bench.save(trial / 'native-metrics.json', dict(rs_decode_ms=5 if i == 0 else -1))
             out = Path(tmp) / 'summary.json'
-            with patch.object(bench, 'validate_trial'), patch.object(bench, 'digest', return_value='mock-digest'):
+            with patch.object(bench, 'validate_trial', return_value={}), patch.object(bench, 'digest', return_value='mock-digest'):
                 bench.collect(NS(roots=[root, root], output=out))
             report = bench.read(out)
             self.assertEqual(len(report['accepted_trials']), 1)
@@ -1111,7 +1133,7 @@ class CollectionTests(unittest.TestCase):
                 pass_fail='PASS', run_id='mock', verdict_sha256='digest'))
             bench.save(root / 'trial-0/stage-e-check.json', {})
             out = Path(tmp) / 'summary.json'
-            with patch.object(bench, 'validate_trial'), patch.object(bench, 'digest', return_value='digest'):
+            with patch.object(bench, 'validate_trial', return_value={}), patch.object(bench, 'digest', return_value='digest'):
                 bench.collect(NS(roots=[root], output=out))
             report = bench.read(out)
             self.assertEqual(report['rows'], [])
