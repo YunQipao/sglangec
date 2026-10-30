@@ -6,11 +6,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from .node_block_export import sha
-from .rs_recovery_source import (
+from experiments.kv_ec.node_block_export import sha
+from experiments.kv_ec.rs_recovery_source import (
     committed_status, load_bundle, native_stats, validate_recovery,
 )
-from .verify_rs_resume import protect
+from experiments.kv_ec.verify_rs_resume import protect
 
 
 class RSRecoverySourceTests(unittest.TestCase):

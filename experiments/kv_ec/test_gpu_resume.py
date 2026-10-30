@@ -17,14 +17,14 @@ import torch
 
 from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 from sglang.srt.sampling.sampling_params import SamplingParams
-from .gpu_kv_restore import (
+from experiments.kv_ec.gpu_kv_restore import (
     RestoreRejected, RestoreStats, RestoreTransaction, allocate_restore_slots,
     validate_live_ownership,
 )
-from .gpu_resume_hook import GPUResumeHook, token_digest, validate_decode_observation, require_cuda_forward
-from .node_block_export import sha
-from .test_scheduler_pause import request_pool_class
-from .verify_gpu_resume import check_results, compare_outputs, read_run, reference_identity, save_verdict
+from experiments.kv_ec.gpu_resume_hook import GPUResumeHook, token_digest, validate_decode_observation, require_cuda_forward
+from experiments.kv_ec.node_block_export import sha
+from experiments.kv_ec.test_scheduler_pause import request_pool_class
+from experiments.kv_ec.verify_gpu_resume import check_results, compare_outputs, read_run, reference_identity, save_verdict
 
 
 class ResumeFixture:

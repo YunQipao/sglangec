@@ -13,16 +13,16 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 
-from . import gpu_admission, launch_online, perf_preflight, perf_benchmark
-from . import verify_gpu_cold_resume as cold
-from .gpu_kv_restore import RestoreRejected, _metadata_identity, _validate_segments
-from .gpu_memory_budget import GIB, check_shared_gpu_budget
-from .gpu_restore_hook import GPURestoreHook
-from .node_block_export import canonical, pack, sha, unpack
-from .test_debug_capture import rank_fixture
-from .test_gpu_cold_resume import ColdStateProtocolTests
-from .test_gpu_memory_budget import GPUMemoryBudgetTests
-from .xor_codec import encode, recover
+from experiments.kv_ec import gpu_admission, launch_online, perf_preflight, perf_benchmark
+from experiments.kv_ec import verify_gpu_cold_resume as cold
+from experiments.kv_ec.gpu_kv_restore import RestoreRejected, _metadata_identity, _validate_segments
+from experiments.kv_ec.gpu_memory_budget import GIB, check_shared_gpu_budget
+from experiments.kv_ec.gpu_restore_hook import GPURestoreHook
+from experiments.kv_ec.node_block_export import canonical, pack, sha, unpack
+from experiments.kv_ec.test_debug_capture import rank_fixture
+from experiments.kv_ec.test_gpu_cold_resume import ColdStateProtocolTests
+from experiments.kv_ec.test_gpu_memory_budget import GPUMemoryBudgetTests
+from experiments.kv_ec.xor_codec import encode, recover
 
 
 EXAMPLE = Path(__file__).with_name('perf_stage_e_232.example.json')
@@ -38,7 +38,7 @@ def config(tp=4, selected='shared'):
 
 class TP4AdmissionTests(unittest.TestCase):
     def test_rank_report_gate_rejects_each_missing_rank_and_extra_rank(self):
-        from .verify_gpu_restore import require_complete_rank_reports
+        from experiments.kv_ec.verify_gpu_restore import require_complete_rank_reports
         for tp in (2, 4):
             with tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
@@ -155,7 +155,7 @@ class TP4AdmissionTests(unittest.TestCase):
                     self.assertEqual(details['restore_writeback_bytes'], details['capture_staging_bytes'])
 
     def test_four_rank_launch_rechecks_dynamic_memory_and_does_not_leak_policy(self):
-        from . import reprefill_server
+        from experiments.kv_ec import reprefill_server
         for mode in ('shared', 'strict'):
             with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
                 args = NS(tp=4, output=Path(temp) / 'new', model='/model', gpus='0,1,2,3',
@@ -243,11 +243,11 @@ class TP4LayoutAndVoteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'equal byte lengths'):
             encode([*self.arrays[:3], self.arrays[3][:-1]])
         with self.assertRaisesRegex(ValueError, 'equal non-empty rank lengths'):
-            from .node_block_export import xor
+            from experiments.kv_ec.node_block_export import xor
             xor(*[a.tobytes() for a in self.arrays[:3]], self.arrays[3][:-1].tobytes())
 
     def test_each_rank_hash_and_gpu_writeback_evidence_fail_closed(self):
-        from .verify_gpu_resume import validate_restore_evidence
+        from experiments.kv_ec.verify_gpu_resume import validate_restore_evidence
         for rank in range(4):
             meta = self.metas[rank]
             bad = self.arrays[rank].copy()
@@ -322,7 +322,7 @@ class TP4ColdStateTests(ColdStateProtocolTests):
         self.meta['ranks'] = [deepcopy(self.meta['ranks'][0]) for _ in range(4)]
 
     def test_each_rank_state_binding_is_required(self):
-        from .cold_resume_state import validate_state
+        from experiments.kv_ec.cold_resume_state import validate_state
         for rank in range(4):
             for key in ('req_generation', 'model_sha256', 'token_ids_sha256', 'checkpoint_version'):
                 bad = deepcopy(self.meta)
@@ -331,7 +331,7 @@ class TP4ColdStateTests(ColdStateProtocolTests):
                     validate_state(self.state, bad, 'kv-hash')
 
     def test_four_rank_sixteen_token_comparison_rejects_any_difference(self):
-        from .verify_gpu_resume import compare_outputs
+        from experiments.kv_ec.verify_gpu_resume import compare_outputs
         original = list(range(16))
         logits = [np.zeros((1, 32), dtype=np.float32) for _ in original]
         for rank in range(4):

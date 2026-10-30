@@ -16,11 +16,11 @@ import unittest
 from unittest.mock import MagicMock, Mock, patch
 import zipfile
 
-from . import perf_benchmark as bench
-from . import perf_preflight as pf
-from . import perf_stage_e as stage
-from . import reprefill_server
-from . import gpu_admission as admission_policy
+from experiments.kv_ec import perf_benchmark as bench
+from experiments.kv_ec import perf_preflight as pf
+from experiments.kv_ec import perf_stage_e as stage
+from experiments.kv_ec import reprefill_server
+from experiments.kv_ec import gpu_admission as admission_policy
 
 
 def mock_gpu_policy(selected='strict', fraction=.6, tp=2):
@@ -36,17 +36,17 @@ EXAMPLE = Path(__file__).with_name('perf_stage_e_232.example.json')
 
 class GPUAdmissionModeTests(unittest.TestCase):
     def model(self, directory):
-        from .test_gpu_memory_budget import GPUMemoryBudgetTests
+        from experiments.kv_ec.test_gpu_memory_budget import GPUMemoryBudgetTests
         return str(GPUMemoryBudgetTests().model(directory))
 
     def rows(self):
-        from .gpu_memory_budget import GIB
+        from experiments.kv_ec.gpu_memory_budget import GIB
         return {str(i): dict(index=str(i), uuid=f'GPU-{i}', total_bytes=total * GIB,
                             free_bytes=free * GIB)
                 for i, (total, free) in enumerate(((80, 64), (64, 50), (80, 60)))}
 
     def check(self, model, selected, rows=None, gpus='0,1', fraction=.35):
-        from . import launch_online
+        from experiments.kv_ec import launch_online
         args = NS(gpus=gpus, model=model, tp=2, gpu_admission_mode=selected,
                   mem_fraction_static=fraction)
         tasks = {'GPU-0': [dict(pid='987', name='other-user-task')]}
@@ -89,7 +89,7 @@ class GPUAdmissionModeTests(unittest.TestCase):
                 self.check(self.model(tmp), 'shared', rows)
 
     def test_actual_min_free_static_pool_must_fit_weights(self):
-        from .gpu_memory_budget import GIB
+        from experiments.kv_ec.gpu_memory_budget import GIB
         with tempfile.TemporaryDirectory() as tmp:
             rows = self.rows()
             for row in rows.values():
@@ -98,7 +98,7 @@ class GPUAdmissionModeTests(unittest.TestCase):
                 self.check(self.model(tmp), 'shared', rows, fraction=.4)
 
     def test_missing_or_invalid_memory_and_model_rejected(self):
-        from .gpu_memory_budget import parse_gpu_rows
+        from experiments.kv_ec.gpu_memory_budget import parse_gpu_rows
         for text in ('0, GPU-a, 0, 0', '0, GPU-a, 24, 25', '0, GPU-a, N/A, 10'):
             with self.assertRaises(ValueError):
                 parse_gpu_rows(text)
@@ -173,8 +173,8 @@ class GPUAdmissionModeTests(unittest.TestCase):
             self.assertFalse(args.output.exists())
 
     def test_restore_launch_records_mode_and_overrides_only_child_environment(self):
-        from . import verify_gpu_restore as restore
-        from . import launch_online
+        from experiments.kv_ec import verify_gpu_restore as restore
+        from experiments.kv_ec import launch_online
         for selected in ('strict', 'shared'):
             with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
                 checkpoint = Path(tmp) / 'checkpoint'
@@ -692,7 +692,7 @@ class AdmissionTests(unittest.TestCase):
     def test_preflight_only_readonly_RPC(self):
         cfg = bench.read(EXAMPLE)
         reports = self.reports()
-        from .node_block_export import canonical, sha
+        from experiments.kv_ec.node_block_export import canonical, sha
         for i, report in enumerate(reports):
             report.update(status='PASS', config_sha256=sha(canonical(cfg)))
             report.update(mock_gpu_policy())

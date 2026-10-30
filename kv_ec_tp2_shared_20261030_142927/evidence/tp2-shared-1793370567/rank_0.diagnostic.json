@@ -1,0 +1,8 @@
+{
+  "snapshot_id": "tp2-shared-1793370567",
+  "tp_rank": 0,
+  "diagnostic_write_ms": 0.765877,
+  "info_log_ms": 0.108113,
+  "scheduler_through_diagnostics_ms": 121.463638,
+  "tail_record_own_write_included": false
+}

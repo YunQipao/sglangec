@@ -301,7 +301,10 @@ shape/dtype/commit/token hash/provenance；XOR 整个等长 payload，逐个模�
 ```bash
 conda activate sglang-ec
 cd /media/sda1/iic_data/luotao/sglangec/sglang
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 python -m unittest discover -s experiments/kv_ec -p 'test_*.py' -v
+# 也支持显式指定仓库根目录作为 discovery 的 top-level：
+# python -m unittest discover -s experiments/kv_ec -t . -p 'test_*.py' -v
 
 # 已有 synthetic_cpu.csv，重跑务必换名字；输出存在会拒绝覆盖。
 python experiments/kv_ec/benchmark.py --source cpu \

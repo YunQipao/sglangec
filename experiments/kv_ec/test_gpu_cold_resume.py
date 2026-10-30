@@ -18,15 +18,15 @@ import torch
 
 from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 
-from .cold_resume_state import (SAMPLING, claim_restore, require_new_process,
+from experiments.kv_ec.cold_resume_state import (SAMPLING, claim_restore, require_new_process,
     sealed_origin_processes, validate_state)
-from .gpu_kv_restore import (RestoreRejected, RestoreStats, RestoreTransaction,
+from experiments.kv_ec.gpu_kv_restore import (RestoreRejected, RestoreStats, RestoreTransaction,
     allocate_restore_slots, validate_initial_ownership)
-from .gpu_cold_resume_hook import (seed_request_from_state,
+from experiments.kv_ec.gpu_cold_resume_hook import (seed_request_from_state,
     validate_decode_scheduler_state, GPUColdResumeHook)
-from .gpu_resume_hook import token_digest
-from . import verify_gpu_cold_resume as cold_cli
-from .verify_gpu_resume import compare_outputs
+from experiments.kv_ec.gpu_resume_hook import token_digest
+from experiments.kv_ec import verify_gpu_cold_resume as cold_cli
+from experiments.kv_ec.verify_gpu_resume import compare_outputs
 
 
 def native_methods(relative_path, class_name, names, namespace):
@@ -151,7 +151,7 @@ class ColdStateProtocolTests(unittest.TestCase):
     def test_three_native_decode_rounds_preserve_lazy_fill_and_pending_relay(self):
         # These are the actual Req, allocator, prepare, FutureMap and result
         # methods, not a simulation that manually increments scheduler counters.
-        from .test_scheduler_pause import request_pool_class
+        from experiments.kv_ec.test_scheduler_pause import request_pool_class
         base = 'python/sglang/srt/'
         ns = dict(torch=torch, _is_npu=False, _is_cuda=False, _is_hip=False,
             _DEBUG_ASSERT=False, ForwardMode=NS(DECODE=NS(name='DECODE')),
@@ -327,7 +327,7 @@ class InitialInstallTransactionTests(unittest.TestCase):
         return hook, tx
 
     def test_verified_callback_records_cuda_evidence_after_prepare_returns(self):
-        from .gpu_restore_hook import coordinated_restore
+        from experiments.kv_ec.gpu_restore_hook import coordinated_restore
         hook, tx = self.cold_hook()
         def prepare(*args, **kwargs):
             self.assertFalse(hook.evidence['cuda_executed'])
@@ -344,7 +344,7 @@ class InitialInstallTransactionTests(unittest.TestCase):
                          ['VERIFIED', 'MAPPED', 'COMMITTED', 'FINISHED'])
 
     def test_byte_verification_failure_never_records_cuda_evidence(self):
-        from .gpu_restore_hook import coordinated_restore
+        from experiments.kv_ec.gpu_restore_hook import coordinated_restore
         hook, tx = self.cold_hook()
         def fail(*args, **kwargs):
             tx.abort()  # restore_to_gpu owns rollback before raising
@@ -359,7 +359,7 @@ class InitialInstallTransactionTests(unittest.TestCase):
         self.assertEqual(tx.allocator.available_size(), tx.allocator.size)
 
     def test_unverified_transaction_is_rejected_before_observer(self):
-        from .gpu_restore_hook import coordinated_restore
+        from experiments.kv_ec.gpu_restore_hook import coordinated_restore
         hook, tx = self.cold_hook()
         tx.state = 'PREPARED'
         with patch('experiments.kv_ec.gpu_cold_resume_hook.restore_to_gpu', return_value=tx):
@@ -370,7 +370,7 @@ class InitialInstallTransactionTests(unittest.TestCase):
         self.assertEqual(tx.state, 'ABORTED')
 
     def test_commit_failure_keeps_local_verified_fact_without_claiming_success(self):
-        from .gpu_restore_hook import coordinated_restore
+        from experiments.kv_ec.gpu_restore_hook import coordinated_restore
         hook, tx = self.cold_hook()
         with patch('experiments.kv_ec.gpu_cold_resume_hook.restore_to_gpu', return_value=tx), \
                 patch.object(tx, 'commit', side_effect=RuntimeError('injected_commit_failure')):
@@ -385,7 +385,7 @@ class InitialInstallTransactionTests(unittest.TestCase):
         self.assertEqual(tx.allocator.available_size(), tx.allocator.size)
 
     def test_single_rank_injection_records_only_peer_verification_and_aborts_both(self):
-        from .gpu_restore_hook import coordinated_restore
+        from experiments.kv_ec.gpu_restore_hook import coordinated_restore
         pairs = [self.cold_hook(rank, inject_rank_failure=1) for rank in (0, 1)]
         prepared = {id(hook.scheduler): tx for hook, tx in pairs}
         barrier, votes = threading.Barrier(2, timeout=10), {}
@@ -449,7 +449,7 @@ class InitialInstallTransactionTests(unittest.TestCase):
     def test_single_rank_prepare_failure_compensates_peer_before_any_decode(self):
         # Mirrors the existing Stage B fixed-order coordinator with one local
         # prepare failure: both peers vote false and the prepared side rolls back.
-        from .gpu_restore_hook import coordinated_restore
+        from experiments.kv_ec.gpu_restore_hook import coordinated_restore
         transactions = [self.transaction(*self.fixture()) for _ in range(2)]
         local = {'rank': 0}
         def prepare():

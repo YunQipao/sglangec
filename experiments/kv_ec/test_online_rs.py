@@ -17,17 +17,17 @@ from unittest.mock import patch
 
 import numpy as np
 
-from .node_block_export import descriptor, pack, sha, unpack
-from .online_chunk_manager import OnlineChunkManager
-from .online_rs_exporter import OnlineRSExporter
-from .online_rs_identity import identity_for, stripe_id
-from .remote_rs_server import StripeStore
-from .remote_rs_client import RemoteRSClient
-from .rs_stripe_builder import build, validate_manifest
-from .test_debug_capture import rank_fixture
-from .test_remote_rs import node_fixture
-from .test_rdma_upload_control import HandlerSocket, mock_rdma_uploads
-from .verify_online_rs import committed, verify_blocks, verify_local
+from experiments.kv_ec.node_block_export import descriptor, pack, sha, unpack
+from experiments.kv_ec.online_chunk_manager import OnlineChunkManager
+from experiments.kv_ec.online_rs_exporter import OnlineRSExporter
+from experiments.kv_ec.online_rs_identity import identity_for, stripe_id
+from experiments.kv_ec.remote_rs_server import StripeStore
+from experiments.kv_ec.remote_rs_client import RemoteRSClient
+from experiments.kv_ec.rs_stripe_builder import build, validate_manifest
+from experiments.kv_ec.test_debug_capture import rank_fixture
+from experiments.kv_ec.test_remote_rs import node_fixture
+from experiments.kv_ec.test_rdma_upload_control import HandlerSocket, mock_rdma_uploads
+from experiments.kv_ec.verify_online_rs import committed, verify_blocks, verify_local
 
 
 def fixture(node, tp=4, chunk=0):

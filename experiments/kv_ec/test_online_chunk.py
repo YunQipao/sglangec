@@ -17,9 +17,9 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 
-from .debug_capture import CaptureRejected
-from .node_block_export import pack, unpack
-from .online_chunk import (
+from experiments.kv_ec.debug_capture import CaptureRejected
+from experiments.kv_ec.node_block_export import pack, unpack
+from experiments.kv_ec.online_chunk import (
     OnlineProtector,
     StagedChunk,
     completed_chunks,
@@ -27,10 +27,10 @@ from .online_chunk import (
     gather_layers,
     validate_runtime,
 )
-from .online_chunk_manager import OnlineChunkManager, serve
-from .rank_snapshot import write_rank_files
-from .test_debug_capture import lifetime_fixture, rank_fixture
-from .verify_online_chunk import verify_reference
+from experiments.kv_ec.online_chunk_manager import OnlineChunkManager, serve
+from experiments.kv_ec.rank_snapshot import write_rank_files
+from experiments.kv_ec.test_debug_capture import lifetime_fixture, rank_fixture
+from experiments.kv_ec.verify_online_chunk import verify_reference
 
 
 def online_fixture(rank, tp=2, chunk=0):

@@ -5,9 +5,9 @@ import unittest
 import numpy as np
 import torch
 
-from benchmark import BLOCK_SIZES
-from snapshot import read_snapshot, verify_snapshots, write_snapshot, raw_tensor
-from xor_codec import encode, recover
+from experiments.kv_ec.benchmark import BLOCK_SIZES
+from experiments.kv_ec.snapshot import read_snapshot, verify_snapshots, write_snapshot, raw_tensor
+from experiments.kv_ec.xor_codec import encode, recover
 
 
 class XorTests(unittest.TestCase):

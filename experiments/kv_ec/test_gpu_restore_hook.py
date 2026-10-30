@@ -18,15 +18,15 @@ import torch
 import numpy as np
 
 from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
-from .gpu_kv_restore import (
+from experiments.kv_ec.gpu_kv_restore import (
     RestoreRejected, RestoreTransaction, allocate_restore_slots, validate_live_ownership,
 )
-from .gpu_restore_hook import GPURestoreHook, coordinated_restore, validate_checkpoint
-from .test_scheduler_pause import request_pool_class
-from .test_debug_capture import lifetime_fixture
-from . import test_gpu_kv_restore as restore_tests
-from . import gpu_kv_restore as restore_module
-from .verify_gpu_restore import check_results, read_input_ids
+from experiments.kv_ec.gpu_restore_hook import GPURestoreHook, coordinated_restore, validate_checkpoint
+from experiments.kv_ec.test_scheduler_pause import request_pool_class
+from experiments.kv_ec.test_debug_capture import lifetime_fixture
+from experiments.kv_ec import test_gpu_kv_restore as restore_tests
+from experiments.kv_ec import gpu_kv_restore as restore_module
+from experiments.kv_ec.verify_gpu_restore import check_results, read_input_ids
 
 
 def transaction(*, need_sort=False):

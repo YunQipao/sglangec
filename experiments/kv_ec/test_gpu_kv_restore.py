@@ -13,12 +13,12 @@ from types import SimpleNamespace as NS
 import torch
 from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 
-from .gpu_kv_restore import (
+from experiments.kv_ec.gpu_kv_restore import (
     BytesCheckpointSource, LocalCheckpointSource, RestoreRejected,
     RestoreTransaction, _validate_segments, allocate_restore_slots,
 )
-from .node_block_export import pack, unpack, xor
-from .test_debug_capture import rank_fixture
+from experiments.kv_ec.node_block_export import pack, unpack, xor
+from experiments.kv_ec.test_debug_capture import rank_fixture
 
 
 class GPUKVRestoreValidationTests(unittest.TestCase):

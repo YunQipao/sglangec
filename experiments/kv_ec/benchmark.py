@@ -16,7 +16,10 @@ import time
 import numpy as np
 import torch
 
-from xor_codec import encode, recover
+if __package__:
+    from .xor_codec import encode, recover
+else:
+    from xor_codec import encode, recover
 
 BLOCK_SIZES = (64 * 1024, 256 * 1024, 1024**2, 4 * 1024**2, 16 * 1024**2)
 
