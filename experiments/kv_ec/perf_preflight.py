@@ -160,9 +160,11 @@ def listening_inodes(port):
 def free_ports(ports):
     # Inspect kernel listeners, never connect to an unrelated HTTP service or
     # bind/steal a port during a read-only check. Launch admission rechecks bind.
-    for port in ports:
-        if listening_inodes(port):
-            raise ValueError(f'PORT_OCCUPIED port={port}; choose another port, no process stopped')
+    from .perf_ports import listeners
+    occupied = listeners(ports)
+    if occupied:
+        raise ValueError(f'PORT_OCCUPIED port={occupied[0]["port"]}; '
+                         f'listeners={json.dumps(occupied, sort_keys=True)}; no process stopped')
 
 
 def server_process(port):
@@ -417,6 +419,8 @@ def probe(cfg, node_index, output_root):
             if process['host'] not in ('0.0.0.0', cfg['rs_server']['host']):
                 raise ValueError('RS_SERVER_BIND_ADDRESS_MISMATCH')
             base, count = process['rdma_port_base'], max(4, process['max_stripes'] * 4)
+            from .perf_ports import validate_reserved_ports
+            validate_reserved_ports(cfg, process)
             if base + count - 1 > 65535 or any(base <= p < base + count for p in ports + [cfg['rs_server']['port']]):
                 raise ValueError('RS_NATIVE_PORT_RANGE_CONFLICT')
             free_ports(range(base, base + count))

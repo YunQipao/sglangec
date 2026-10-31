@@ -64,12 +64,12 @@ def process_identity(pid):
     proc = Path('/proc') / str(pid)
     fields = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
     return dict(pid=pid, state=fields[0], start_ticks=int(fields[19]), pgid=int(fields[2]),
-                session=int(fields[3]), uid=proc.stat().st_uid,
+                session=int(fields[3]), sid=int(fields[3]), uid=proc.stat().st_uid,
                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
 
 
-def signal_owned(owned, sig):
-    """Only our new session/group. Refuse a recycled leader PID.
+def owned_members(owned):
+    """Only the recorded new session, including children with a new PGID.
 
     A session ID cannot be recycled while its original members remain alive.
     This also handles launcher exit with children still in the original group.
@@ -84,16 +84,98 @@ def signal_owned(owned, sig):
             continue
         if current['pid'] == owned['pid'] and current['start_ticks'] != owned['start_ticks']:
             raise ValueError('owned_process_PID_reused; refusing signal')
-        if current['pgid'] == owned['pid'] and current['state'] != 'Z':
-            if current['session'] != owned['pid'] or current['uid'] != owned['uid']:
-                raise ValueError('owned_process_group_identity_mismatch')
+        if current['session'] == owned['pid'] and current['state'] not in ('Z', 'X'):
+            if (current['uid'] != owned['uid'] or owned['uid'] != os.getuid() or
+                    owned['pgid'] != owned['pid'] or owned['session'] != owned['pid']):
+                raise ValueError('owned_process_session_identity_mismatch')
+            if owned.get('run_id'):
+                try:
+                    environment = (entry / 'environ').read_bytes().split(b'\0')
+                except FileNotFoundError:
+                    continue  # exited during enumeration; never signal by PID
+                token = ('KV_EC_PERF_RUN_ID=' + owned['run_id']).encode()
+                if token not in environment:
+                    raise ValueError('owned_process_trial_environment_mismatch; refusing signal')
             members.append(current)
-    if members:
+    return members
+
+
+def pidfd_open(pid):
+    if hasattr(os, 'pidfd_open'):
+        return os.pidfd_open(pid)
+    # Some Conda Python builds omit os.pidfd_open even on supported Linux.
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    call = libc.pidfd_open
+    call.argtypes, call.restype = (ctypes.c_int, ctypes.c_uint), ctypes.c_int
+    fd = call(pid, 0)
+    if fd < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    return fd
+
+
+def signal_owned(owned, sig):
+    members = owned_members(owned)
+    for member in members:
+        # pidfd pins a process instance across signal delivery; never signal a
+        # reused numeric PID or a whole group with unverified members.
         try:
-            os.killpg(owned['pid'], sig)
+            fd = pidfd_open(member['pid'])
         except ProcessLookupError:
+            continue
+        try:
+            current = process_identity(member['pid'])
+            if any(current[k] != member[k] for k in ('start_ticks', 'uid', 'session', 'boot_id')):
+                raise ValueError('owned_process_changed_before_signal')
+            signal.pidfd_send_signal(fd, sig)
+        except (ProcessLookupError, FileNotFoundError):
             pass
+        finally:
+            os.close(fd)
     return bool(members)
+
+
+def check_signal_support():
+    """Refuse startup before creating children if safe signalling is absent."""
+    try:
+        fd = pidfd_open(os.getpid())
+        try:
+            signal.pidfd_send_signal(fd, 0)
+        finally:
+            os.close(fd)
+    except (AttributeError, OSError) as exc:
+        raise RuntimeError('PIDFD_SIGNAL_SUPPORT_REQUIRED: ' + str(exc)) from exc
+
+
+def cleanup_process(proc, owned, root):
+    """Bounded verified cleanup shared by model services and SSH tunnels."""
+    record = dict(owner=owned, status='FAIL', attempts=[])
+    try:
+        if not owned.get('run_id') or owned['run_id'] != os.environ.get('KV_EC_PERF_RUN_ID'):
+            raise ValueError('cleanup_trial_ownership_mismatch')
+        for sig, grace in ((signal.SIGINT, 30), (signal.SIGTERM, 10), (signal.SIGKILL, 5)):
+            proc.poll()  # reap a launcher that exited before its children
+            if not signal_owned(owned, 0):
+                break
+            record['attempts'].append(dict(signal=int(sig), members=owned_members(owned)))
+            signal_owned(owned, sig)
+            end = time.monotonic() + grace
+            while time.monotonic() < end:
+                proc.poll()
+                if not signal_owned(owned, 0):
+                    break
+                time.sleep(.2)
+        proc.wait(timeout=5)
+        remaining = owned_members(owned)
+        if remaining:
+            raise RuntimeError('OWNED_PROCESS_LEAK: ' + json.dumps(remaining))
+        record.update(status='PASS', remaining=[], returncode=proc.returncode)
+    except BaseException as exc:
+        record['error'] = f'{type(exc).__name__}: {exc}'
+        raise
+    finally:
+        save(Path(root) / 'process-cleanup.json', record)
 
 
 def require_trial(root):
@@ -157,6 +239,8 @@ def gpu_failure_reason(log):
 
 
 def wait_health(url, service_root, timeout=900):
+    from .perf_ports import assert_listener_owned
+    from urllib.parse import urlsplit
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('positive finite health timeout required')
     root = Path(service_root)
@@ -171,12 +255,14 @@ def wait_health(url, service_root, timeout=900):
         if alive:
             status = None
             try:
+                assert_listener_owned(urlsplit(url).port, read(root / 'owned-process.json'))
                 status = health_status(endpoint, timeout=min(5., remaining))
                 last_error = f'HTTP {status}, expected 200'
             except (OSError, ValueError) as exc:
                 last_error = f'{type(exc).__name__}: {exc}'
             # A service can die or its PID can change while HTTP is in flight.
             if require_service_alive(root) and status == 200 and time.monotonic() < end:
+                assert_listener_owned(urlsplit(url).port, read(root / 'owned-process.json'))
                 return
         remaining = end - time.monotonic()
         if remaining <= 0:
@@ -189,6 +275,7 @@ def service(root, argv, interval):
     if root.exists() and sorted(p.name for p in root.iterdir()) == ['stop']:
         save(root / 'exit.json', dict(returncode=0, reason='stopped_before_launch'))
         return
+    check_signal_support()
     root.mkdir(parents=True, exist_ok=False)
     os.environ['KV_EC_PERF_ROLE'] = os.environ.get('KV_EC_PERF_ROLE', 'unspecified') + '/' + root.name
     stopping = threading.Event()
@@ -197,33 +284,33 @@ def service(root, argv, interval):
     with (root / 'server.log').open('x') as log, Sampler(root / 'resources.jsonl', interval):
         started = time.monotonic_ns()
         proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        owned = dict(**process_identity(proc.pid), argv=argv, start_ns=started, run_id=marker['run_id'])
-        save(root / 'owned-process.json', owned)
+        owned = None
         reason = 'process_exited'
         try:
+            owned = dict(**process_identity(proc.pid), argv=argv, start_ns=started, run_id=marker['run_id'])
+            save(root / 'owned-process.json', owned)
             while proc.poll() is None:
                 if stopping.is_set() or (root / 'stop').exists():
                     reason = 'owned_stop_requested'
                     break
-                if time.time() - (root.parent / 'lease').stat().st_mtime > 90:
+                if time.time() - (root.parent / 'lease').stat().st_mtime > (150 if root.name == 'ports' else 90):
                     reason = 'coordinator_lease_expired_SSH_or_driver_lost'
                     break
                 time.sleep(.2)
         finally:
-            for sig, grace in ((signal.SIGINT, 30), (signal.SIGTERM, 10), (signal.SIGKILL, 5)):
-                if not signal_owned(owned, sig):
-                    break
-                end = time.monotonic() + grace
-                while time.monotonic() < end:
-                    proc.poll()  # reap group leader; children may still exist
-                    if not signal_owned(owned, 0):
-                        break
-                    time.sleep(.2)
-            proc.wait(timeout=5)
+            if owned is None:
+                # Popen's unreaped child still has a /proc identity, even if it
+                # already exited. Never fall back to an unauthenticated kill.
+                owned = dict(**process_identity(proc.pid), run_id=marker['run_id'])
+            cleanup_process(proc, owned, root)
+            from .perf_ports import assert_free
+            flags = ('--port', '--rdma-return-port') + (('--remote-port',) if root.name == 'receiver' else ())
+            bound_ports = [int(argv[argv.index(flag) + 1]) for flag in flags if flag in argv]
+            assert_free(bound_ports, 'SERVICE_PORT_RELEASE_FAILED')
         save(root / 'exit.json', dict(returncode=proc.returncode, reason=reason,
                                      gpu_failure_reason=gpu_failure_reason(root / 'server.log'),
                                      end_ns=time.monotonic_ns()))
-    if reason == 'process_exited' and proc.returncode:
+    if proc.returncode > 0 or (reason == 'process_exited' and proc.returncode):
         raise SystemExit(proc.returncode if proc.returncode > 0 else 1)
     if reason == 'coordinator_lease_expired_SSH_or_driver_lost':
         raise SystemExit(1)
@@ -297,6 +384,15 @@ def parallel(*actions):
             raise errors[0]
 
 
+def check_rs_health(cfg, expected_epoch):
+    from .remote_rs_client import RemoteRSClient
+    health, payload = RemoteRSClient(cfg['rs_server']['host'], cfg['rs_server']['port'], timeout=10).call('health')
+    if (payload or not expected_epoch or health.get('state') != 'READY' or
+            health.get('server_epoch') != expected_epoch):
+        raise RuntimeError('RS_NOT_READY_OR_EPOCH_CHANGED_AFTER_TRIAL')
+    return health
+
+
 def scp(host, remote, local, upload=False):
     endpoint = host.cfg['ssh'] + ':' + str(remote)
     args = [str(local), endpoint] if upload else [endpoint, str(local)]
@@ -306,25 +402,53 @@ def scp(host, remote, local, upload=False):
                         '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', *args], check=True, timeout=120)
 
 
-def local_ssh_tunnel(host, local_port, remote_port):
-    proc = subprocess.Popen(['ssh', '-N', '-o', 'BatchMode=yes',
+def local_ssh_tunnel(host, local_port, remote_port, root):
+    from .perf_ports import assert_free, assert_listener_owned
+    check_signal_support()
+    root = Path(root)
+    root.mkdir(exist_ok=False)
+    assert_free([local_port])
+    # Multiplexed -L forwarding can outlive its client in a persistent master.
+    # This process must own the listener itself, in foreground, without user
+    # configured LocalForward/RemoteForward entries or ControlPersist.
+    argv = ['ssh', '-F', '/dev/null', '-N', '-S', 'none', '-o', 'ControlMaster=no',
+        '-o', 'ControlPersist=no', '-o', 'ForkAfterAuthentication=no',
+        '-o', 'ClearAllForwardings=no', '-o', 'BatchMode=yes',
         '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=10',
-        '-L', f'127.0.0.1:{local_port}:127.0.0.1:{remote_port}', host.cfg['ssh']],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True)
-    deadline = time.monotonic() + 30
-    while True:
-        if proc.poll() is not None:
-            raise RuntimeError('reprefill_ssh_tunnel_failed')
+        '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2',
+        '-L', f'127.0.0.1:{local_port}:127.0.0.1:{remote_port}', host.cfg['ssh']]
+    with (root / 'ssh.log').open('x') as log:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+        owned = None
         try:
-            with urllib.request.urlopen(f'http://127.0.0.1:{local_port}/server_info', timeout=2):
-                return proc
-        except OSError:
-            if time.monotonic() >= deadline:
-                proc.terminate()
-                proc.wait(timeout=5)
-                raise TimeoutError('reprefill_ssh_tunnel_timeout')
-            time.sleep(.1)
+            owned = dict(**process_identity(proc.pid), argv=argv,
+                         run_id=os.environ.get('KV_EC_PERF_RUN_ID'), local_port=local_port,
+                         remote_port=remote_port, remote_host=host.cfg['ssh'])
+            proc.kv_ec_owned, proc.kv_ec_root = owned, root
+            save(root / 'owned-process.json', owned)
+            deadline, delay = time.monotonic() + 30, .1
+            while True:
+                if proc.poll() is not None:
+                    raise RuntimeError('reprefill_ssh_tunnel_failed; see ' + str(root / 'ssh.log'))
+                try:
+                    assert_listener_owned(local_port, owned)
+                    status = health_status(f'http://127.0.0.1:{local_port}/health', timeout=2)
+                    if status == 200:
+                        assert_listener_owned(local_port, owned)
+                        return proc
+                except OSError:
+                    pass
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('reprefill_ssh_tunnel_timeout; see ' + str(root / 'ssh.log'))
+                time.sleep(delay)
+                delay = min(delay * 2, 1.)
+        except BaseException:
+            if owned is None:
+                owned = dict(**process_identity(proc.pid), run_id=os.environ.get('KV_EC_PERF_RUN_ID'))
+            cleanup_process(proc, owned, root)
+            assert_free([local_port], 'TUNNEL_PORT_RELEASE_FAILED')
+            raise
 
 
 def native_metrics(root, n0, n1, recovery, delivery):
@@ -427,6 +551,21 @@ def trial():
             raise ValueError('GPU_ADMISSION_MODE_MISMATCH: startup memory fraction')
         return record
     try:
+        from .perf_ports import trial_ports
+        save(local / 'trial-ports.json', dict(run_id=rid, rs_server=cfg['rs_server'],
+             nodes=[dict(node=h.node, ports=trial_ports(cfg, h.node),
+                         roles=(dict(origin=h.cfg['origin_port'], tunnel=h.cfg['origin_port'],
+                                     return_port=cfg['return_port']) if h.node == 0 else
+                                dict(origin=h.cfg['origin_port'], target=cfg['target_port'],
+                                     delivery=cfg['delivery_port'])),
+                         host=h.cfg.get('ssh', 'local232')) for h in hosts]))
+        # Both host-local guards hold their locks from here until reverse-order
+        # cleanup has stopped every model/native service and the local tunnel.
+        for h in hosts:
+            start(h, 'ports', SELF, 'hold-ports', '--root', h.root,
+                  '--ports', ','.join(map(str, trial_ports(cfg, h.node))))
+            h.run(SELF, 'wait-file', '--path', h.root / 'ports-ready.json',
+                  '--service-root', h.root / 'ports')
         parallel(*[lambda h=h: h.run(B, 'inventory', '--output', h.root / f'inventory-{232+h.node}.json') for h in hosts])
         scp(b, remote / 'inventory-233.json', local / 'inventory-233.json')
         for h in hosts:
@@ -493,7 +632,7 @@ def trial():
             target_admission = startup_evidence(local / 'reprefill-target-run.json')
             from .perf_preflight import free_ports
             free_ports([a.cfg['origin_port']])
-            tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'])
+            tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'], local / 'tunnel')
             tunnels.append(tunnel)
             a.run(B, 'inference', '--scheme', 'reprefill', '--url',
                 f'http://127.0.0.1:{a.cfg["origin_port"]}', '--model', a.cfg['model'],
@@ -537,10 +676,15 @@ def trial():
                 timing_note='all event timestamps use node0 coordinator monotonic; SSH tunnel targets the owned node1 service'))
             return
         restore_id = read(local / 'capture/request_state.json')['restore_id']
-        a.run(E, 'recover', '--protection', local / 'protection.json',
+        # The synchronous return operation creates a native receiver in a
+        # daemon thread. Supervise its entire session even if its launcher exits
+        # before that helper; never leave it in the coordinator's own session.
+        recovery = start(a, 'return', E, 'recover', '--protection', local / 'protection.json',
             '--survivor', local / f'export0/{restore_id}/global_node.bin', *rdma(a),
             '--rdma-return-host', cfg['return_host'], '--rdma-return-port', cfg['return_port'],
             '--output', local / 'recovered-source')
+        if recovery.wait(timeout=1200) != 0:
+            raise RuntimeError('owned return recovery failed; see return/server.log')
         # Native receiver, not a model service. It exits after one transfer.
         receive = start(b, 'receiver', E, 'receive-source', '--remote-host', cfg['return_host'],
             '--remote-port', cfg['delivery_port'], '--rdma-device', b.cfg.get('rdma_device', 'mlx5_0'),
@@ -605,7 +749,7 @@ def trial():
                 local / 'node1-reference/submitted_input_ids.json')
             from .perf_preflight import free_ports
             free_ports([a.cfg['origin_port']])
-            tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'])
+            tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'], local / 'tunnel')
             tunnels.append(tunnel)
             target_run = read(local / 'target-run.json')
             a.run(B, 'inference', '--scheme', 'reprefill', '--url',
@@ -659,21 +803,32 @@ def trial():
     finally:
         errors = []
         for tunnel in tunnels:
-            if tunnel.poll() is None:
-                tunnel.terminate()
-                try:
-                    tunnel.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    tunnel.kill()
-                    tunnel.wait(timeout=5)
+            try:
+                cleanup_process(tunnel, tunnel.kv_ec_owned, tunnel.kv_ec_root)
+                from .perf_ports import assert_free
+                assert_free([a.cfg['origin_port']], 'TUNNEL_PORT_RELEASE_FAILED')
+            except Exception as exc:
+                errors.append('tunnel cleanup: ' + str(exc))
         for h, name, proc in reversed(services):
             if proc.poll() is None:
                 try:
                     stop(h, name)
                 except Exception as exc:
-                    errors.append(f'cleanup node{h.node}/{name}: {exc}; lease expires within 90s')
+                    errors.append(f'cleanup node{h.node}/{name}: {exc}; '
+                                  f'lease expires within {150 if name == "ports" else 90}s')
             elif proc.returncode:
                 errors.append(f'owned supervisor failed node{h.node}/{name}: exit={proc.returncode}')
+        for h in hosts:
+            try:
+                h.run(SELF, 'check-ports', '--root', h.root,
+                      '--ports', ','.join(map(str, trial_ports(cfg, h.node))), timeout=30)
+            except Exception as exc:
+                errors.append(f'port release node{h.node}: {exc}')
+        try:
+            health = check_rs_health(cfg, os.environ.get('KV_EC_RS_EXPECTED_EPOCH'))
+            save(local / 'rs-after-cleanup.json', health)
+        except Exception as exc:
+            errors.append('RS health after cleanup: ' + str(exc))
         # Preserve remote logs on success AND failure. No KV payload is SCP'd.
         try:
             b.run(SELF, 'bundle-json', '--root', remote, '--output', remote / 'json-evidence.zip', timeout=120)
@@ -692,7 +847,8 @@ def trial():
         for log in logs:
             log.close()
         save(local / 'cleanup.json', dict(errors=errors, status='FAIL' if errors else 'PASS',
-                                        remote_root=str(remote), lease_timeout_s=90))
+                                        remote_root=str(remote), lease_timeout_s=90,
+                                        port_guard_lease_timeout_s=150))
         if errors and sys.exc_info()[0] is None:
             raise RuntimeError('; '.join(errors))
 
@@ -702,7 +858,7 @@ def main():
     sub = p.add_subparsers(dest='command', required=True)
     trial_parser = sub.add_parser('trial')
     trial_parser.add_argument('--recovery-mode', choices=('two-level', 'reprefill'), default='two-level')
-    for name in ('prepare', 'init-trial', 'heartbeat', 'stop', 'service', 'bundle-json'):
+    for name in ('prepare', 'init-trial', 'heartbeat', 'stop', 'service', 'bundle-json', 'hold-ports', 'check-ports'):
         q = sub.add_parser(name)
         q.add_argument('--root', type=Path, required=True)
         if name == 'service':
@@ -710,6 +866,8 @@ def main():
             q.add_argument('argv', nargs=argparse.REMAINDER)
         if name == 'bundle-json':
             q.add_argument('--output', type=Path, required=True)
+        if name in ('hold-ports', 'check-ports'):
+            q.add_argument('--ports', required=True)
     q = sub.add_parser('wait-file')
     q.add_argument('--path', type=Path, required=True)
     q.add_argument('--service-root', type=Path, required=True)
@@ -731,10 +889,21 @@ def main():
         (a.root / 'lease').touch()
     elif a.command == 'stop':
         require_trial(a.root.parent)
-        if a.root.name not in ('origin', 'target', 'receiver'):
+        if a.root.name not in ('origin', 'target', 'receiver', 'return', 'ports'):
             raise ValueError('invalid_owned_service_name')
         a.root.mkdir(exist_ok=True)  # startup race: supervisor must see stop
         (a.root / 'stop').touch(exist_ok=True)
+    elif a.command == 'hold-ports':
+        from .perf_ports import hold_ports
+        hold_ports(a.root, [int(p) for p in a.ports.split(',')])
+    elif a.command == 'check-ports':
+        from .perf_ports import listeners
+        require_trial(a.root)
+        occupied = listeners([int(p) for p in a.ports.split(',')])
+        save(a.root / 'port-check.json', dict(run_id=os.environ['KV_EC_PERF_RUN_ID'],
+             status='FAIL' if occupied else 'PASS', listeners=occupied))
+        if occupied:
+            raise RuntimeError('PORT_RELEASE_FAILED: ' + json.dumps(occupied))
     elif a.command == 'service':
         require_trial(a.root.parent)
         try:

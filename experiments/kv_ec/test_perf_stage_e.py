@@ -520,6 +520,7 @@ class WaitHealthTests(unittest.TestCase):
 
     def wait(self, timeout=1):
         with patch.object(stage.time, 'monotonic', side_effect=lambda: self.clock), \
+                patch('experiments.kv_ec.perf_ports.assert_listener_owned'), \
                 patch.object(stage.time, 'sleep', side_effect=self.advance):
             stage.wait_health('http://127.0.0.1:30984/', self.root, timeout=timeout)
 
@@ -824,9 +825,17 @@ class CoordinatorMockTests(unittest.TestCase):
                     self.returncode = 0
                     if fail == 'launch' and self.name == 'target':
                         raise RuntimeError('MOCK_FAILURE_launch')
+                    if fail == 'recover' and self.name == 'return':
+                        raise RuntimeError('MOCK_FAILURE_recover')
                     processes[self.node, self.name] = self
                     tail = args[args.index('--') + 1:]
-                    if self.name == 'origin':
+                    if self.name == 'ports':
+                        bench.save(option(tail, 'root') / 'ports-ready.json', dict(status='MOCK'))
+                    elif self.name == 'return':
+                        calls.append((self.node, 'recover'))
+                        bench.save(option(tail, 'output') / 'protected/recovery.json', dict(transfer={}))
+                        self.done = True
+                    elif self.name == 'origin':
                         bench.save(option(tail, 'bundle') / 'request_state.json', dict(restore_id='mock-restore'))
                         self_outer.assertEqual(tail[tail.index('--gpu-admission-mode') + 1], selected)
                         bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-origin', **mock_gpu_policy(selected, tp=tp)))
@@ -864,6 +873,8 @@ class CoordinatorMockTests(unittest.TestCase):
                     patch.object(stage, 'identity', return_value=dict(commit_sha='mock-only')), \
                     patch.object(stage, 'target_binding', return_value=dict(target_run_id='mock-target')), \
                     patch.object(stage, 'native_metrics'), patch.object(stage, 'local_ssh_tunnel'), \
+                    patch.object(stage, 'check_rs_health', return_value=dict(state='READY', server_epoch='mock')), \
+                    patch.object(stage, 'cleanup_process'), patch('experiments.kv_ec.perf_ports.assert_free'), \
                     patch.object(pf, 'free_ports'), patch('experiments.kv_ec.rs_recovery_source.native_stats'):
                 if fail:
                     with self.assertRaisesRegex(RuntimeError, 'MOCK_FAILURE'):
@@ -1010,12 +1021,16 @@ class RepeatMockTests(unittest.TestCase):
                 else:
                     bench.repeat(args)
                 records = [bench.read(p) for p in sorted(args.output.glob('trial-*/trial.json'))]
+                summary = bench.read(args.output / 'repeat-summary.json')
+                self.assertEqual(len(summary['trials']), len(records))
+                self.assertEqual(summary['not_started'], count - len(records))
+                self.assertEqual(summary['status'], 'FAIL' if driver_code or gate_error or timeout else 'PASS')
                 self.assertEqual(len(records), 1 if driver_code or gate_error or timeout else count)
                 self.assertEqual(len({r['run_id'] for r in records}), len(records))
                 self.assertEqual([call.args[2] for call in checks.call_args_list],
                                  [count] + list(range(count, count - len(records), -1)))
                 if timeout:
-                    stop.assert_called_once_with(dict(pid=12345), signal.SIGTERM)
+                    stop.assert_called_once_with(dict(pid=12345, run_id=records[0]['run_id']), signal.SIGTERM)
                 if driver_code or timeout:
                     gate.assert_not_called()
                 return records
@@ -1023,6 +1038,10 @@ class RepeatMockTests(unittest.TestCase):
     def test_five_mock_trials_get_unique_IDs_and_gate_propagation(self):
         records = self.exercise(count=5)
         self.assertTrue(all(r['pass_fail'] == 'PASS' for r in records))
+
+    def test_three_shared_mock_trials_keep_independent_results(self):
+        records = self.exercise(count=3, selected='shared')
+        self.assertTrue(all(r['pass_fail'] == 'PASS' and r['gpu_admission_mode'] == 'shared' for r in records))
 
     def test_zero_driver_exit_does_not_override_gate_failure(self):
         records = self.exercise(gate_error=True)

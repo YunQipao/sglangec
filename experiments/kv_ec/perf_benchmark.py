@@ -384,10 +384,11 @@ def gate_stage_e(output):
 def repeat(args):
     from .gpu_admission import config_mode, metadata
     from .perf_preflight import preflight, validate_config
-    from .perf_stage_e import process_identity, signal_owned
+    from .perf_stage_e import process_identity, signal_owned, check_signal_support
     import signal
     config = read(args.config)
     validate_config(config)
+    check_signal_support()
     selected_mode = config_mode(config)
     policy = metadata(selected_mode, config.get('mem_fraction_static', .6))
     policy.update(tp_size=config['tp_size'], prefix_tokens=config['prefix_tokens'])
@@ -413,8 +414,11 @@ def repeat(args):
     save(args.output / 'metadata.json', batch_metadata)
     save(args.output / 'preflight.json', admission)
     if admission['status'] != 'PASS':
+        save(args.output / 'repeat-summary.json', dict(status='FAIL', requested=args.repeat,
+             trials=[], not_started=args.repeat, failure_reason=admission.get('error')))
         print(json.dumps(admission), flush=True)
         raise SystemExit(1)
+    trial_results = []
     for i in range(args.repeat):
         root = args.output.resolve() / f'trial-{i:03d}-{uuid.uuid4().hex}'
         root.mkdir()
@@ -422,6 +426,7 @@ def repeat(args):
         env = dict(os.environ, KV_EC_BENCH_TRIAL=str(root), KV_EC_BENCH_CONFIG=str((args.output / 'config.json').resolve()),
                    KV_EC_PERF_RUN_ID=run_id, KV_EC_PERF_DIR=str(root / 'perf'),
                    KV_EC_PERF_ROLE='coordinator-232', KV_EC_PERF_RECOVERY_MODE=recovery_mode,
+                   KV_EC_RS_EXPECTED_EPOCH=admission['rs']['server_epoch'],
                    KV_EC_PAIRED_READY_REPREFILL='1' if paired_ready_reprefill else '0')
         started = time.monotonic_ns()
         raw = dict(run_id=run_id, returncode=None, status='failed', pass_fail='FAIL',
@@ -441,12 +446,15 @@ def repeat(args):
                                                for r in current['nodes']]
             with (root / 'driver.log').open('x') as log, Sampler(root / 'resources-232.jsonl', config['resource_interval']):
                 proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-                owned = process_identity(proc.pid)
-                save(root / 'driver-process.json', owned)
+                owned = None
                 try:
+                    owned = dict(**process_identity(proc.pid), run_id=run_id)
+                    save(root / 'driver-process.json', owned)
                     raw['returncode'] = proc.wait(timeout=config['trial_timeout'])
                 except BaseException:
                     # Only this newly created/verified session receives signals.
+                    if owned is None:
+                        owned = dict(**process_identity(proc.pid), run_id=run_id)
                     signal_owned(owned, signal.SIGTERM)
                     try:
                         proc.wait(timeout=180)
@@ -489,9 +497,16 @@ def repeat(args):
             raw['failure_reason'] = f'{type(exc).__name__}: {exc}'
         raw['trial_command_ms'] = (time.monotonic_ns()-started)/1e6
         save(root / 'trial.json', raw)
+        trial_results.append(dict(run_id=run_id, path=str(root), pass_fail=raw['pass_fail'],
+                                  failure_reason=raw.get('failure_reason')))
         print(json.dumps(dict(trial=str(root), **raw)), flush=True)
         if raw['status'] != 'accepted':
+            save(args.output / 'repeat-summary.json', dict(status='FAIL', requested=args.repeat,
+                 trials=trial_results, not_started=args.repeat - len(trial_results),
+                 stopped_after_failure=True))
             raise SystemExit(1)
+    save(args.output / 'repeat-summary.json', dict(status='PASS', requested=args.repeat,
+         trials=trial_results, not_started=0))
 
 
 def validate_gpu_startups(root, config, scheme):
