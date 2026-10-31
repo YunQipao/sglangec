@@ -16,6 +16,11 @@ import time
 import uuid
 
 
+_COUNTS = {}
+_COUNTS_LOCK = threading.Lock()
+_BOOT_ID = None
+
+
 def enabled():
     return bool(os.environ.get("KV_EC_PERF_DIR") and os.environ.get("KV_EC_PERF_RUN_ID"))
 
@@ -24,13 +29,24 @@ def emit(stage, category, *, start_ns=None, end_ns=None, duration_ms=None,
          source="monotonic_ns", status="ok", **fields):
     if not enabled():
         return
-    end_ns = time.monotonic_ns() if end_ns is None else end_ns
+    if source != "cuda_event":
+        end_ns = time.monotonic_ns() if end_ns is None else end_ns
     if duration_ms is None:
         duration_ms = (end_ns - start_ns) / 1e6
+    global _BOOT_ID
+    if _BOOT_ID is None:
+        try:
+            _BOOT_ID = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        except OSError:
+            _BOOT_ID = None
+    operation_id = os.environ.get('KV_EC_PERF_OPERATION_ID',
+                                  os.environ.get('KV_EC_PERF_RUN_ID'))
     record = dict(schema="kv-ec-perf-v1", run_id=os.environ["KV_EC_PERF_RUN_ID"],
                   host=socket.gethostname(), pid=os.getpid(), thread=threading.get_ident(),
+                  boot_id=_BOOT_ID, operation_id=operation_id,
                   stage=stage, category=category, source=source, status=status,
                   role=os.environ.get('KV_EC_PERF_ROLE', 'unspecified'),
+                  clock_domain='cuda_event_ms' if source == 'cuda_event' else 'host_monotonic_ns',
                   start_ns=start_ns, end_ns=end_ns, duration_ms=duration_ms,
                   inclusive=True, **fields)
     # Observation failures must not alter A/B/C/D/E correctness or serving.
@@ -55,6 +71,10 @@ def span(stage, category, **fields):
         return
     started, status = time.monotonic_ns(), "ok"
     span_id = uuid.uuid4().hex
+    key = (os.environ.get('KV_EC_PERF_RUN_ID'), stage, socket.gethostname(), os.getpid())
+    with _COUNTS_LOCK:
+        call_index = _COUNTS.get(key, 0) + 1
+        _COUNTS[key] = call_index
     try:
         yield
     except BaseException:
@@ -63,7 +83,7 @@ def span(stage, category, **fields):
     finally:
         ended = time.monotonic_ns()
         emit(stage, category, start_ns=started, end_ns=ended, status=status,
-             span_id=span_id, **fields)
+             span_id=span_id, call_index=call_index, **fields)
 
 
 def observed(stage, category):

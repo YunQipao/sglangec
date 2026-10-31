@@ -509,6 +509,19 @@ def trial():
             reference = read(local / 'node1-reference/rank_0.json')
             if request['output_token_ids'] != reference['output_token_ids']:
                 raise ValueError('reprefill_output_token_ids_mismatch')
+            if all(key in request for key in ('start_ns', 'first_output_token_ns',
+                                               'full_output_ns', 'response_complete_ns')):
+                validation_complete = time.monotonic_ns()
+                from .cold_timing import build_timing, clock_identity
+                client_identity = clock_identity()
+                client = dict(operation_id=rid, **client_identity,
+                    request_start_ns=request['start_ns'],
+                    first_output_token_ns=request['first_output_token_ns'],
+                    full_output_ns=request['full_output_ns'],
+                    response_complete_ns=request['response_complete_ns'])
+                save(local / 'cold-comparison-timing.json', build_timing(
+                    rid, 'reprefill', recovery_start, target_started, ready, client,
+                    validation_complete))
             save(local / 'reprefill.json', dict(schema='kv-ec-cold-reprefill-v1',
                 **dict(policy, gpu_resources_before_start=target_admission['gpu_resources_before_start']),
                 functional_correctness_pass=True,
@@ -575,6 +588,14 @@ def trial():
             fault_boundary_to_decode_complete_ms=(decoded-recovery_start)/1e6,
             fault_boundary_to_ready_ms=(ready-recovery_start)/1e6,
             timing_note='232 coordinator monotonic; includes remote command and Stage E validation'))
+        save(local / 'cold-comparison-timing-status.json', dict(
+            schema='kv-ec-cold-comparison-timing-status-v1', operation_id=rid,
+            scheme='two-level', functional_correctness_pass=True,
+            performance_measurement_eligible=False,
+            unavailable_metrics=['fault_boundary_to_first_output_token_ms',
+                'fault_boundary_to_response_complete_ms', 'response_stream_ms'],
+            reason='two-level completion is observed by the restore hook and Stage E checker; '
+                'no equivalent client SSE response is issued by this path'))
         if os.environ.get('KV_EC_PAIRED_READY_REPREFILL') == '1':
             b.run(SELF, 'wait-health', '--url', f'http://127.0.0.1:{cfg["target_port"]}',
                   '--service-root', remote / 'target')

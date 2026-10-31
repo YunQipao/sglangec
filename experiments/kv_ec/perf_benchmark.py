@@ -216,7 +216,7 @@ def inference(args):
         for i in range(args.warmup + args.repeat):
             request = dict(input_ids=ids, sampling_params=sampling, stream=True,
                            rid=f'perf-{uuid.uuid4().hex}', return_logprob=False)
-            started, first, final = time.monotonic_ns(), None, None
+            started, first, full, final = time.monotonic_ns(), None, None, None
             # SSE: timestamp receipt of first generated token on this client.
             req = urllib.request.Request(args.url.rstrip('/') + '/generate',
                 data=json.dumps(request).encode(), headers={'Content-Type': 'application/json'})
@@ -228,11 +228,14 @@ def inference(args):
                     if data == b'[DONE]':
                         break
                     item = json.loads(data)
-                    if item.get('meta_info', {}).get('completion_tokens', 0) > 0 and first is None:
+                    completion_tokens = item.get('meta_info', {}).get('completion_tokens', 0)
+                    if completion_tokens > 0 and first is None:
                         first = time.monotonic_ns()
+                    if completion_tokens == 17 and full is None:
+                        full = time.monotonic_ns()
                     final = item
-            ended = time.monotonic_ns()
-            if final is None or first is None:
+            response_complete = time.monotonic_ns()
+            if final is None or first is None or full is None:
                 raise ValueError('missing streaming generation evidence')
             usage = final['meta_info']
             if usage.get('cached_tokens') != 0 or usage.get('prompt_tokens') != 256 or usage.get('completion_tokens') != 17:
@@ -241,11 +244,13 @@ def inference(args):
             if not isinstance(output_ids, list) or len(output_ids) != 17:
                 raise ValueError('server must return all 17 output_ids for correctness comparison')
             save(args.output / f'request-{i:03d}.json', dict(warmup=i < args.warmup,
-                scheme=args.scheme, start_ns=started, end_ns=ended,
-                request_ms=(ended-started)/1e6, prefill_ttft_ms=(first-started)/1e6,
+                scheme=args.scheme, start_ns=started, first_output_token_ns=first,
+                full_output_ns=full, response_complete_ns=response_complete,
+                end_ns=response_complete,
+                request_ms=(response_complete-started)/1e6, prefill_ttft_ms=(first-started)/1e6,
                 ready_to_first_token_ms=((first-args.ready_monotonic_ns)/1e6
                     if getattr(args, 'ready_monotonic_ns', None) is not None else None),
-                ready_to_decode_complete_ms=((ended-args.ready_monotonic_ns)/1e6
+                ready_to_decode_complete_ms=((response_complete-args.ready_monotonic_ns)/1e6
                     if getattr(args, 'ready_monotonic_ns', None) is not None else None),
                 source='client_monotonic_ns', response=final, output_token_ids=output_ids,
                 correctness='raw token IDs recorded; compare against Stage E reference separately'))
@@ -652,6 +657,7 @@ def collect(args):
                 if trial['verdict_sha256'] != expected_digest:
                     raise ValueError('trial_verdict_digest_mismatch')
                 stages = set()
+                checkpoint_calls = defaultdict(list)
                 for log in sorted(directory.glob('perf*/*.jsonl')):
                     for line in log.read_text().splitlines():
                         record = json.loads(line)
@@ -663,6 +669,44 @@ def collect(args):
                         stages.add(record['stage'])
                         name = '/'.join(map(str, (record['stage'], record['role'], record['host'], record.get('tp_rank', '-'))))
                         per_trial[name] += value
+                        if record['stage'] == 'checkpoint_load_validate_inclusive':
+                            checkpoint_calls[name].append(dict(
+                                call_index=record.get('call_index'), duration_ms=value,
+                                span_id=record.get('span_id'), pid=record.get('pid'),
+                                boot_id=record.get('boot_id'), operation_id=record.get('operation_id')))
+                if checkpoint_calls:
+                    for name, calls in checkpoint_calls.items():
+                        per_trial[name + '/call_count'] = len(calls)
+                        per_trial[name + '/cumulative_ms'] = sum(c['duration_ms'] for c in calls)
+                        for index, call in enumerate(sorted(calls,
+                                key=lambda c: c['call_index'] or 0), start=1):
+                            per_trial[name + f'/call_{index}_ms'] = call['duration_ms']
+                timing_path = directory / 'cold-comparison-timing.json'
+                performance_measurement_eligible = False
+                if timing_path.exists():
+                    timing = read(timing_path)
+                    from .cold_timing import validate_timing
+                    validate_timing(timing, trial['run_id'], scheme)
+                    timing_status = read(directory / 'cold-comparison-timing-status.json') \
+                        if (directory / 'cold-comparison-timing-status.json').exists() else {}
+                    if timing_status and (timing_status.get('operation_id') != trial['run_id'] or
+                            timing_status.get('scheme') != scheme):
+                        raise ValueError('cold_comparison_timing_status_identity_invalid')
+                    required_timing = ('target_launch_to_ready_ms',
+                        'fault_boundary_to_first_output_token_ms',
+                        'fault_boundary_to_response_complete_ms',
+                        'fault_boundary_to_validation_complete_ms', 'response_stream_ms')
+                    for metric in required_timing:
+                        per_trial['cold_comparison/' + metric] = timing[metric]
+                    performance_measurement_eligible = timing.get(
+                        'performance_measurement_eligible') is True
+                elif (directory / 'cold-comparison-timing-status.json').exists():
+                    timing_status = read(directory / 'cold-comparison-timing-status.json')
+                    if (timing_status.get('operation_id') != trial['run_id'] or
+                            timing_status.get('scheme') != scheme):
+                        raise ValueError('cold_comparison_timing_status_identity_invalid')
+                    performance_measurement_eligible = timing_status.get(
+                        'performance_measurement_eligible') is True
                 required = ({'gpu_kv_snapshot', 'gpu_to_host', 'local_xor_encode', 'gpu_kv_writeback',
                             'gpu_layer_readback_validation', 'scheduler_request_rebuild',
                             'model_weight_load', 'first_restored_decode_cuda',
@@ -675,6 +719,8 @@ def collect(args):
                 if scheme == 'reprefill':
                     accepted.append(str(directory))
                     contexts[key]['functional_correctness_pass'] = True
+                    contexts[key].setdefault('performance_measurement_eligible_by_trial', {})[
+                        trial['run_id']] = performance_measurement_eligible
                     seen.add(fingerprint)
                     for name, value in per_trial.items():
                         groups[(scheme, key, name)].append(value)
@@ -691,6 +737,8 @@ def collect(args):
                     groups[(scheme, key, name)].append(value)
                 accepted.append(str(directory))
                 contexts[key]['functional_correctness_pass'] = True
+                contexts[key].setdefault('performance_measurement_eligible_by_trial', {})[
+                    trial['run_id']] = performance_measurement_eligible
                 contexts[key].setdefault('recovery_by_trial', {})[trial['run_id']] = dict(
                     rank_correctness=(verdict or {}).get('rank_correctness', []),
                     rank_gpu_kv_mapping=(verdict or {}).get('rank_gpu_kv_mapping', []),

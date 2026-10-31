@@ -1,0 +1,48 @@
+{
+  "schema": "kv-ec-cold-timing-implementation-baseline-v1",
+  "head": "9cd1ea1a05ab5b02936c94fc9e289e819e6c01fb",
+  "git_status_short_before": "",
+  "git_diff_binary_head_before": "",
+  "historical_results": {
+    "two_level_summary": {
+      "path": "/tmp/kv-stage-e-tp2-shared.Sm8j0Nys/stability-20261031-062558-summary.json",
+      "sha256": "2bb1f45d21fb031189e6ec57376f5b457fa269a4ec9281c4cdfd0c2437fb345e",
+      "config_path": "/tmp/kv-stage-e-tp2-shared.Sm8j0Nys/config.json",
+      "config_sha256": "19a22123085340f2a50c418ac749b0ed33ae4e3286a99b77ee60fb931bf05e0d",
+      "accepted_trials": 3,
+      "functional_correctness_pass": true,
+      "real_rdma": true,
+      "gpu_restore_committed": true,
+      "new_instance": true,
+      "resume_decode_forward_count": 16,
+      "recomputed_prefix_tokens": 0,
+      "output_token_ids_match": true,
+      "failure_to_decode_complete_harness_ms": [115258.183023, 115923.293935, 115222.557494],
+      "new_instance_launch_to_ready_harness_mean_ms": 78548.88733633334
+    },
+    "reprefill_smoke": {
+      "path": "/media/sda1/iic/luotao/sglangec-env/cold-compare.eyV0cCUX/reprefill-smoke",
+      "trial_path": "/media/sda1/iic/luotao/sglangec-env/cold-compare.eyV0cCUX/reprefill-smoke/trial-000-81b6b0a2efca4880a8889459f54612f5",
+      "status": "accepted",
+      "pass_fail": "PASS",
+      "functional_correctness_pass": true,
+      "pass_reprefill": true,
+      "output_token_ids_match": true
+    }
+  },
+  "source_sha256_before": {
+    "python/sglang/srt/managers/tp_worker.py": "2bb9ddd95e0efc87ebdc3447e76d1fa5cd129b12e2a5b974907bba05b898fe3d",
+    "experiments/kv_ec/perf_observer.py": "4e1a9b5d83d153b05dc933f9d22e56ecd8d0d7a5a1adc033303226886b01e8f4",
+    "experiments/kv_ec/perf_benchmark.py": "4d8144ab664a1f6a627666589ce1f61d26269e6cd36a7b41b39400a02e182062",
+    "experiments/kv_ec/perf_stage_e.py": "eeb2ab8105494887fe1dd1f672a0b8281dc4795714f71f21159ec91dc9170c8f",
+    "experiments/kv_ec/perf_preflight.py": "fe618567716de5c5281db8c738741dbe3ea862a4ffa6029dc7565eab1df87fcf",
+    "experiments/kv_ec/gpu_cold_resume_hook.py": "0f43bdd3b7dcd5081b23b27eaf01a5d453e401501d9810a5aec2455602d0e84d",
+    "experiments/kv_ec/gpu_kv_restore.py": "7b476087b9fac4b521fb8d60737140cceaaf58e92c13aecceba81bd5fca8dece",
+    "experiments/kv_ec/gpu_resume_hook.py": "fb1d6468533f24f08f0eb375ac8efe5564e9fe64ba010fe049fd26aa8a041de6",
+    "experiments/kv_ec/verify_gpu_restore.py": "81c2386820b6b2c8ce6663acd1c4916be42f4a65aa3c9324322c730956c5bb6f",
+    "experiments/kv_ec/verify_gpu_cold_resume.py": "ee9e071dc4eb21d99da067e0e36aab9babb7aecdd98f7e31223c5ca064dc3b2d",
+    "experiments/kv_ec/verify_rs_cold_resume.py": "df398165f8d3fdff901338aa28dd9fc9d640d2f0783c9616cd3590e5d0d04ca2",
+    "experiments/kv_ec/reprefill_server.py": "23e0f4fd20a6afe28570259e4df79f365544b0e935e896185ac1bb0ce887ea10",
+    "experiments/kv_ec/test_perf_stage_e.py": "7ab4e4cf6fe354ca74754c9ecf1fc0faf5f96e5a6d7e7bfd69ee5cfa1b295a0d"
+  }
+}
