@@ -22,6 +22,7 @@ import math
 import urllib.request
 
 from .perf_benchmark import Sampler, digest, identity, read, save
+from .pidfd_compat import check_signal_support, pidfd_open, pidfd_send_signal
 
 E = 'experiments.kv_ec.verify_rs_cold_resume'
 D = 'experiments.kv_ec.verify_gpu_cold_resume'
@@ -100,19 +101,27 @@ def owned_members(owned):
     return members
 
 
-def pidfd_open(pid):
-    if hasattr(os, 'pidfd_open'):
-        return os.pidfd_open(pid)
-    # Some Conda Python builds omit os.pidfd_open even on supported Linux.
-    import ctypes
-    libc = ctypes.CDLL(None, use_errno=True)
-    call = libc.pidfd_open
-    call.argtypes, call.restype = (ctypes.c_int, ctypes.c_uint), ctypes.c_int
-    fd = call(pid, 0)
-    if fd < 0:
-        err = ctypes.get_errno()
-        raise OSError(err, os.strerror(err))
-    return fd
+def verify_signal_identity(member, owned, exit_retries=50):
+    current = process_identity(member['pid'])
+    if any(current[k] != member[k] for k in
+           ('pid', 'start_ticks', 'uid', 'pgid', 'session', 'sid', 'boot_id')):
+        raise ValueError('owned_process_changed_before_or_after_signal')
+    if not owned.get('run_id') or owned['run_id'] != os.environ.get('KV_EC_PERF_RUN_ID'):
+        raise ValueError('cleanup_trial_ownership_mismatch')
+    if current['state'] in ('Z', 'X'):
+        return
+    token = ('KV_EC_PERF_RUN_ID=' + owned['run_id']).encode()
+    try:
+        environment = (Path('/proc') / str(member['pid']) / 'environ').read_bytes().split(b'\0')
+    except PermissionError:
+        # Linux may deny environ during exit after stat was read. Only a
+        # revalidated zombie/dead instance is exempt; live denial fails closed.
+        if not exit_retries:
+            raise
+        time.sleep(.01)
+        return verify_signal_identity(member, owned, exit_retries - 1)
+    if token not in environment and current['state'] not in ('Z', 'X'):
+        raise ValueError('owned_process_trial_environment_mismatch; refusing signal')
 
 
 def signal_owned(owned, sig):
@@ -125,27 +134,14 @@ def signal_owned(owned, sig):
         except ProcessLookupError:
             continue
         try:
-            current = process_identity(member['pid'])
-            if any(current[k] != member[k] for k in ('start_ticks', 'uid', 'session', 'boot_id')):
-                raise ValueError('owned_process_changed_before_signal')
-            signal.pidfd_send_signal(fd, sig)
+            verify_signal_identity(member, owned)
+            pidfd_send_signal(fd, sig)
+            verify_signal_identity(member, owned)
         except (ProcessLookupError, FileNotFoundError):
             pass
         finally:
             os.close(fd)
     return bool(members)
-
-
-def check_signal_support():
-    """Refuse startup before creating children if safe signalling is absent."""
-    try:
-        fd = pidfd_open(os.getpid())
-        try:
-            signal.pidfd_send_signal(fd, 0)
-        finally:
-            os.close(fd)
-    except (AttributeError, OSError) as exc:
-        raise RuntimeError('PIDFD_SIGNAL_SUPPORT_REQUIRED: ' + str(exc)) from exc
 
 
 def cleanup_process(proc, owned, root):
@@ -501,6 +497,11 @@ def trial():
     hosts = [Host(cfg['nodes'][0], local, rid, 0, selected_mode),
              Host(cfg['nodes'][1], remote, rid, 1, selected_mode)]
     a, b = hosts
+    # Check both configured interpreters before any remote trial/service exists.
+    # The coordinator log is already inside the current benchmark trial.
+    with (local / 'pidfd-preflight.log').open('x') as log:
+        for h in hosts:
+            h.run(SELF, 'check-pidfd', log=log, timeout=30)
     save(local / 'trial-owner.json', dict(run_id=rid, **policy))
     (local / 'lease').touch(exist_ok=False)
     b.run(SELF, 'prepare', '--root', remote)
@@ -858,6 +859,7 @@ def main():
     sub = p.add_subparsers(dest='command', required=True)
     trial_parser = sub.add_parser('trial')
     trial_parser.add_argument('--recovery-mode', choices=('two-level', 'reprefill'), default='two-level')
+    sub.add_parser('check-pidfd')
     for name in ('prepare', 'init-trial', 'heartbeat', 'stop', 'service', 'bundle-json', 'hold-ports', 'check-ports'):
         q = sub.add_parser(name)
         q.add_argument('--root', type=Path, required=True)
@@ -876,7 +878,9 @@ def main():
     q.add_argument('--service-root', type=Path, required=True)
     q.add_argument('--timeout', type=float, default=900)
     a = p.parse_args()
-    if a.command == 'trial':
+    if a.command == 'check-pidfd':
+        print(json.dumps(check_signal_support()), flush=True)
+    elif a.command == 'trial':
         os.environ['KV_EC_PERF_RECOVERY_MODE'] = a.recovery_mode
         trial()
     elif a.command == 'prepare':
@@ -909,9 +913,13 @@ def main():
         try:
             service(a.root, a.argv[1:] if a.argv[:1] == ['--'] else a.argv, a.resource_interval)
         except BaseException as exc:
-            if a.root.is_dir() and not (a.root / 'exit.json').exists():
+            # Parent trial is authenticated above. Publish even if startup
+            # failed before service() created its directory.
+            a.root.mkdir(exist_ok=True)
+            if not (a.root / 'exit.json').exists():
                 save(a.root / 'exit.json', dict(returncode=1, reason='supervisor_start_or_cleanup_failed',
-                                               error=f'{type(exc).__name__}: {exc}'))
+                                               error=f'{type(exc).__name__}: {exc}',
+                                               traceback=traceback.format_exc()))
             raise
     elif a.command == 'bundle-json':
         with zipfile.ZipFile(a.output, 'x', compression=zipfile.ZIP_DEFLATED) as z:
@@ -922,7 +930,9 @@ def main():
         end = time.monotonic() + 900
         while not a.path.exists():
             if (a.service_root / 'exit.json').exists():
-                raise RuntimeError('OWNED_SERVICE_START_FAILED: ' + str(a.service_root / 'server.log'))
+                raise RuntimeError('OWNED_SERVICE_START_FAILED: ' +
+                                   json.dumps(read(a.service_root / 'exit.json')) +
+                                   '; see ' + str(a.service_root / 'exit.json'))
             if time.monotonic() > end:
                 raise TimeoutError('launcher did not publish ' + str(a.path))
             time.sleep(.5)

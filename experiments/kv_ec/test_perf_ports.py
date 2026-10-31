@@ -118,7 +118,7 @@ class PortLeaseTests(unittest.TestCase):
 
 class TunnelTests(unittest.TestCase):
     def test_missing_safe_signal_support_refuses_before_spawn(self):
-        with patch.object(stage, 'pidfd_open', side_effect=PermissionError('denied')), \
+        with patch('experiments.kv_ec.pidfd_compat.pidfd_open', side_effect=PermissionError('denied')), \
                 patch.object(stage.subprocess, 'Popen') as spawn:
             with self.assertRaisesRegex(RuntimeError, 'PIDFD_SIGNAL_SUPPORT_REQUIRED'):
                 stage.local_ssh_tunnel(NS(cfg=dict(ssh='mock233')), 30984, 30986, Path('/unused'))

@@ -350,6 +350,8 @@ def probe(cfg, node_index, output_root):
         if Path(sys.prefix).resolve() != Path(node['conda_prefix']).resolve():
             raise ValueError('CONDA_PREFIX_MISMATCH: ' + sys.prefix)
         checks['conda_prefix'] = sys.prefix
+        from .pidfd_compat import check_signal_support
+        checks['pidfd'] = check_signal_support()
         checks['tmpdir'] = check_tmpdir(node, cfg['min_disk_bytes'])
         checks['ninja'] = check_ninja(node)
         checks['cuda_toolchain'] = check_cuda_toolchain(node, output_root)
