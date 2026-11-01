@@ -1,0 +1,22 @@
+{
+  "all_four_offline_evidence_audits_pass": true,
+  "approved_for_algorithm_speedup_claim": false,
+  "copied_bytes": 12394994,
+  "copied_file_count": 211,
+  "created_utc": "2026-11-01T11:34:48.813437+00:00",
+  "git_commit_or_push": false,
+  "limitations": [
+    "No original KV .bin, logits .npy, or zip archives",
+    "No full runtime/model snapshot; selected source hashes match historical metadata",
+    "Three successful Two-level trials and one Re-Prefill trial, not matched five-round comparison",
+    "Two-level has no equivalent client SSE timing; algorithm speedup cannot be calculated",
+    "Shared GPUs; startup process snapshots do not quantify causal contention"
+  ],
+  "new_gpu_or_rdma_runs": false,
+  "privacy": "Exact evidence includes internal hosts/IPs/user paths/process IDs/token IDs; not redacted. Review before public upload.",
+  "schema": "kv-ec-lightweight-export-v1",
+  "source_bytes": 1415361981,
+  "source_file_count": 928,
+  "source_root": "/media/sda1/iic/luotao/kv-ec-perf-tp2-shared/run-20261101.Lqol9F7L",
+  "source_unmodified": true
+}

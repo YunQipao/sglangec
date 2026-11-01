@@ -1,0 +1,9 @@
+{
+  "errors": [
+    "owned supervisor failed node1/target: exit=1"
+  ],
+  "lease_timeout_s": 90,
+  "port_guard_lease_timeout_s": 150,
+  "remote_root": "/media/sda1/iic_data/luotao/kv-ec-perf-233/trial-000-38add57f3388438bb02fa3139fe44e60",
+  "status": "FAIL"
+}

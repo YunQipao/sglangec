@@ -1,0 +1,161 @@
+{
+  "commit_sha": "7dbe9ff5c73d919293c8798227b56aaa8a997fd4",
+  "files": [
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/perf_observer.py.txt",
+      "current_sha256": "f1d286b5b5d6b33ba6987f7a743531318f43e2f2373e11cd62067cd8eb71847e",
+      "historical_sha256": "f1d286b5b5d6b33ba6987f7a743531318f43e2f2373e11cd62067cd8eb71847e",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/perf_observer.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/perf_benchmark.py.txt",
+      "current_sha256": "1b8e7c6ffc35d4a3307ed15f99d612abbcd7cd79aa3e16e94771733341615c46",
+      "historical_sha256": "1b8e7c6ffc35d4a3307ed15f99d612abbcd7cd79aa3e16e94771733341615c46",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/perf_benchmark.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/perf_stage_e.py.txt",
+      "current_sha256": "54c4d4165b3dd54a0b65ab25e00dc41f60a145084782b59f7ee3fd0a1f31ee5f",
+      "historical_sha256": "54c4d4165b3dd54a0b65ab25e00dc41f60a145084782b59f7ee3fd0a1f31ee5f",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/perf_stage_e.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/perf_preflight.py.txt",
+      "current_sha256": "03b7c2fcd2ee071df698fec0d4d872f9b4f2f60552fe04539024cc6b0f3c3377",
+      "historical_sha256": "03b7c2fcd2ee071df698fec0d4d872f9b4f2f60552fe04539024cc6b0f3c3377",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/perf_preflight.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/cold_timing.py.txt",
+      "current_sha256": "ad0cc3651a1d6f97b48885dc678eee86cd1c9ae2413da8cfe74e36512c215972",
+      "historical_sha256": "ad0cc3651a1d6f97b48885dc678eee86cd1c9ae2413da8cfe74e36512c215972",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/cold_timing.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/gpu_cold_resume_hook.py.txt",
+      "current_sha256": "0f43bdd3b7dcd5081b23b27eaf01a5d453e401501d9810a5aec2455602d0e84d",
+      "historical_sha256": "0f43bdd3b7dcd5081b23b27eaf01a5d453e401501d9810a5aec2455602d0e84d",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/gpu_cold_resume_hook.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/gpu_restore_hook.py.txt",
+      "current_sha256": "731038a19a7704d45f14ee44c5faf20046dded68fcf0abfe0cf0824cf58a45e4",
+      "historical_sha256": "731038a19a7704d45f14ee44c5faf20046dded68fcf0abfe0cf0824cf58a45e4",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/gpu_restore_hook.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/gpu_kv_restore.py.txt",
+      "current_sha256": "7b476087b9fac4b521fb8d60737140cceaaf58e92c13aecceba81bd5fca8dece",
+      "historical_sha256": "7b476087b9fac4b521fb8d60737140cceaaf58e92c13aecceba81bd5fca8dece",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/gpu_kv_restore.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/gpu_resume_hook.py.txt",
+      "current_sha256": "fb1d6468533f24f08f0eb375ac8efe5564e9fe64ba010fe049fd26aa8a041de6",
+      "historical_sha256": "fb1d6468533f24f08f0eb375ac8efe5564e9fe64ba010fe049fd26aa8a041de6",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/gpu_resume_hook.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/cold_resume_state.py.txt",
+      "current_sha256": "eb5e8d6c6ddbd7a5b984f9bbb6a56f80836eef893171d3fcb1f0545f4c14ee10",
+      "historical_sha256": "eb5e8d6c6ddbd7a5b984f9bbb6a56f80836eef893171d3fcb1f0545f4c14ee10",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/cold_resume_state.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/verify_gpu_cold_resume.py.txt",
+      "current_sha256": "ee9e071dc4eb21d99da067e0e36aab9babb7aecdd98f7e31223c5ca064dc3b2d",
+      "historical_sha256": "ee9e071dc4eb21d99da067e0e36aab9babb7aecdd98f7e31223c5ca064dc3b2d",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/verify_gpu_cold_resume.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/verify_gpu_restore.py.txt",
+      "current_sha256": "81c2386820b6b2c8ce6663acd1c4916be42f4a65aa3c9324322c730956c5bb6f",
+      "historical_sha256": "81c2386820b6b2c8ce6663acd1c4916be42f4a65aa3c9324322c730956c5bb6f",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/verify_gpu_restore.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/verify_rs_cold_resume.py.txt",
+      "current_sha256": "df398165f8d3fdff901338aa28dd9fc9d640d2f0783c9616cd3590e5d0d04ca2",
+      "historical_sha256": "df398165f8d3fdff901338aa28dd9fc9d640d2f0783c9616cd3590e5d0d04ca2",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/verify_rs_cold_resume.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/rs_cold_source.py.txt",
+      "current_sha256": "ce572d67e7efbd07c549ed1ee14a066c0189b25bd0c7d253d99c22d9d1ed9d3c",
+      "historical_sha256": "ce572d67e7efbd07c549ed1ee14a066c0189b25bd0c7d253d99c22d9d1ed9d3c",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/rs_cold_source.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/reprefill_server.py.txt",
+      "current_sha256": "23e0f4fd20a6afe28570259e4df79f365544b0e935e896185ac1bb0ce887ea10",
+      "historical_sha256": "23e0f4fd20a6afe28570259e4df79f365544b0e935e896185ac1bb0ce887ea10",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/reprefill_server.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/remote_rs_client.py.txt",
+      "current_sha256": "00dfa372601af098ba25c9862bd4fdce516d669e0917cd16eb06e278520f45b5",
+      "historical_sha256": "00dfa372601af098ba25c9862bd4fdce516d669e0917cd16eb06e278520f45b5",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/remote_rs_client.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/remote_rs_server.py.txt",
+      "current_sha256": "aa1396da6b96505ee5c8319c4b63da0960fa48639ec5e7fa3cee6adf7a4a149d",
+      "historical_sha256": "aa1396da6b96505ee5c8319c4b63da0960fa48639ec5e7fa3cee6adf7a4a149d",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/remote_rs_server.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/rs_codec.py.txt",
+      "current_sha256": "8a3d344f023be0c6a5f57cc5817efa1c65ef5523753a9a10dbaa0df06331ddea",
+      "historical_sha256": "8a3d344f023be0c6a5f57cc5817efa1c65ef5523753a9a10dbaa0df06331ddea",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/rs_codec.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/online_chunk_manager.py.txt",
+      "current_sha256": "8a0e34a64416568db1b1cf9f11de5d511299d95e9586c03584a344109f3b6292",
+      "historical_sha256": "8a0e34a64416568db1b1cf9f11de5d511299d95e9586c03584a344109f3b6292",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/online_chunk_manager.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/multinode/rdma_transport.py.txt",
+      "current_sha256": "4a261c0a4dac8be25c12009e7b8b95810984f11ec3d15b923833f2bf1fa8fb29",
+      "historical_sha256": "4a261c0a4dac8be25c12009e7b8b95810984f11ec3d15b923833f2bf1fa8fb29",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/multinode/rdma_transport.py"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/multinode/verbs_helper.c.txt",
+      "current_sha256": "a37253d45a660a105c49a3aabb05676e67387e31167c2e4fb9ce26fae41357ef",
+      "historical_sha256": "a37253d45a660a105c49a3aabb05676e67387e31167c2e4fb9ce26fae41357ef",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/multinode/verbs_helper.c"
+    },
+    {
+      "bundle_relative": "source_snapshot/experiments/kv_ec/test_perf_stage_e.py.txt",
+      "current_sha256": "3965707bc5ef1cc38eade4d70dbeae1a574f499a3bbdd6afca30b76817ee684a",
+      "historical_sha256": "3965707bc5ef1cc38eade4d70dbeae1a574f499a3bbdd6afca30b76817ee684a",
+      "matches_historical": true,
+      "path": "experiments/kv_ec/test_perf_stage_e.py"
+    }
+  ],
+  "limitation": "selected verified files only, not complete runtime/model/environment",
+  "tracked_diff_sha256": "7c7953193de437a089e1ddca4bc24333b9ef25b0bb195a5eea87b6a0f27786b0"
+}

@@ -1,0 +1,74 @@
+[
+  {
+    "all_byte_exact": true,
+    "batch": "xor-rank-0",
+    "max_ms": 23.102176,
+    "mean_ms": 8.2633236,
+    "median_ms": 6.4691220000000005,
+    "metric": "xor_ms",
+    "min_ms": 6.275674,
+    "n": 10,
+    "scope": "CPU codec on one authentic GPU Capture; not independent GPU/node recovery trials",
+    "stddev_ms": 5.240768386584933
+  },
+  {
+    "all_byte_exact": true,
+    "batch": "xor-rank-0",
+    "max_ms": 26.745927,
+    "mean_ms": 8.7324457,
+    "median_ms": 6.71463,
+    "metric": "recovery_ms",
+    "min_ms": 6.620042,
+    "n": 10,
+    "scope": "CPU codec on one authentic GPU Capture; not independent GPU/node recovery trials",
+    "stddev_ms": 6.33015115314796
+  },
+  {
+    "all_byte_exact": true,
+    "batch": "xor-rank-0",
+    "max_ms": 26.530764,
+    "mean_ms": 9.7772374,
+    "median_ms": 8.2093215,
+    "metric": "validation_ms",
+    "min_ms": 7.103409,
+    "n": 10,
+    "scope": "CPU codec on one authentic GPU Capture; not independent GPU/node recovery trials",
+    "stddev_ms": 5.907334538408695
+  },
+  {
+    "all_byte_exact": true,
+    "batch": "xor-rank-1",
+    "max_ms": 25.925898,
+    "mean_ms": 8.5116081,
+    "median_ms": 6.415836499999999,
+    "metric": "xor_ms",
+    "min_ms": 6.28168,
+    "n": 10,
+    "scope": "CPU codec on one authentic GPU Capture; not independent GPU/node recovery trials",
+    "stddev_ms": 6.139342048910371
+  },
+  {
+    "all_byte_exact": true,
+    "batch": "xor-rank-1",
+    "max_ms": 26.607553,
+    "mean_ms": 8.5290829,
+    "median_ms": 6.560658,
+    "metric": "recovery_ms",
+    "min_ms": 6.223629,
+    "n": 10,
+    "scope": "CPU codec on one authentic GPU Capture; not independent GPU/node recovery trials",
+    "stddev_ms": 6.354198937105018
+  },
+  {
+    "all_byte_exact": true,
+    "batch": "xor-rank-1",
+    "max_ms": 23.932127,
+    "mean_ms": 9.740235,
+    "median_ms": 8.412582,
+    "metric": "validation_ms",
+    "min_ms": 7.518763,
+    "n": 10,
+    "scope": "CPU codec on one authentic GPU Capture; not independent GPU/node recovery trials",
+    "stddev_ms": 5.004298219053964
+  }
+]

@@ -1,0 +1,328 @@
+[
+  {
+    "all_checks_pass": true,
+    "batch": "cold-reprefill",
+    "checks": {
+      "batch_source_identity_equal": true,
+      "cleanup_pass": true,
+      "comparison_intervals_match_events": true,
+      "distinct_hosts": true,
+      "node_source_identity_equal": true,
+      "output_ids_equal_reference": true,
+      "uncached_256_input_17_output": true,
+      "verdict_digest": true
+    },
+    "output_token_ids": [
+      20443,
+      584,
+      1273,
+      821,
+      13,
+      84648,
+      6500,
+      3412,
+      448,
+      20443,
+      584,
+      1273,
+      821,
+      13,
+      84648,
+      6500,
+      3412
+    ],
+    "run_id": "trial-000-41869374fcfd40bfad4e4abe565ce38e",
+    "scope": "offline stored evidence only; no live server query or GPU rerun"
+  },
+  {
+    "all_checks_pass": true,
+    "batch": "two-level-stable",
+    "checks": {
+      "acceptance_hashes": true,
+      "batch_source_identity_equal": true,
+      "cleanup_pass": true,
+      "distinct_hosts": true,
+      "eight_successful_rdma_legs": true,
+      "node_source_identity_equal": true,
+      "rank_byte_scheduler_token_checks": true,
+      "restore_invariants": true,
+      "verdict_digest": true
+    },
+    "rank_correctness": [
+      {
+        "byte_exact": true,
+        "output_token_ids_match": true,
+        "scheduler_state_consistent": true,
+        "tp_rank": 0
+      },
+      {
+        "byte_exact": true,
+        "output_token_ids_match": true,
+        "scheduler_state_consistent": true,
+        "tp_rank": 1
+      }
+    ],
+    "rdma_legs": [
+      {
+        "bytes": 37778256,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778263,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778256,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778256,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778263,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778263,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 77139000,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 77139000,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      }
+    ],
+    "run_id": "trial-000-e6a3c9bfc3724da08cf2ff48c064aed0",
+    "scope": "offline stored evidence only; no live server query or GPU rerun"
+  },
+  {
+    "all_checks_pass": true,
+    "batch": "two-level-stable",
+    "checks": {
+      "acceptance_hashes": true,
+      "batch_source_identity_equal": true,
+      "cleanup_pass": true,
+      "distinct_hosts": true,
+      "eight_successful_rdma_legs": true,
+      "node_source_identity_equal": true,
+      "rank_byte_scheduler_token_checks": true,
+      "restore_invariants": true,
+      "verdict_digest": true
+    },
+    "rank_correctness": [
+      {
+        "byte_exact": true,
+        "output_token_ids_match": true,
+        "scheduler_state_consistent": true,
+        "tp_rank": 0
+      },
+      {
+        "byte_exact": true,
+        "output_token_ids_match": true,
+        "scheduler_state_consistent": true,
+        "tp_rank": 1
+      }
+    ],
+    "rdma_legs": [
+      {
+        "bytes": 37778254,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778265,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778254,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778254,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778265,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778265,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 77139015,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 77139015,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      }
+    ],
+    "run_id": "trial-001-f21439fa06e04d3a91ff757ed630eca6",
+    "scope": "offline stored evidence only; no live server query or GPU rerun"
+  },
+  {
+    "all_checks_pass": true,
+    "batch": "two-level-stable",
+    "checks": {
+      "acceptance_hashes": true,
+      "batch_source_identity_equal": true,
+      "cleanup_pass": true,
+      "distinct_hosts": true,
+      "eight_successful_rdma_legs": true,
+      "node_source_identity_equal": true,
+      "rank_byte_scheduler_token_checks": true,
+      "restore_invariants": true,
+      "verdict_digest": true
+    },
+    "rank_correctness": [
+      {
+        "byte_exact": true,
+        "output_token_ids_match": true,
+        "scheduler_state_consistent": true,
+        "tp_rank": 0
+      },
+      {
+        "byte_exact": true,
+        "output_token_ids_match": true,
+        "scheduler_state_consistent": true,
+        "tp_rank": 1
+      }
+    ],
+    "rdma_legs": [
+      {
+        "bytes": 37778254,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778262,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778254,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778254,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778262,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 37778262,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 77138961,
+        "completion_status": "SUCCESS",
+        "gid_index": 5,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      },
+      {
+        "bytes": 77138961,
+        "completion_status": "SUCCESS",
+        "gid_index": 3,
+        "port_num": 1,
+        "rdma_device": "mlx5_0",
+        "transport": "rdma"
+      }
+    ],
+    "run_id": "trial-002-067d8652c8b048109bfa90cb79f151ed",
+    "scope": "offline stored evidence only; no live server query or GPU rerun"
+  }
+]

@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "payload_bytes": 0,
+  "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "protocol": "kv-remote-rs-v1",
+  "rdma_upload_sha256_field": "node_block_sha256",
+  "server_epoch": "cb72dffd-c114-477c-871a-106f0f3e42e0",
+  "server_receive_ms": 0.11808890849351883,
+  "state": "READY"
+}

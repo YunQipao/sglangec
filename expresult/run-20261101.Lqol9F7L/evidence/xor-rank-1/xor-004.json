@@ -1,0 +1,11 @@
+{
+  "byte_exact": true,
+  "decode_correctness": null,
+  "iteration": 4,
+  "lost_rank": 1,
+  "real_rdma": false,
+  "recovery_ms": 6.542742,
+  "scheme": "xor-only",
+  "validation_ms": 8.321264,
+  "xor_ms": 6.355037
+}

@@ -1,0 +1,75 @@
+{
+  "_configuration_notes": {
+    "supported": "tp_size integer 2 or 4; gpu_admission.mode strict (default) or shared",
+    "gpus": "Each node needs exactly tp_size distinct physical indices; node selections may differ",
+    "mem_fraction_static": "One finite scalar ratio, not a per-rank array; every GPU must pass the budget",
+    "template": "Existing literal TP2 paths are preserved. For four-field switching, provision real TP2 and TP4 captures, then use /tmp/kv-ec-tp{tp_size}-template-node0/node.bin and node1/node.bin respectively",
+    "instructions": "TP_SELECTABLE_STAGE_E.md; never reinterpret a TP2 checkpoint as TP4"
+  },
+  "prefix_tokens": 256,
+  "tp_size": 2,
+  "rs": [
+    2,
+    1
+  ],
+  "resource_interval": 1.0,
+  "mem_fraction_static": 0.6,
+  "gpu_admission": {
+    "mode": "shared"
+  },
+  "trial_timeout": 3600,
+  "protection_timeout": 1800,
+  "min_disk_bytes": 21474836480,
+  "max_node_bytes": 67108864,
+  "remote_root": "/media/sda1/iic_data/luotao/kv-ec-perf-233",
+  "return_host": "192.168.2.243",
+  "return_port": 30890,
+  "delivery_port": 30892,
+  "target_port": 30986,
+  "rs_server": {
+    "host": "192.168.2.245",
+    "port": 30701
+  },
+  "nodes": [
+    {
+      "repo": "/media/sda1/iic/luotao/sglangec",
+      "python": "/media/sda1/iic/miniconda3/envs/sglang-ec/bin/python",
+      "conda_prefix": "/media/sda1/iic/miniconda3/envs/sglang-ec",
+      "cuda_home": "/usr/local/cuda-13.3",
+      "cuda_include_dirs": [
+        "/usr/local/cuda-13.3/targets/x86_64-linux/include"
+      ],
+      "cuda_library_dirs": [
+        "/usr/local/cuda-13.3/targets/x86_64-linux/lib"
+      ],
+      "model": "/media/sda1/iic/luotao/models/Qwen3-8B",
+      "template": "/tmp/kv-online-rs-online-rs-tp2-shafix-t01/node0/local/b58e108e3ce863c6159d4dc6d51842a588e6f1a1e037afd3e071783a9213dd75/global_node.bin",
+      "input_ids": "/tmp/kv-stage-e-perf-input-256.json",
+      "gpus": "1,2",
+      "origin_port": 30984,
+      "rdma_device": "mlx5_0",
+      "gid_index": 5
+    },
+    {
+      "ssh": "iic@10.102.0.233",
+      "repo": "/media/sda1/iic_data/luotao/sglangec/sglang",
+      "python": "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+      "conda_prefix": "/media/sda1/iic_data/anaconda3/envs/sglang-ec",
+      "cuda_home": "/media/sda1/iic_data/anaconda3/envs/sglang-ec",
+      "cuda_include_dirs": [
+        "/media/sda1/iic_data/anaconda3/envs/sglang-ec/targets/x86_64-linux/include"
+      ],
+      "cuda_library_dirs": [
+        "/media/sda1/iic_data/anaconda3/envs/sglang-ec/lib",
+        "/media/sda1/iic_data/anaconda3/envs/sglang-ec/targets/x86_64-linux/lib"
+      ],
+      "model": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+      "template": "/media/sda1/iic_data/luotao/sglangec/sglang/kv-rs-cold-e-20261029.FYgjKW/capture/global_node.bin",
+      "input_ids": "/tmp/kv-stage-e-perf-input-256.json",
+      "gpus": "2,3",
+      "origin_port": 30985,
+      "rdma_device": "mlx5_0",
+      "gid_index": 3
+    }
+  ]
+}

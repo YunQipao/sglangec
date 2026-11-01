@@ -318,7 +318,7 @@ class Host:
         from .gpu_admission import environment
         self.cfg, self.root, self.run_id, self.node = cfg, Path(root), run_id, node
         cuda, self.path_prefixes = cuda_environment(cfg)
-        self.env = dict(PYTHONPATH=cfg['repo'] + '/python:' + cfg['repo'],
+        self.env = dict(SPT_NOENV="1", PYTHONPATH=cfg['repo'] + '/python:' + cfg['repo'],
             KV_EC_PERF_DIR=str(self.root / 'perf'), KV_EC_PERF_RUN_ID=run_id,
             KV_EC_PERF_ROLE=f'node{node}-{232+node}', **cuda, **environment(gpu_admission_mode))
 

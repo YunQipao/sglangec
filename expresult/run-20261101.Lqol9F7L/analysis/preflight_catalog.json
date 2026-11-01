@@ -1,0 +1,44 @@
+[
+  {
+    "error": null,
+    "sha256": "2e96b1c84328b2401028a8c5d47ad49b6dafe54d0f66d7c67113e075c9e5a071",
+    "source_relative": "preflight.json",
+    "status": "PASS"
+  },
+  {
+    "error": null,
+    "sha256": "2591c29f385a74420364729953aea214afa167e5bc011b8ad50b5a7253ee0c4d",
+    "source_relative": "two-level-v2/preflight.json",
+    "status": "PASS"
+  },
+  {
+    "error": null,
+    "sha256": "1dd1e1baf82a8c0221515e56f0e8752404e06f94279a844658f8ed4096a89fe7",
+    "source_relative": "two-level-smoke/preflight.json",
+    "status": "PASS"
+  },
+  {
+    "error": null,
+    "sha256": "da215bde375623274aae44effe2b8bfb8955f08567cab003cfbd60e5ef7b1865",
+    "source_relative": "two-level-final/preflight.json",
+    "status": "PASS"
+  },
+  {
+    "error": null,
+    "sha256": "b501ec35bf20459ccf70df78aa5227b90535b635ee6d1413f9431caf5b3ae093",
+    "source_relative": "cold-reprefill/preflight.json",
+    "status": "PASS"
+  },
+  {
+    "error": "ValueError: SOURCE_IDENTITY_MISMATCH: tracked_diff_sha256",
+    "sha256": "2cf6dc24d37b25bd5f274affc94e66191516e3c2e3645ed7dd110685c31a253c",
+    "source_relative": "two-level-fixed/preflight.json",
+    "status": "FAIL"
+  },
+  {
+    "error": null,
+    "sha256": "0d3a34f667e8685ea40ae963da32652184b0d70036f8e01a9fb8cc8118d3a505",
+    "source_relative": "two-level-stable/preflight.json",
+    "status": "PASS"
+  }
+]

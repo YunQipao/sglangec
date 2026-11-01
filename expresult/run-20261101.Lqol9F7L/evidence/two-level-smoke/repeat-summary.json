@@ -1,0 +1,14 @@
+{
+  "not_started": 0,
+  "requested": 1,
+  "status": "FAIL",
+  "stopped_after_failure": true,
+  "trials": [
+    {
+      "failure_reason": "ValueError: trial command failed; see driver.log",
+      "pass_fail": "FAIL",
+      "path": "/media/sda1/iic/luotao/kv-ec-perf-tp2-shared/run-20261101.Lqol9F7L/two-level-smoke/trial-000-01e35d28b4ce48ba809ac0c442f2fe9b",
+      "run_id": "trial-000-01e35d28b4ce48ba809ac0c442f2fe9b"
+    }
+  ]
+}

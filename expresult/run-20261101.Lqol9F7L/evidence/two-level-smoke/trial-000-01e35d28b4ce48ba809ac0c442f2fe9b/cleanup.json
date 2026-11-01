@@ -1,0 +1,10 @@
+{
+  "errors": [
+    "cleanup node1/origin: owned service supervisor failed: origin; lease expires within 90s",
+    "owned supervisor failed node0/origin: exit=1"
+  ],
+  "lease_timeout_s": 90,
+  "port_guard_lease_timeout_s": 150,
+  "remote_root": "/media/sda1/iic_data/luotao/kv-ec-perf-233/trial-000-01e35d28b4ce48ba809ac0c442f2fe9b",
+  "status": "FAIL"
+}

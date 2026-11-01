@@ -1,0 +1,30 @@
+{
+  "archive_bytes": 77139000,
+  "archive_sha256": "1f355a734721d369da82df76aa29f8085ffde8d1356a9f97c031ca893569cb66",
+  "bundle": {
+    "block_sha256": "94ad404a6d25b525f6b85d4573cea51755ce61f2880a57c864e59f9e046b5878",
+    "capture_seal_sha256": "83e3a85c91c27b4083fef91f3317a2b82021f8509904863e2d5809325519233a",
+    "path": "/media/sda1/iic/luotao/kv-ec-perf-tp2-shared/run-20261101.Lqol9F7L/two-level-stable/trial-000-e6a3c9bfc3724da08cf2ff48c064aed0/recovered-source",
+    "request_state_sha256": "ca8791ac4caec6618ccb1b9f000eba8c543c95bb25b92277c025b9ceea5efbad",
+    "schema": "kv-rs-cold-source-v1",
+    "source_sha256": "262901c81f9635563d2f02733c6f0b7bdc630bad7b6409c897308aa783380527"
+  },
+  "send_stats": {
+    "bytes": 77139000,
+    "completion_ms": 109.615,
+    "completion_status": "SUCCESS",
+    "device_setup_ms": 4.076,
+    "elapsed_s": 0.2324829432182014,
+    "exchange_ms": 46.456,
+    "gid_index": 5,
+    "helper_stdout": "KV_EC_RDMA_STATS bytes=77139000 device_setup_ms=4.076 memory_registration_ms=4.221 qp_setup_ms=0.989 exchange_ms=46.456 completion_ms=109.615 total_ms=211.702 qp_num=11708 remote_qpn=376 gid_index=5 port_num=1 completion_status=SUCCESS",
+    "memory_registration_ms": 4.221,
+    "port_num": 1,
+    "qp_num": 11708,
+    "qp_setup_ms": 0.989,
+    "rdma_device": "mlx5_0",
+    "remote_qpn": 376,
+    "total_ms": 211.702,
+    "transport": "rdma"
+  }
+}

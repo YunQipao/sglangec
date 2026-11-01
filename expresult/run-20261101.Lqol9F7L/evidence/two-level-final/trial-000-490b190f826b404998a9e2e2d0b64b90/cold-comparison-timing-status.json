@@ -1,0 +1,13 @@
+{
+  "functional_correctness_pass": true,
+  "operation_id": "trial-000-490b190f826b404998a9e2e2d0b64b90",
+  "performance_measurement_eligible": false,
+  "reason": "two-level completion is observed by the restore hook and Stage E checker; no equivalent client SSE response is issued by this path",
+  "schema": "kv-ec-cold-comparison-timing-status-v1",
+  "scheme": "two-level",
+  "unavailable_metrics": [
+    "fault_boundary_to_first_output_token_ms",
+    "fault_boundary_to_response_complete_ms",
+    "response_stream_ms"
+  ]
+}

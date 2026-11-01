@@ -1,0 +1,70 @@
+{
+  "algorithm_comparison_eligible": false,
+  "boot_id": "5c91e5b6-d75d-43c9-990a-9f37aae1a4b0",
+  "clock_domain": "host_monotonic_ns",
+  "diagnostics": "uncached prefill + 16 decodes; client checks all 17 output IDs",
+  "events_ns": {
+    "fault_boundary": 3093412983168556,
+    "first_output_token": 3093484198648320,
+    "full_output": 3093484804219386,
+    "request_start": 3093481614025720,
+    "response_complete": 3093484804372822,
+    "target_launch": 3093412983169663,
+    "target_ready": 3093480097175742,
+    "validation_complete": 3093484882934325
+  },
+  "fault_boundary_to_first_output_token_ms": 71215.479764,
+  "fault_boundary_to_full_output_ms": 71821.05083,
+  "fault_boundary_to_response_complete_ms": 71821.204266,
+  "fault_boundary_to_validation_complete_ms": 71899.765769,
+  "functional_correctness_pass": true,
+  "host": "sdu-232",
+  "intervals": {
+    "fault_boundary_to_first_output_token": [
+      "fault_boundary",
+      "first_output_token"
+    ],
+    "fault_boundary_to_full_output": [
+      "fault_boundary",
+      "full_output"
+    ],
+    "fault_boundary_to_response_complete": [
+      "fault_boundary",
+      "response_complete"
+    ],
+    "fault_boundary_to_validation_complete": [
+      "fault_boundary",
+      "validation_complete"
+    ],
+    "request_to_first_output_token": [
+      "request_start",
+      "first_output_token"
+    ],
+    "request_to_full_output": [
+      "request_start",
+      "full_output"
+    ],
+    "response_stream": [
+      "request_start",
+      "response_complete"
+    ],
+    "target_launch_to_ready": [
+      "target_launch",
+      "target_ready"
+    ]
+  },
+  "limitation": "common client endpoints; asymmetric mandatory diagnostics remain included; first output may include restored pending token; no failure detection",
+  "operation_id": "trial-000-41869374fcfd40bfad4e4abe565ce38e",
+  "performance_measurement_eligible": true,
+  "pid": 3901161,
+  "production_recovery": false,
+  "profile": "cold-client-sse-v1",
+  "rank": null,
+  "request_to_first_output_token_ms": 2584.6226,
+  "request_to_full_output_ms": 3190.193666,
+  "response_stream_ms": 3190.347102,
+  "schema": "kv-ec-cold-comparison-timing-v1",
+  "scheme": "reprefill",
+  "span_id": "d4c338048680478cb39522ba9ba4668f",
+  "target_launch_to_ready_ms": 67114.006079
+}

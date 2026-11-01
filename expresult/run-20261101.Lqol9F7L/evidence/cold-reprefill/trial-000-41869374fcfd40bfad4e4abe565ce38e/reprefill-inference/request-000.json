@@ -1,0 +1,72 @@
+{
+  "correctness": "raw token IDs recorded; compare against Stage E reference separately",
+  "end_ns": 3093484804372822,
+  "first_output_token_ns": 3093484198648320,
+  "full_output_ns": 3093484804219386,
+  "output_token_ids": [
+    20443,
+    584,
+    1273,
+    821,
+    13,
+    84648,
+    6500,
+    3412,
+    448,
+    20443,
+    584,
+    1273,
+    821,
+    13,
+    84648,
+    6500,
+    3412
+  ],
+  "prefill_ttft_ms": 2584.6226,
+  "ready_to_decode_complete_ms": 4707.19708,
+  "ready_to_first_token_ms": 4101.472578,
+  "request_ms": 3190.347102,
+  "response": {
+    "meta_info": {
+      "cached_tokens": 0,
+      "cached_tokens_details": null,
+      "completion_tokens": 17,
+      "dp_rank": null,
+      "e2e_latency": 3.1538182008080184,
+      "finish_reason": {
+        "length": 17,
+        "type": "length"
+      },
+      "id": "perf-eebf20b61f804ae68219177018aa736e",
+      "num_retractions": 0,
+      "prompt_tokens": 256,
+      "reasoning_tokens": 0,
+      "weight_version": "default"
+    },
+    "output_ids": [
+      20443,
+      584,
+      1273,
+      821,
+      13,
+      84648,
+      6500,
+      3412,
+      448,
+      20443,
+      584,
+      1273,
+      821,
+      13,
+      84648,
+      6500,
+      3412
+    ],
+    "text": " artificial public test data. KV cache research with artificial public test data. KV cache research"
+  },
+  "response_complete_ns": 3093484804372822,
+  "scheme": "reprefill",
+  "source": "client_monotonic_ns",
+  "start_ns": 3093481614025720,
+  "warmup": false
+}

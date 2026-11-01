@@ -1,0 +1,14 @@
+{
+  "not_started": 2,
+  "requested": 3,
+  "status": "FAIL",
+  "stopped_after_failure": true,
+  "trials": [
+    {
+      "failure_reason": "ValueError: trial_source_changed_since_batch_admission: tracked_diff_sha256",
+      "pass_fail": "FAIL",
+      "path": "/media/sda1/iic/luotao/kv-ec-perf-tp2-shared/run-20261101.Lqol9F7L/two-level-final/trial-000-490b190f826b404998a9e2e2d0b64b90",
+      "run_id": "trial-000-490b190f826b404998a9e2e2d0b64b90"
+    }
+  ]
+}

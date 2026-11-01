@@ -1,0 +1,93 @@
+[
+  {
+    "accepted": true,
+    "batch": "cold-reprefill",
+    "evidence_relative": "cold-reprefill/trial-000-41869374fcfd40bfad4e4abe565ce38e",
+    "failure_reason": null,
+    "functional_correctness_pass": true,
+    "isolated_performance_eligible": false,
+    "pass_fail": "PASS",
+    "run_id": "trial-000-41869374fcfd40bfad4e4abe565ce38e",
+    "scheme": "reprefill",
+    "stage_e_subcheck_pass": null,
+    "trial_command_ms": 229808.691851
+  },
+  {
+    "accepted": false,
+    "batch": "two-level-final",
+    "evidence_relative": "two-level-final/trial-000-490b190f826b404998a9e2e2d0b64b90",
+    "failure_reason": "ValueError: trial_source_changed_since_batch_admission: tracked_diff_sha256",
+    "functional_correctness_pass": false,
+    "isolated_performance_eligible": false,
+    "pass_fail": "FAIL",
+    "run_id": "trial-000-490b190f826b404998a9e2e2d0b64b90",
+    "scheme": "two-level",
+    "stage_e_subcheck_pass": true,
+    "trial_command_ms": 293224.628578
+  },
+  {
+    "accepted": false,
+    "batch": "two-level-smoke",
+    "evidence_relative": "two-level-smoke/trial-000-01e35d28b4ce48ba809ac0c442f2fe9b",
+    "failure_reason": "ValueError: trial command failed; see driver.log",
+    "functional_correctness_pass": false,
+    "isolated_performance_eligible": false,
+    "pass_fail": "FAIL",
+    "run_id": "trial-000-01e35d28b4ce48ba809ac0c442f2fe9b",
+    "scheme": "two-level",
+    "stage_e_subcheck_pass": null,
+    "trial_command_ms": 338302.058118
+  },
+  {
+    "accepted": true,
+    "batch": "two-level-stable",
+    "evidence_relative": "two-level-stable/trial-000-e6a3c9bfc3724da08cf2ff48c064aed0",
+    "failure_reason": null,
+    "functional_correctness_pass": true,
+    "isolated_performance_eligible": false,
+    "pass_fail": "PASS",
+    "run_id": "trial-000-e6a3c9bfc3724da08cf2ff48c064aed0",
+    "scheme": "two-level",
+    "stage_e_subcheck_pass": true,
+    "trial_command_ms": 295115.357757
+  },
+  {
+    "accepted": true,
+    "batch": "two-level-stable",
+    "evidence_relative": "two-level-stable/trial-001-f21439fa06e04d3a91ff757ed630eca6",
+    "failure_reason": null,
+    "functional_correctness_pass": true,
+    "isolated_performance_eligible": false,
+    "pass_fail": "PASS",
+    "run_id": "trial-001-f21439fa06e04d3a91ff757ed630eca6",
+    "scheme": "two-level",
+    "stage_e_subcheck_pass": true,
+    "trial_command_ms": 291469.920188
+  },
+  {
+    "accepted": true,
+    "batch": "two-level-stable",
+    "evidence_relative": "two-level-stable/trial-002-067d8652c8b048109bfa90cb79f151ed",
+    "failure_reason": null,
+    "functional_correctness_pass": true,
+    "isolated_performance_eligible": false,
+    "pass_fail": "PASS",
+    "run_id": "trial-002-067d8652c8b048109bfa90cb79f151ed",
+    "scheme": "two-level",
+    "stage_e_subcheck_pass": true,
+    "trial_command_ms": 290809.659895
+  },
+  {
+    "accepted": false,
+    "batch": "two-level-v2",
+    "evidence_relative": "two-level-v2/trial-000-38add57f3388438bb02fa3139fe44e60",
+    "failure_reason": "ValueError: trial command failed; see driver.log",
+    "functional_correctness_pass": false,
+    "isolated_performance_eligible": false,
+    "pass_fail": "FAIL",
+    "run_id": "trial-000-38add57f3388438bb02fa3139fe44e60",
+    "scheme": "two-level",
+    "stage_e_subcheck_pass": true,
+    "trial_command_ms": 301913.241649
+  }
+]

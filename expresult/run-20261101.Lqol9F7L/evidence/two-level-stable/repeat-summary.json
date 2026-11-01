@@ -1,0 +1,25 @@
+{
+  "not_started": 0,
+  "requested": 3,
+  "status": "PASS",
+  "trials": [
+    {
+      "failure_reason": null,
+      "pass_fail": "PASS",
+      "path": "/media/sda1/iic/luotao/kv-ec-perf-tp2-shared/run-20261101.Lqol9F7L/two-level-stable/trial-000-e6a3c9bfc3724da08cf2ff48c064aed0",
+      "run_id": "trial-000-e6a3c9bfc3724da08cf2ff48c064aed0"
+    },
+    {
+      "failure_reason": null,
+      "pass_fail": "PASS",
+      "path": "/media/sda1/iic/luotao/kv-ec-perf-tp2-shared/run-20261101.Lqol9F7L/two-level-stable/trial-001-f21439fa06e04d3a91ff757ed630eca6",
+      "run_id": "trial-001-f21439fa06e04d3a91ff757ed630eca6"
+    },
+    {
+      "failure_reason": null,
+      "pass_fail": "PASS",
+      "path": "/media/sda1/iic/luotao/kv-ec-perf-tp2-shared/run-20261101.Lqol9F7L/two-level-stable/trial-002-067d8652c8b048109bfa90cb79f151ed",
+      "run_id": "trial-002-067d8652c8b048109bfa90cb79f151ed"
+    }
+  ]
+}

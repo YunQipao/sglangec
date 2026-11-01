@@ -1,0 +1,7 @@
+{
+  "errors": [],
+  "lease_timeout_s": 90,
+  "port_guard_lease_timeout_s": 150,
+  "remote_root": "/media/sda1/iic_data/luotao/kv-ec-perf-233/trial-001-f21439fa06e04d3a91ff757ed630eca6",
+  "status": "PASS"
+}

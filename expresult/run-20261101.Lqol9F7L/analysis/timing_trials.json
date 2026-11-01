@@ -1,0 +1,54 @@
+[
+  {
+    "algorithm_comparison_eligible": false,
+    "batch": "cold-reprefill",
+    "fault_boundary_to_first_output_token_ms": 71215.479764,
+    "fault_boundary_to_full_output_ms": 71821.05083,
+    "fault_boundary_to_response_complete_ms": 71821.204266,
+    "fault_boundary_to_validation_complete_ms": 71899.765769,
+    "request_to_first_output_token_ms": 2584.6226,
+    "request_to_full_output_ms": 3190.193666,
+    "response_stream_ms": 3190.347102,
+    "run_id": "trial-000-41869374fcfd40bfad4e4abe565ce38e",
+    "scheme": "reprefill",
+    "target_launch_to_ready_ms": 67114.006079,
+    "timing_qualification": true,
+    "trial_command_ms": 229808.691851
+  },
+  {
+    "algorithm_comparison_eligible": false,
+    "batch": "two-level-stable",
+    "fault_boundary_to_decode_complete_ms": 120149.370487,
+    "fault_boundary_to_ready_ms": 110356.096685,
+    "ready_to_decode_complete_ms": 9793.273802,
+    "run_id": "trial-000-e6a3c9bfc3724da08cf2ff48c064aed0",
+    "scheme": "two-level",
+    "target_launch_to_ready_harness_ms": 82220.527859,
+    "timing_qualification": false,
+    "trial_command_ms": 295115.357757
+  },
+  {
+    "algorithm_comparison_eligible": false,
+    "batch": "two-level-stable",
+    "fault_boundary_to_decode_complete_ms": 119224.75656,
+    "fault_boundary_to_ready_ms": 109383.520433,
+    "ready_to_decode_complete_ms": 9841.236127,
+    "run_id": "trial-001-f21439fa06e04d3a91ff757ed630eca6",
+    "scheme": "two-level",
+    "target_launch_to_ready_harness_ms": 81751.241669,
+    "timing_qualification": false,
+    "trial_command_ms": 291469.920188
+  },
+  {
+    "algorithm_comparison_eligible": false,
+    "batch": "two-level-stable",
+    "fault_boundary_to_decode_complete_ms": 117656.268731,
+    "fault_boundary_to_ready_ms": 107718.364494,
+    "ready_to_decode_complete_ms": 9937.904237,
+    "run_id": "trial-002-067d8652c8b048109bfa90cb79f151ed",
+    "scheme": "two-level",
+    "target_launch_to_ready_harness_ms": 79630.697847,
+    "timing_qualification": false,
+    "trial_command_ms": 290809.659895
+  }
+]

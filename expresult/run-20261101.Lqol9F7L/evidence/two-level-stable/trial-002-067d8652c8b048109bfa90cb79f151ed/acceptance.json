@@ -1,0 +1,21 @@
+{
+  "functional_correctness_pass": true,
+  "gpu_admission_mode": "shared",
+  "gpu_resources_before_start": [],
+  "handle": "6f2f37a5-d694-4311-9398-6949c1260403",
+  "isolated_performance_eligible": false,
+  "live_check_exit": 0,
+  "manifest_sha256": "11c562455256429b38dbf6824d8ddb1afc65fc961fc65e9cbc98e2f20ceb6cc9",
+  "mem_fraction_static": 0.6,
+  "prefix_tokens": 256,
+  "protection_sha256": "9d1ccf3bda541675b8fd9912fa377edaec31b200adb80b44ee6e0c0f5bcb8cd5",
+  "restore_id": "9fcce5e487232a20305bae66e69c8d024561c74d18af91fc318ddec2f1ba201a",
+  "run_id": "trial-002-067d8652c8b048109bfa90cb79f151ed",
+  "shared_resource_environment": true,
+  "stripe_id": "online-affc158d53661ba958c64cd5fb823ce9130d30a8b5aa71248cc3b8456e56cc57",
+  "target_run_id": "cold-new",
+  "target_run_sha256": "00f265815d27db6e4f3b7e3c7f617e94784ec1154fafd782db7ee0205d471df4",
+  "tp_memory_imbalance_check": false,
+  "tp_size": 2,
+  "verdict_sha256": "a9d773ca365aa2741912147c32ecc38fd3588f589f8ef6da8e6d99dfa0337e9b"
+}

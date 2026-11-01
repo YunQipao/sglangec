@@ -1,0 +1,8 @@
+{
+  "fault_boundary_to_decode_complete_ms": 118863.096362,
+  "fault_boundary_to_ready_ms": 109071.598474,
+  "ready_to_decode_complete_ms": 9791.497888,
+  "schema": "kv-ec-stage-e-coordinator-timing-v1",
+  "target_run_id": "cold-new",
+  "timing_note": "232 coordinator monotonic; includes remote command and Stage E validation"
+}

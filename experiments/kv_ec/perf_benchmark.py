@@ -60,7 +60,7 @@ def identity():
     sha = command(['git', 'rev-parse', 'HEAD'])
     if sha.get('returncode') != 0:
         raise ValueError('benchmark must run from the repository checkout')
-    diff = command(['git', 'diff', '--binary', 'HEAD'], timeout=30)
+    diff = command(['git', 'diff', '--binary', '--full-index', 'HEAD'], timeout=30)
     # Include new observation/benchmark files even before they are committed.
     root = Path(__file__).resolve().parent
     # Include untracked adapters/codecs as well as the coordinator. A commit

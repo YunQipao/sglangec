@@ -233,7 +233,7 @@ class HostEnvironmentTests(unittest.TestCase):
             repo.mkdir()
             (repo / 'env_probe.py').write_text(
                 'import json, os, subprocess, sys\n'
-                'keys = ["PATH", "PYTHONPATH", "KV_EC_PERF_DIR", "KV_EC_PERF_RUN_ID", "KV_EC_PERF_ROLE", '
+                'keys = ["SPT_NOENV", "PATH", "PYTHONPATH", "KV_EC_PERF_DIR", "KV_EC_PERF_RUN_ID", "KV_EC_PERF_ROLE", '
                 '"TMPDIR", "TMP", "TEMP", "KV_EC_GPU_ADMISSION_MODE", '
                 '"SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK", "SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK", '
                 '"CUDA_HOME", "CUDA_PATH", "CUDACXX", "NVCC", "LIBRARY_PATH", "LD_LIBRARY_PATH", "CPATH", "CPLUS_INCLUDE_PATH"]\n'
