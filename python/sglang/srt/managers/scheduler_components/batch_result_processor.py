@@ -370,6 +370,14 @@ class SchedulerBatchResultProcessor:
                     req.time_stats.set_last_chunked_prefill_finish_time()
 
         self.token_to_kv_pool_allocator.free_group_end()
+        if (
+            os.environ.get("SGLANG_KV_EC_PREFILL_OBSERVE") == "1"
+            and os.environ.get("KV_EC_PERF_DIR")
+            and os.environ.get("KV_EC_PERF_RUN_ID")
+        ):
+            from experiments.kv_ec.prefill_observer import prefill_kv_ready
+
+            prefill_kv_ready(self, batch, result)
         self.output_streamer.stream_output(
             batch.reqs, batch.return_logprob, skip_stream_req
         )

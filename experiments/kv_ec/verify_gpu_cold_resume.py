@@ -78,7 +78,7 @@ def read_evidence(output, mode):
         if mode == 'capture':
             _require(report['pass_reference'] is True and report['reference_no_restore'] is True and
                      not report['committed'] and not report['restored_slots_used_by_decode'] and
-                     report['original_prefill_tokens'] == 256 and
+                     report['original_prefill_tokens'] == state['token_count'] and
                      report['original_prefill_forward_count'] == 1 and
                      report['capture_state_sha256'] == sha(canonical(state)) and
                      report['captured_kv_sha256'] == sha(source.load()) and
@@ -89,7 +89,7 @@ def read_evidence(output, mode):
                 'committed', 'verified', 'initial_install', 'new_instance',
                 'scheduler_injected', 'restored_slots_used_by_decode')) and
                 report['transaction_state'] == 'COMMITTED' and report['old_slots'] == [] and
-                report['restored_kv_tokens'] == 256 and report['mapping_version'] == 1 and
+                report['restored_kv_tokens'] == state['token_count'] and report['mapping_version'] == 1 and
                 report['original_prefill_tokens'] == report['original_prefill_forward_count'] == 0 and
                 report['prefix_prefill_forward_count'] == 0 and
                 report['state_sha256'] == config['state_sha256'] == sha(canonical(state)) and
@@ -101,7 +101,7 @@ def read_evidence(output, mode):
             require_new_process(report['process'], sealed_origin_processes(receipt))
             validate_restore_evidence(report, meta['ranks'][rank], rank)
             prefix, start = report['new_slots'], 1
-        _require(len(prefix) == len(set(prefix)) == 256, 'cold_prefix_slots_invalid')
+        _require(len(prefix) == len(set(prefix)) == state['token_count'], 'cold_prefix_slots_invalid')
         observations = report['forward_observations']
         _require(len(observations) == len(report['logits']) == 17 - start,
                  'cold_forward_evidence_missing')
@@ -111,12 +111,12 @@ def read_evidence(output, mode):
                      obs['req_pool_indices'] == [report['row']] and
                      obs['generation'] == report['generation_before'] and
                      obs['forward_ct'] == step + 1 - start and
-                     obs['kv_length'] == 256 + step and
+                     obs['kv_length'] == state['token_count'] + step and
                      all(0 < x <= report['allocator_size'] for x in obs['mapping']) and
                      obs['mapping_version'] == (0 if mode == 'capture' else 1),
                      'cold_forward_identity_invalid')
             if step == 0:
-                _require(obs['mode'] == 'EXTEND' and obs['positions'] == list(range(256)) and
+                _require(obs['mode'] == 'EXTEND' and obs['positions'] == list(range(state['token_count'])) and
                          obs['input_ids'] == state['origin_input_ids'] and
                          obs['mapping'] == prefix, 'cold_reference_prefill_invalid')
             else:
@@ -169,7 +169,7 @@ def check_results(output):
     mode = config['cold_mode']
     cfg, state, reports, logits = read_evidence(output, mode)
     result = dict(pass_stage_d=False, pass_reference=mode == 'capture', cuda_executed=True,
-        tp_size=state['tp_size'], restored_kv_tokens=256 if mode == 'restore' else 0,
+        tp_size=state['tp_size'], restored_kv_tokens=state['token_count'] if mode == 'restore' else 0,
         restored_slots_used_by_decode=mode == 'restore', resume_decode_forward_count=16,
         recomputed_prefix_tokens=0, generation_unchanged=True, no_slot_leak=True,
         no_request_row_leak=True, output_token_ids_match=False, ranks=reports)
@@ -179,9 +179,9 @@ def check_results(output):
         validate_evidence(cfg, selected, state['tp_size'])
     result.update(metadata(selected, cfg.get('mem_fraction_static', .6),
                            cfg.get('gpu_resources_before_start', [])),
-        functional_correctness_pass=False, prefix_tokens=256,
+        functional_correctness_pass=False, prefix_tokens=state['token_count'],
         model_tp_prefix_identity=dict(runtime_identity=state['runtime_identity'],
-            tp_size=state['tp_size'], input_ids_sha256=state['input_ids_sha256'], prefix_tokens=256))
+            tp_size=state['tp_size'], input_ids_sha256=state['input_ids_sha256'], prefix_tokens=state['token_count']))
     if mode == 'capture':
         return result
     marker = json.loads((Path(cfg['ledger']) /
@@ -293,8 +293,17 @@ def launch(args, capture=False):
         bundle.parent.mkdir(parents=True, exist_ok=True)
         bundle.mkdir(exist_ok=False)
         cfg['capture_bundle'] = str(bundle)
-        cfg['input_ids'] = stage_a.read_input_ids(args.input_ids,
-            stage_a.validate_checkpoint(args.checkpoint.read_bytes()))
+        template_meta = stage_a.validate_checkpoint(args.checkpoint.read_bytes())
+        if getattr(args, 'bootstrap_prefix', None) is not None:
+            value = json.loads(args.input_ids.read_text())
+            ids = value.get('input_ids') if isinstance(value, dict) else value
+            _require(type(args.bootstrap_prefix) is int and args.bootstrap_prefix in (256, 512, 1024, 2048, 4096)
+                     and isinstance(ids, list) and len(ids) == args.bootstrap_prefix and
+                     all(type(t) is int and t >= 0 for t in ids), 'bootstrap_input_invalid')
+            cfg.update(input_ids=ids, prefix_tokens=args.bootstrap_prefix,
+                       bootstrap_prefix=True, template_prefix_tokens=template_meta['ranks'][0]['token_count'])
+        else:
+            cfg['input_ids'] = stage_a.read_input_ids(args.input_ids, template_meta)
         cfg['template_only_not_runtime_restore_source'] = True
     else:
         source, state, receipt, binding = load_checkpoint(args.bundle, args.rs_source)
@@ -364,6 +373,7 @@ def main():
         p.add_argument('--gpu-admission-mode', choices=('strict', 'shared'), default='strict')
         p.add_argument('--timeout', type=float, default=120)
         if name == 'capture':
+            p.add_argument('--bootstrap-prefix', type=int, choices=(256, 512, 1024, 2048, 4096))
             p.add_argument('--template-checkpoint', type=Path, required=True)
             p.add_argument('--input-ids', type=Path, required=True)
         else:

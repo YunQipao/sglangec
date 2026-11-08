@@ -6,6 +6,7 @@ the host-read boundary. No inference collectives or allocator leases are added.
 """
 
 import atexit
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -86,7 +87,7 @@ def validate_runtime(s):
     )
 
 
-def completed_chunks(req, batch, index, next_chunk):
+def completed_chunks(req, batch, index, next_chunk, grain=CHUNK_TOKENS):
     """Only called after forward; sampled-but-not-forwarded tokens are excluded."""
     if (
         req.finished()
@@ -109,7 +110,8 @@ def completed_chunks(req, batch, index, next_chunk):
         written <= len(req.origin_input_ids) + len(req.output_ids),
         "online_unmaterialized_tokens",
     )
-    return range(next_chunk, written // CHUNK_TOKENS)
+    require(grain in (128, 256, 512, 1024), "online_invalid_capture_grain")
+    return range(next_chunk, written // grain)
 
 
 @dataclass
@@ -155,16 +157,19 @@ def gather_layers(pool, slots, tp_size, packed):
     tests can compare this exact implementation with the offline tensor layout.
     """
     records, offset = [], 0
-    for layer in range(36):
+    layer_num = int(getattr(pool, "layer_num", 36))
+    require(layer_num > 0, "online_invalid_layer_count")
+    for layer in range(layer_num):
         k, v = pool.get_kv_buffer(layer)
-        shape = [CHUNK_TOKENS, 8 // tp_size, 128]
+        shape = [int(slots.numel()), *map(int, k.shape[1:])]
         require(
             k.dtype == v.dtype == torch.bfloat16
             and k.device == v.device == packed.device
             and k.ndim == v.ndim == 3
             and k.is_contiguous()
             and v.is_contiguous()
-            and list(k.shape[1:]) == list(v.shape[1:]) == shape[1:],
+            and list(k.shape[1:]) == list(v.shape[1:]) == shape[1:]
+            and shape[1] > 0 and shape[2] > 0,
             "online_invalid_tensor_layout",
         )
         size = int(np.prod(shape)) * 2
@@ -206,6 +211,10 @@ class OnlineProtector:
         self.scheduler, self.path = scheduler, str(path)
         self.run_id, self.identity = run_id, identity
         self.enabled = True
+        self.incremental_enabled = os.environ.get("SGLANG_KV_EC_INCREMENTAL", "1") == "1"
+        self.async_d2h_enabled = os.environ.get("SGLANG_KV_EC_ASYNC_D2H", "1") == "1"
+        self.grain = int(os.environ.get("SGLANG_KV_EC_ONLINE_GRAIN_TOKENS", "256"))
+        require(self.grain in (128, 256, 512, 1024), "online_invalid_capture_grain")
         self.timeout, self.max_bytes = timeout, max_bytes
         self.queue = queue.Queue(maxsize=capacity)
         # Includes the in-flight worker, not just queued entries. Reserve before
@@ -214,6 +223,23 @@ class OnlineProtector:
         self.stop = threading.Event()
         self.active = {}  # scheduler-only state; never passed to the worker
         self.metrics = queue.Queue(maxsize=128)
+        self.protected_lock = threading.Lock()
+        self.protected_chunks = {}
+        self.protected_bytes = 0
+        self.protected_byte_limit = int(os.environ.get(
+            "SGLANG_KV_EC_LIVE_CACHE_BYTES", str(1024**3)
+        ))
+        require(self.protected_byte_limit > 0, "online_invalid_live_cache_budget")
+        self.require_global_rs = os.environ.get(
+            "SGLANG_KV_EC_REQUIRE_GLOBAL_RS", "0"
+        ) == "1"
+        failure_scope = os.environ.get("SGLANG_KV_EC_FAILURE_SCOPE", "node")
+        require(failure_scope in ("gpu-rank", "node"), "online_invalid_failure_scope")
+        require(
+            failure_scope == "node" or not self.require_global_rs,
+            "gpu_rank_recovery_must_not_wait_for_global_rs",
+        )
+        self.failure_scope = failure_scope
         self.stream = torch.cuda.Stream(
             device=scheduler.model_worker.model_runner.token_to_kv_pool.k_buffer[
                 0
@@ -251,10 +277,11 @@ class OnlineProtector:
         hf = runner.model_config.hf_config
         require(
             hf.model_type == "qwen3"
-            and hf.num_hidden_layers == pool.layer_num == 36
+            and hf.num_hidden_layers == pool.layer_num
+            and 0 < hf.num_hidden_layers <= 128
             and hf.num_key_value_heads == 8
             and hf.head_dim == 128,
-            "online_qwen3_8b_required",
+            "online_supported_qwen3_required",
         )
         require(
             pool.kv_cache_layout == "nhd"
@@ -322,13 +349,20 @@ class OnlineProtector:
                 )
                 self.active[key] = state
             require(state.generation == generation, "online_request_generation_changed")
-            for chunk in completed_chunks(req, batch, i, state.next_chunk):
+            grain = getattr(self, "grain", CHUNK_TOKENS)
+            for chunk in completed_chunks(req, batch, i, state.next_chunk, grain):
+                if not getattr(self, "incremental_enabled", True) and chunk > 0:
+                    break
                 if not self.capacity.acquire(blocking=False):
                     # Retry on the next completed forward while ownership is live.
                     self._metric({"kind": "backpressure", "request_id": self._rid(req)})
                     break
                 try:
-                    staged = self._stage(req, chunk, generation)
+                    staged = (
+                        self._stage(req, chunk, generation)
+                        if grain == CHUNK_TOKENS
+                        else self._stage(req, chunk, generation, token_count=grain)
+                    )
                     staged.cancelled = state.cancelled
                     self.queue.put_nowait(staged)
                 except BaseException:
@@ -339,19 +373,93 @@ class OnlineProtector:
     def _rid(self, req):
         return hashlib.sha256(str(req.rid).encode()).hexdigest()
 
-    def _stage(self, req, chunk, generation):
+    def recover_xor_from_memory(self, snapshot_id, request_id, lost_rank, survivor):
+        """Fault-path client for the manager's DRAM-only XOR reconstruction."""
+        if not isinstance(survivor, bytes) or not survivor:
+            raise ValueError("immutable survivor bytes required")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(self.timeout)
+            sock.connect(self.path)
+            send_message(sock, {
+                "kind": "recover_xor", "snapshot_id": snapshot_id,
+                "request_id": request_id, "lost_rank": lost_rank,
+            }, survivor)
+            status, raw = recv_message(sock)
+        if status.get("state") != "COMMITTED" or digest(raw) != status.get("sha256"):
+            raise RuntimeError("live XOR reconstruction failed")
+        return raw, status
+
+    def _checkpoint_status(self, snapshot_id):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(self.timeout)
+            sock.connect(self.path)
+            send_message(sock, {"kind": "status", "snapshot_id": snapshot_id}, b"")
+            status, _ = recv_message(sock)
+        return status
+
+    def snapshot_prefix(self, req, boundary, *, timeout=None):
+        """Return this TP rank's immutable, committed chunks for [0,boundary)."""
+        if type(boundary) is not int or boundary <= 0 or boundary % self.grain:
+            raise ValueError("live recovery boundary must be a complete protection chunk")
+        deadline = time.monotonic() + (timeout or self.timeout)
+        while self.queue.unfinished_tasks and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if self.queue.unfinished_tasks:
+            raise TimeoutError("incremental protection queue did not drain")
+        rid = self._rid(req)
+        count = boundary // self.grain
+        # Fault pause and after_forward run on adjacent scheduler turns. A
+        # chunk can be complete in the KV pool while its staging worker has
+        # not yet published protected_chunks. Wait until the same deadline
+        # used for committed status before declaring a real missing prefix.
+        chunks = None
+        while time.monotonic() < deadline:
+            with self.protected_lock:
+                candidate = [self.protected_chunks.get((rid, i)) for i in range(count)]
+            if all(item is not None for item in candidate):
+                chunks = candidate
+                break
+            time.sleep(0.005)
+        if chunks is None:
+            raise TimeoutError("incremental protected prefix did not publish")
+        result = []
+        for meta, raw in chunks:
+            while True:
+                status = self._checkpoint_status(meta["snapshot_id"])
+                local_ready = status.get("state") in ("COMMITTED", "LOCAL_SNAPSHOT")
+                global_ready = (
+                    not self.require_global_rs
+                    or status.get("global_state") == "GLOBAL_COMMITTED"
+                )
+                if local_ready and global_ready:
+                    break
+                if time.monotonic() >= deadline:
+                    tier = "globally" if self.require_global_rs else "locally"
+                    raise TimeoutError(
+                        f"incremental checkpoint not {tier} committed"
+                    )
+                time.sleep(0.01)
+            result.append((deepcopy(meta), raw))
+        return result
+
+    def _stage(self, req, chunk, generation, token_count=CHUNK_TOKENS):
+        require(type(token_count) is int and token_count in (128, 256, 512, 1024),
+                "unsupported_online_capture_range")
         s = self.scheduler
         pool, rp = s.model_worker.model_runner.token_to_kv_pool, s.req_to_token_pool
         ps = s.model_worker.ps
-        row, start = req.req_pool_idx, chunk * CHUNK_TOKENS
-        end = start + CHUNK_TOKENS
+        row, start = req.req_pool_idx, chunk * token_count
+        end = start + token_count
         require(
             row > 0
             and row not in rp.free_slots
             and int(rp.req_generation[row]) == generation,
             "online_request_row_released",
         )
-        expected = 36 * CHUNK_TOKENS * (8 // ps.tp_size) * 128 * 2 * 2
+        layer_num = int(getattr(pool, "layer_num", 36))
+        k0, v0 = pool.get_kv_buffer(0)
+        expected = layer_num * token_count * int(k0[0].numel()) * 2 * 2
+        require(k0.shape == v0.shape, "online_kv_shape_mismatch")
         require(expected <= self.max_bytes, "online_byte_budget_exceeded")
         device = pool.k_buffer[0].device
         require(
@@ -366,8 +474,8 @@ class OnlineProtector:
         slots = rp.req_to_token[row, start:end].clone().long()
         physical = slots.cpu().tolist()
         require(
-            len(physical) == CHUNK_TOKENS
-            and len(set(physical)) == CHUNK_TOKENS
+            len(physical) == token_count
+            and len(set(physical)) == token_count
             and all(0 < p <= pool.size for p in physical),
             "online_invalid_slots",
         )
@@ -392,7 +500,11 @@ class OnlineProtector:
         )
         tokens = (req.origin_input_ids + req.output_ids)[start:end]
         rid = self._rid(req)
-        checkpoint = hashlib.sha256(f"{self.run_id}:{rid}:{chunk}".encode()).hexdigest()
+        identity_text = (
+            f"{self.run_id}:{rid}:{chunk}" if token_count == 256
+            else f"{self.run_id}:{rid}:{start}:{end}"
+        )
+        checkpoint = hashlib.sha256(identity_text.encode()).hexdigest()
         meta = dict(
             self.identity,
             format="kv-ec-rank-bin-v1",
@@ -401,17 +513,19 @@ class OnlineProtector:
             checkpoint_version=checkpoint,
             request_id=rid,
             request_id_encoding="sha256",
+            protection_mode=os.environ.get("SGLANG_KV_EC_ONLINE_PROTECTION_MODE", "xor"),
             request_version=self.run_id,
             manager_epoch=self.run_id,
             model_version=self.identity["model_sha256"],
             chunk_id=chunk,
+            capture_grain_tokens=token_count,
             token_range=[start, end],
-            layer_range=[0, 36],
+            layer_range=[0, layer_num],
             tp_size=ps.tp_size,
             tp_rank=ps.tp_rank,
-            layers=list(range(36)),
+            layers=list(range(layer_num)),
             token_start=start,
-            token_count=CHUNK_TOKENS,
+            token_count=token_count,
             token_ids_sha256=hashlib.sha256(
                 np.asarray(tokens, dtype="<i8").tobytes()
             ).hexdigest(),
@@ -435,9 +549,13 @@ class OnlineProtector:
         )
         with torch.cuda.stream(self.stream):
             begin.record(self.stream)
-            host.copy_(packed, non_blocking=True)
+            async_d2h = getattr(self, "async_d2h_enabled", True)
+            host.copy_(packed, non_blocking=async_d2h)
             done.record(self.stream)
             packed.record_stream(self.stream)
+        if not async_d2h:
+            # Explicit comparison path for --disable-opt async-d2h.
+            done.synchronize()
         return StagedChunk(meta, host, packed, done, begin, time.perf_counter())
 
     def after_result(self, batch):
@@ -478,7 +596,7 @@ class OnlineProtector:
                         ),
                         "submitted_chunks": state.next_chunk,
                         "unsubmitted_complete_chunks": max(
-                            0, req.kv_committed_len // 256 - state.next_chunk
+                            0, req.kv_committed_len // getattr(self, "grain", CHUNK_TOKENS) - state.next_chunk
                         ),
                         "cancelled": state.cancelled.is_set(),
                     }
@@ -525,6 +643,16 @@ class OnlineProtector:
                     sock.connect(self.path)
                     send_message(sock, meta, payload.tobytes())
                     status, _ = recv_message(sock)
+                if status.get("state") in ("PENDING", "COMMITTED", "LOCAL_SNAPSHOT"):
+                    immutable = payload.tobytes()
+                    key = (meta["request_id"], meta["chunk_id"])
+                    with self.protected_lock:
+                        old = self.protected_chunks.get(key)
+                        added = len(immutable) - (len(old[1]) if old else 0)
+                        if self.protected_bytes + added > self.protected_byte_limit:
+                            raise RuntimeError("live incremental cache byte budget exhausted")
+                        self.protected_chunks[key] = (deepcopy(meta), immutable)
+                        self.protected_bytes += added
                 logger.info(
                     "KV_EC_ONLINE rank=%d chunk=%d result=%s metrics=%s",
                     meta["tp_rank"],

@@ -7,6 +7,8 @@ from pathlib import Path
 import socket
 import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 from .remote_rs_protocol import rdma_diagnostic, receive, send
 from .node_block_export import descriptor as describe_node
@@ -15,11 +17,12 @@ from .perf_observer import observed
 
 
 class RemoteRSClient:
-    def __init__(self, host, port=30300, timeout=30):
+    def __init__(self, host, port=30300, timeout=30, *, control_semaphore=None):
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("positive finite timeout required")
         self.host, self.port, self.timeout = host, port, timeout
         self.transfers = []
+        self.control_semaphore = control_semaphore
 
     @staticmethod
     def _rdma_item(status, key):
@@ -201,6 +204,18 @@ class RemoteRSClient:
                              "client_receive_stats": result["stats"]}
 
     def call(self, op, *, payload=b"", **fields):
+        gate = self.control_semaphore
+        if gate is None:
+            return self._call_unbounded(op, payload=payload, **fields)
+        started = time.monotonic()
+        if not gate.acquire(timeout=self.timeout):
+            raise TimeoutError('bounded control RPC admission timeout')
+        try:
+            return self._call_unbounded(op, payload=payload, **fields)
+        finally:
+            gate.release()
+
+    def _call_unbounded(self, op, *, payload=b"", **fields):
         start = time.perf_counter()
         with socket.create_connection(
             (self.host, self.port), timeout=self.timeout
@@ -223,6 +238,103 @@ class RemoteRSClient:
         if response.get("ok") is not True:
             raise ValueError(response.get("error", "remote operation failed"))
         return response, raw
+
+    @observed("rs_streaming_upload_inclusive", "communication")
+    def tcp_submit_node_block_streaming(
+        self, stripe_id, node_id, block, *, handle, manifest_sha256,
+        chunk_bytes=4 * 1024**2,
+    ):
+        """Send bounded chunks; the server encodes each paired chunk at once."""
+        block = bytes(block)
+        if chunk_bytes <= 0 or chunk_bytes > 64 * 1024**2:
+            raise ValueError("invalid RS streaming chunk size")
+        started = time.perf_counter()
+        chunks = 0
+        status = None
+        for offset in range(0, len(block), chunk_bytes):
+            status, _ = self.call(
+                "submit_node_chunk", payload=block[offset:offset + chunk_bytes],
+                stripe_id=stripe_id, node_id=node_id, offset=offset,
+                chunk_bytes=chunk_bytes,
+                handle=handle, manifest_sha256=manifest_sha256,
+            )
+            chunks += 1
+        stats = {
+            "transport": "tcp", "chunks": chunks, "chunk_bytes": chunk_bytes,
+            "payload_bytes": len(block),
+            "wall_ms": (time.perf_counter() - started) * 1000,
+            "rs_encode_overlaps_peer_network": True,
+        }
+        return status, stats, "streamed"
+
+    @observed("rs_streaming_recovery_inclusive", "recovery")
+    def tcp_reconstruct_missing_node_streaming(
+        self, stripe_id, missing_node, survivor, on_chunk, *, handle,
+        manifest_sha256, chunk_bytes=4 * 1024**2, depth=2,
+    ):
+        """Pipeline survivor upload, remote RS, return, and caller GPU staging.
+
+        ``on_chunk(offset, immutable_bytes)`` must quarantine partial output and
+        return only after the bytes are durably staged.  No full recovered node
+        is materialized in this client.
+        """
+        import hashlib
+        if missing_node not in (0, 1) or not callable(on_chunk):
+            raise ValueError("invalid streaming recovery target")
+        if not 1 <= depth <= 8 or not 1024**2 <= chunk_bytes <= 64 * 1024**2:
+            raise ValueError("invalid streaming recovery pipeline limits")
+        status, _ = self.call(
+            "get_stripe_status", stripe_id=stripe_id,
+            handle=handle, manifest_sha256=manifest_sha256,
+        )
+        lengths = [d["length"] for d in status["manifest"]["nodes"]]
+        if len(survivor) != lengths[1 - missing_node]:
+            raise ValueError("streaming survivor length mismatch")
+        offsets = range(0, lengths[missing_node], chunk_bytes)
+        pending, digest_out = deque(), hashlib.sha256()
+        started = time.perf_counter()
+
+        def request(offset):
+            payload = survivor[offset:min(offset + chunk_bytes, len(survivor))]
+            response, raw = self.call(
+                "reconstruct_node_chunk", payload=payload,
+                stripe_id=stripe_id, missing_node=missing_node, offset=offset,
+                chunk_bytes=chunk_bytes, handle=handle,
+                manifest_sha256=manifest_sha256,
+            )
+            if response.get("chunk_sha256") != sha(raw):
+                raise ValueError("streamed recovered chunk checksum mismatch")
+            return offset, raw
+
+        count = peak = 0
+        with ThreadPoolExecutor(max_workers=depth, thread_name_prefix="rs-net-gpu") as pool:
+            iterator = iter(offsets)
+            for _ in range(depth):
+                try:
+                    pending.append(pool.submit(request, next(iterator)))
+                except StopIteration:
+                    break
+            peak = len(pending)
+            while pending:
+                offset, raw = pending.popleft().result()
+                digest_out.update(raw)
+                on_chunk(offset, raw)
+                count += 1
+                try:
+                    pending.append(pool.submit(request, next(iterator)))
+                    peak = max(peak, len(pending))
+                except StopIteration:
+                    pass
+        expected = status["manifest"]["nodes"][missing_node]["sha256"]
+        if digest_out.hexdigest() != expected:
+            raise ValueError("streamed recovered node checksum mismatch")
+        return dict(
+            state="VERIFIED", missing_node=missing_node, chunks=count,
+            pipeline_depth=depth, peak_pending=peak, full_recovered_copy_bytes=0,
+            compute_network_gpu_callback_pipeline=True,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+            sha256=expected,
+        )
 
     def register_node(self, stripe_id, node_id, block, *, allow_fixture=False):
         """Register a node descriptor before uploading its bytes."""

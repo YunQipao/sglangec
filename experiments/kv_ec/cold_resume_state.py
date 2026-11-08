@@ -68,23 +68,24 @@ def validate_state(state, meta, block_hash):
              state['boundary'] == 'post_prefill_result_before_decode',
              'cold_state_version_or_boundary_mismatch')
     ids, outputs = state['origin_input_ids'], state['output_ids']
-    _require(isinstance(ids, list) and len(ids) == 256 and
+    _require(type(state['token_count']) is int and state['token_count'] in (256, 512, 1024, 2048, 4096), 'cold_prefix_not_supported')
+    _require(isinstance(ids, list) and len(ids) == state['token_count'] and
              isinstance(outputs, list) and len(outputs) == 1 and
              all(type(x) is int and 0 <= x < state['vocab_size'] for x in ids + outputs),
              'cold_token_sequence_invalid')
     _require(type(state['pending_token_id']) is int and
              state['pending_token_id'] == outputs[0] and
              state['pending_token_has_kv'] is False and
-             state['materialized_kv_tokens'] == state['kv_allocated_len'] == 256 and
+             state['materialized_kv_tokens'] == state['kv_allocated_len'] == state['token_count'] and
              state['next_decode_input_ids'] == outputs and
-             state['next_decode_position'] == 256 and state['next_decode_seq_len'] == 257,
+             state['next_decode_position'] == state['token_count'] and state['next_decode_seq_len'] == (state['token_count'] + 1),
              'cold_pending_token_or_kv_length_mismatch')
     _require(state['sampling'] == SAMPLING and state['rng_policy'] == 'greedy_no_rng' and
              state['finished'] is False and state['extend_batch_idx'] == 1 and
              state['decode_batch_idx'] == 0 and state['decode_steps'] == 16,
              'cold_scheduler_or_sampling_state_unsupported')
     _require(state['kv_sha256'] == block_hash and state['node_id'] == meta['node_id'] and
-             state['token_start'] == 0 and state['token_count'] == 256 and
+             state['token_start'] == 0 and state['token_count'] == state['token_count'] and
              state['input_ids_sha256'] == token_digest(ids) and bool(state['request_id']),
              'cold_state_kv_binding_mismatch')
     _require(state['origin_row'] > 0 and state['origin_generation'] > 0,
@@ -155,7 +156,7 @@ def load_checkpoint(directory, rs_source=None):
         _require(proof['cuda_executed'] is True and proof['tp_rank'] == rank and
                  proof['state_sha256'] == sha(canonical(state)) and
                  proof['process'] == receipt['origin_processes'][rank] and
-                 proof['materialized_kv_tokens'] == 256 and proof['pending_token_id'] ==
+                 proof['materialized_kv_tokens'] == state['token_count'] and proof['pending_token_id'] ==
                  state['pending_token_id'], 'cold_capture_proof_invalid')
     _require([sha(rank_payloads[rank] if rank_payloads is not None else
                   (root / f'rank_{rank}.bin').read_bytes()) for rank in range(state['tp_size'])] ==

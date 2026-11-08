@@ -30,9 +30,11 @@ def validate_reserved_ports(cfg, rs_process):
 
 def listeners(ports):
     """Include unreadable/unidentified owners rather than assuming a free port."""
-    from .perf_preflight import listening_inodes
+    from .perf_preflight import listening_inode_map
     from .perf_stage_e import process_identity
-    records = {p: dict(port=p, inodes=sorted(listening_inodes(p)), owners=[]) for p in ports}
+    ports = list(ports)
+    inode_map = listening_inode_map(ports)
+    records = {p: dict(port=p, inodes=sorted(inode_map.get(p, set())), owners=[]) for p in ports}
     records = {p: r for p, r in records.items() if r['inodes']}
     if not records:
         return []

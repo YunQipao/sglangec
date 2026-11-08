@@ -1028,6 +1028,22 @@ class Req(ReqDllmMixin):
         # Incremental streamining
         self.send_token_offset: int = 0
         self.send_decode_id_offset: int = 0
+        # KV-EC same-process recovery state.  Normal serving only reads these
+        # cheap scalar defaults; the checkout-only hook owns all transitions.
+        self.kv_ec_recovery_version: int = 0
+        self.kv_ec_active_version: int = 0
+        self.kv_ec_output_paused: bool = False
+        self.kv_ec_forward_blocked: bool = False
+        self.kv_ec_recovery_point = None
+        # Monotonic recovery-clock state.  The scheduler records the fault
+        # boundary and the output streamer records actual client-bound
+        # delivery.  Keeping these on Req makes the clock survive an in-place
+        # Re-Prefill retraction without relying on KV length as output state.
+        self.kv_ec_fault_monotonic_ns: int = 0
+        self.kv_ec_fault_output_count: int = 0
+        self.kv_ec_first_delivery_logged: bool = False
+        self.kv_ec_first_new_token_logged: bool = False
+        self.kv_ec_response_complete_logged: bool = False
         # TODO (Byron): send_output_token_logprobs_offset and send_decode_id_offset can be different in disaggregation mode
         # because the decode server does not have the first output token logprobs
         self.send_output_token_logprobs_offset: int = 0

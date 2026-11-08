@@ -38,11 +38,11 @@ def validate_decode_observation(*, step, outputs, seq_len, committed_len,
                                 prefix_slots, out_slots):
     """Validate actual ForwardBatch and kernel metadata, not HTTP success."""
     _require(step > 0 and len(outputs) == step, "resume_output_kv_off_by_one")
-    _require(seq_len == committed_len == 256 + step, "resume_decode_length_mismatch")
-    _require(input_ids == [outputs[-1]] and positions == [255 + step],
+    _require(seq_len == committed_len == len(prefix_slots) + step, "resume_decode_length_mismatch")
+    _require(input_ids == [outputs[-1]] and positions == [(len(prefix_slots) - 1) + step],
              "resume_decode_input_or_position_mismatch")
     _require(len(mapping) == len(set(mapping)) == seq_len and
-             indices == mapping and indices[:256] == list(prefix_slots) and
+             indices == mapping and indices[:len(prefix_slots)] == list(prefix_slots) and
              out_slots == [mapping[-1]], "resume_attention_slot_mismatch")
 
 
@@ -163,12 +163,17 @@ class GPUResumeHook(GPURestoreHook):
                  int(self.scheduler.req_to_token_pool.req_generation[self.row]) == self.generation,
                  "stage_b_request_identity_changed")
         _require(token_digest(self.req.origin_input_ids) ==
-                 self.meta["ranks"][self.rank]["token_ids_sha256"],
+                 getattr(self, "request_token_digest", self.meta["ranks"][self.rank]["token_ids_sha256"]),
                  "stage_b_request_prefix_changed")
         mapping = validate_live_ownership(self.scheduler, self.req, 0,
                                           self.req.kv_committed_len)
-        _require(mapping[:256] == self.prefix_slots, "stage_b_prefix_mapping_changed")
+        _require(mapping[:self.prefix_tokens] == self.prefix_slots, "stage_b_prefix_mapping_changed")
         return list(mapping)
+
+    def _prefill_metadata_identity(self):
+        _metadata_identity(self.meta["ranks"][self.rank], self.scheduler, self.req,
+                           rank=self.rank, tp_size=self.tp_size, token_start=0,
+                           token_count=self.prefix_tokens)
 
     def before_forward(self, batch):
         self.deadline = time.monotonic() + self.timeout
@@ -176,17 +181,16 @@ class GPUResumeHook(GPURestoreHook):
             _require(self.admitted and not self.done, "stage_b_unadmitted_forward")
             if not self.prefill_seen:
                 _require(len(batch.reqs) == 1 and batch.forward_mode.name == "EXTEND" and
-                         batch.prefix_lens == [0] and batch.extend_num_tokens == 256,
+                         batch.prefix_lens == [0] and batch.extend_num_tokens == self.prefix_tokens,
                          "stage_b_requires_one_original_prefill")
                 self.req = batch.reqs[0]
                 self.row = self.req.req_pool_idx
                 self.generation = int(self.scheduler.req_to_token_pool.req_generation[self.row])
                 _require(not self.req.output_ids and self.req.extend_batch_idx == 1,
                          "stage_b_invalid_initial_request")
-                self.original_slots = validate_live_ownership(self.scheduler, self.req, 0, 256)
+                self.original_slots = validate_live_ownership(self.scheduler, self.req, 0, self.prefix_tokens)
                 self.prefix_slots = self.original_slots
-                _metadata_identity(self.meta["ranks"][self.rank], self.scheduler, self.req,
-                                   rank=self.rank, tp_size=self.tp_size, token_start=0, token_count=256)
+                self._prefill_metadata_identity()
                 self.evidence.update(row=self.row, generation_before=self.generation,
                                      old_slots=list(self.original_slots))
             else:
@@ -197,7 +201,7 @@ class GPUResumeHook(GPURestoreHook):
                 self._live(batch)
                 n = self.evidence["resume_decode_forward_count"] + 1
                 _require(n <= self.decode_steps and len(self.req.output_ids) == n and
-                         int(batch.seq_lens_cpu[0]) == self.req.kv_committed_len == 256 + n,
+                         int(batch.seq_lens_cpu[0]) == self.req.kv_committed_len == self.prefix_tokens + n,
                          "stage_b_decode_scheduler_state_mismatch")
         phase = "READY_" + str(len(self.evidence["forward_observations"]))
         self._barrier(phase, check)
@@ -242,7 +246,7 @@ class GPUResumeHook(GPURestoreHook):
                 self.evidence["restored_slots_used_by_decode"] = self.mode == "resume"
             else:
                 _require(mode == "EXTEND" and inputs == list(self.req.origin_input_ids) and
-                         positions == list(range(256)), "stage_b_invalid_prefill_forward")
+                         positions == list(range(self.prefix_tokens)), "stage_b_invalid_prefill_forward")
                 indices = []  # Prefill uses its native extend kernel, not Decode indices.
             _require(logits_output.next_token_logits is not None, "stage_b_raw_logits_missing")
             logits = logits_output.next_token_logits.detach().float().cpu().numpy()
@@ -304,7 +308,7 @@ class GPUResumeHook(GPURestoreHook):
     def after_forward(self, batch):
         if self.prefill_seen:
             return  # Actual Decode observations were captured in TpModelWorker.
-        self.evidence.update(cuda_executed=True, original_prefill_tokens=256,
+        self.evidence.update(cuda_executed=True, original_prefill_tokens=self.prefix_tokens,
             original_prefill_forward_count=1, forward_ct_before_restore=self.scheduler.forward_ct)
         self.prefill_seen = True
         if self.mode == "reference":
@@ -322,7 +326,7 @@ class GPUResumeHook(GPURestoreHook):
             _require(self.scheduler.forward_ct == self.evidence["forward_ct_before_restore"],
                      "stage_b_forward_during_restore")
             self.prefix_slots = self.tx.new_slots
-            self.evidence.update(committed=True, restored_kv_tokens=256,
+            self.evidence.update(committed=True, restored_kv_tokens=self.prefix_tokens,
                 mapping_version=1, transaction_state=self.tx.state,
                 forward_ct_after_restore=self.scheduler.forward_ct)
             state_after = self._request_state(batch)

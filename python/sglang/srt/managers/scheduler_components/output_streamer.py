@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -39,6 +41,65 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_FORCE_STREAM_INTERVAL = envs.SGLANG_FORCE_STREAM_INTERVAL.get()
+
+
+def _record_kv_ec_client_delivery(
+    req: Req,
+    output_ids,
+    *,
+    previous_send_offset: int,
+    finished: bool,
+    tp_rank: int | None = None,
+) -> None:
+    """Record recovery latency at the real scheduler-to-client handoff.
+
+    ``fault_to_first_delivery`` is the first accepted payload after recovery,
+    including a token computed but not delivered at the recovery point.
+    ``fault_to_first_new_token`` is stricter: the payload must contain a token
+    computed after the fault.  Reporting both prevents pending output from
+    making one recovery path look artificially faster.
+    """
+    fault_ns = int(getattr(req, "kv_ec_fault_monotonic_ns", 0))
+    version = int(getattr(req, "kv_ec_recovery_version", 0))
+    if fault_ns <= 0 or version <= 0:
+        return
+    if int(getattr(req, "kv_ec_active_version", 0)) != version:
+        return
+
+    now_ns = time.monotonic_ns()
+    common = dict(
+        request_id=str(req.rid),
+        recovery_version=version,
+        monotonic_ns=now_ns,
+        elapsed_ms=(now_ns - fault_ns) / 1_000_000,
+        delivered_token_count=len(output_ids),
+        fault_output_count=int(getattr(req, "kv_ec_fault_output_count", 0)),
+        tp_rank=tp_rank,
+    )
+    if (
+        len(output_ids) > previous_send_offset
+        and not getattr(req, "kv_ec_first_delivery_logged", False)
+    ):
+        logger.info(
+            "KV_EC_SSE %s",
+            json.dumps(dict(kind="fault_to_first_delivery", **common), sort_keys=True),
+        )
+        req.kv_ec_first_delivery_logged = True
+    if (
+        not getattr(req, "kv_ec_first_new_token_logged", False)
+        and len(output_ids) > common["fault_output_count"]
+    ):
+        logger.info(
+            "KV_EC_SSE %s",
+            json.dumps(dict(kind="fault_to_first_new_token", **common), sort_keys=True),
+        )
+        req.kv_ec_first_new_token_logged = True
+    if finished and not getattr(req, "kv_ec_response_complete_logged", False):
+        logger.info(
+            "KV_EC_SSE %s",
+            json.dumps(dict(kind="fault_to_response_complete", **common), sort_keys=True),
+        )
+        req.kv_ec_response_complete_logged = True
 
 
 @dataclass(kw_only=True, slots=True)
@@ -158,6 +219,7 @@ class SchedulerOutputStreamer:
             default_force_stream_interval=DEFAULT_FORCE_STREAM_INTERVAL,
             get_cached_tokens_details=self.get_cached_tokens_details,
             rust_server_mode=self.rust_server is not None,
+            tp_rank=self.ps.tp_rank,
         )
         for req in reqs:
             if req is skip_req:
@@ -274,6 +336,7 @@ class _GenerationStreamAccumulator:
     default_stream_interval: int
     default_force_stream_interval: int
     get_cached_tokens_details: Callable[[Req], Optional[CachedTokensDetails]]
+    tp_rank: int
     rids: list = field(default_factory=list)
     http_worker_ipcs: list = field(default_factory=list)
     finished_reasons: list = field(default_factory=list)
@@ -360,6 +423,16 @@ class _GenerationStreamAccumulator:
             self.output_token_sampling_logprobs = []
 
     def accept(self, *, req: Req) -> None:
+        # A recovery point is committed at the token actually delivered to the
+        # client, not at KV length.  Do not advance send_token_offset while a
+        # standby mapping is being prepared or while an older version can still
+        # complete asynchronously.
+        if getattr(req, "kv_ec_output_paused", False):
+            return
+        if getattr(req, "kv_ec_active_version", 0) != getattr(
+            req, "kv_ec_recovery_version", 0
+        ):
+            return
         if req.finished():
             assert not req.finished_output
             req.finished_output = True
@@ -400,6 +473,13 @@ class _GenerationStreamAccumulator:
         output_ids_ = req.output_ids_through_stop
         self.output_ids.append(output_ids_[send_token_offset:])
         req.send_token_offset = len(output_ids_)
+        _record_kv_ec_client_delivery(
+            req,
+            output_ids_,
+            previous_send_offset=send_token_offset,
+            finished=req.finished(),
+            tp_rank=self.tp_rank,
+        )
         self.prompt_tokens.append(len(req.origin_input_ids))
 
         if not self.rust_server_mode:

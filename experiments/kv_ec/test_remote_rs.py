@@ -22,8 +22,8 @@ from experiments.kv_ec.rs_stripe_builder import build, validate_manifest
 from experiments.kv_ec.test_parity_manager import metadata_and_blocks
 
 
-def node_fixture(node):
-    arrays, ranks = metadata_and_blocks(tp=2, count=4)
+def node_fixture(node, *, layers=(0,), count=4):
+    arrays, ranks = metadata_and_blocks(tp=2, layers=layers, count=count)
     for m in ranks:
         m.update(
             snapshot_id=f"snapshot-{node}",
@@ -384,6 +384,59 @@ class TCPIntegrationTests(unittest.TestCase):
         metrics, _ = self.client.call("get_metrics")
         self.assertGreater(metrics["rx_payload_bytes"], sum(map(len, blocks)))
         self.assertEqual(metrics["resident_data_bytes"], max(map(len, blocks)))
+
+    def test_real_tcp_streaming_recovery_feeds_bounded_gpu_callback(self):
+        # More than three 1 MiB chunks prove that survivor upload, remote
+        # reconstruction, response transfer, and destination staging form a
+        # bounded pipeline instead of materializing a recovered node first.
+        blocks = [
+            node_fixture(i, layers=tuple(range(12)), count=128)
+            for i in (0, 1)
+        ]
+        manifest = build("tcp-stream-recover", blocks, allow_fixture=True)
+        status, _ = self.client.call(
+            "create_stripe", stripe_id="tcp-stream-recover", manifest=manifest
+        )
+        for node, block in enumerate(blocks):
+            status, _, _ = self.client.tcp_submit_node_block_streaming(
+                "tcp-stream-recover", node, block,
+                chunk_bytes=1024**2, handle=status["handle"],
+                manifest_sha256=status["manifest_sha256"],
+            )
+        self.assertEqual(status["state"], "COMMITTED")
+
+        destination = bytearray(len(blocks[0]))
+        gpu_target = gpu_stream = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_target = torch.empty(len(blocks[0]), dtype=torch.uint8, device="cuda")
+                gpu_stream = torch.cuda.Stream()
+        except (ImportError, RuntimeError):
+            pass
+
+        def stage(offset, raw):
+            destination[offset:offset + len(raw)] = raw
+            if gpu_target is not None:
+                host = torch.empty(len(raw), dtype=torch.uint8, pin_memory=True)
+                host.copy_(torch.frombuffer(bytearray(raw), dtype=torch.uint8))
+                with torch.cuda.stream(gpu_stream):
+                    gpu_target[offset:offset + len(raw)].copy_(host, non_blocking=True)
+                # The callback contract says the chunk is durable on return.
+                gpu_stream.synchronize()
+
+        result = self.client.tcp_reconstruct_missing_node_streaming(
+            "tcp-stream-recover", 0, blocks[1], stage,
+            chunk_bytes=1024**2, depth=3, handle=status["handle"],
+            manifest_sha256=status["manifest_sha256"],
+        )
+        self.assertEqual(bytes(destination), blocks[0])
+        self.assertGreater(result["chunks"], 3)
+        self.assertLessEqual(result["peak_pending"], 3)
+        self.assertEqual(result["full_recovered_copy_bytes"], 0)
+        self.assertTrue(result["compute_network_gpu_callback_pipeline"])
+        if gpu_target is not None:
+            self.assertEqual(gpu_target.cpu().numpy().tobytes(), blocks[0])
 
     def test_real_tcp_truncation_timeout_and_retry(self):
         # Partial frame must never create a stripe; server resumes after timeout.

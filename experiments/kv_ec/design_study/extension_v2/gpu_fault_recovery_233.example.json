@@ -1,0 +1,24 @@
+{
+  "repo": "/PARENT/NEW-233-WORKTREE",
+  "python": "/media/sda1/iic_data/anaconda3/envs/sglang-ec/bin/python",
+  "conda_prefix": "/media/sda1/iic_data/anaconda3/envs/sglang-ec",
+  "cuda_home": "/media/sda1/iic_data/anaconda3/envs/sglang-ec",
+  "cuda_include_dirs": ["/media/sda1/iic_data/anaconda3/envs/sglang-ec/targets/x86_64-linux/include"],
+  "cuda_library_dirs": [
+    "/media/sda1/iic_data/anaconda3/envs/sglang-ec/lib",
+    "/media/sda1/iic_data/anaconda3/envs/sglang-ec/targets/x86_64-linux/lib"
+  ],
+  "model": "/media/sda1/iic_data/luotao/models/Qwen3-8B",
+  "input_ids": "/PARENT/VERIFIED-prefix256-input_ids.json",
+  "template": "/PARENT/ACCEPTED-TP2-template/global_node.bin",
+  "ledger": "/PARENT/SHARED-cold-restore-ledger",
+  "gpus": "0,2",
+  "tp_size": 2,
+  "prefix_tokens": 256,
+  "port": 32962,
+  "gpu_admission_mode": "shared",
+  "mem_fraction_static": 0.6,
+  "resource_interval": 1,
+  "startup_timeout": 900,
+  "request_timeout": 300
+}

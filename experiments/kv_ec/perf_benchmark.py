@@ -157,9 +157,9 @@ def inference(args):
     ids = read(args.input_ids)
     if isinstance(ids, dict):
         ids = ids['input_ids']
-    if len(ids) != 256 or any(type(x) is not int or x < 0 for x in ids):
+    if len(ids) not in (256, 512, 1024, 2048, 4096) or any(type(x) is not int or x < 0 for x in ids):
         raise ValueError('first baseline requires exactly 256 token IDs')
-    input_ids_sha256 = hashlib.sha256(struct.pack('<256q', *ids)).hexdigest()
+    input_ids_sha256 = hashlib.sha256(struct.pack('<' + str(len(ids)) + 'q', *ids)).hexdigest()
     expected_input = getattr(args, 'expected_input_ids_sha256', None)
     if expected_input is not None and input_ids_sha256 != expected_input:
         raise ValueError('baseline_input_ids_sha256_mismatch')
@@ -206,7 +206,7 @@ def inference(args):
     model_files = [Path(args.model) / 'config.json', *sorted(Path(args.model).glob('*.safetensors.index.json'))]
     meta.update(scheme=args.scheme, model=args.model,
         model_sha256=getattr(args, 'expected_model_sha256', None), model_files={str(p): digest(p)
-        for p in model_files if p.exists()}, input_sha256=digest(args.input_ids), prefix_tokens=256,
+        for p in model_files if p.exists()}, input_sha256=digest(args.input_ids), prefix_tokens=len(ids),
         tp_size=tp_size, input_ids_sha256=input_ids_sha256,
         generation_tokens=17, sampling=sampling, server_info=info,
         repeat=args.repeat, warmup=args.warmup, cache_policy='server radix disabled; cached_tokens must be zero',
@@ -238,7 +238,7 @@ def inference(args):
             if final is None or first is None or full is None:
                 raise ValueError('missing streaming generation evidence')
             usage = final['meta_info']
-            if usage.get('cached_tokens') != 0 or usage.get('prompt_tokens') != 256 or usage.get('completion_tokens') != 17:
+            if usage.get('cached_tokens') != 0 or usage.get('prompt_tokens') != len(ids) or usage.get('completion_tokens') != 17:
                 raise ValueError('cached/short/wrong-prefix inference cannot enter baseline statistics')
             output_ids = final.get('output_ids')
             if not isinstance(output_ids, list) or len(output_ids) != 17:
@@ -322,11 +322,11 @@ def local_xor(args):
     source, state, _, _ = load_checkpoint(args.capture)
     meta, payloads = unpack(source.load())  # production validator; fixtures rejected
     blocks = [np.frombuffer(p, dtype=np.uint8) for p in payloads]
-    if len(meta['ranks']) not in (2, 4) or state['token_count'] != 256 or not 0 <= args.lost_rank < len(blocks):
+    if len(meta['ranks']) not in (2, 4) or state['token_count'] not in (256, 512, 1024, 2048, 4096) or not 0 <= args.lost_rank < len(blocks):
         raise ValueError('real TP2_or_TP4/256 capture and valid lost rank required')
     save(args.output / 'metadata.json', dict(**identity(), scheme='xor-only',
         capture=str(args.capture), capture_sha256=hashlib.sha256(source.load()).hexdigest(),
-        runtime_identity=state['runtime_identity'], prefix_tokens=256, tp_size=len(meta['ranks']),
+        runtime_identity=state['runtime_identity'], prefix_tokens=state['token_count'], tp_size=len(meta['ranks']),
         limitation='CPU codec on authentic GPU capture; controlled single TP-rank byte loss; '
                    'no Scheduler/GPU resume, not native-RDMA end-to-end performance'))
     with Sampler(args.output / 'resources.jsonl', args.resource_interval):
@@ -468,7 +468,7 @@ def repeat(args):
             raw['gpu_startup_evidence'] = {
                 name: read(root / name) for name in ('node0-reference/run.json', 'origin-run-233.json',
                     'target-run.json' if recovery_mode == 'two-level' else 'reprefill-target-run.json')}
-            raw['model_tp_prefix_identity'] = [dict(tp_size=config['tp_size'], prefix_tokens=256,
+            raw['model_tp_prefix_identity'] = [dict(tp_size=config['tp_size'], prefix_tokens=config['prefix_tokens'],
                 runtime_identity=record.get('runtime_identity', record.get('model_identity')))
                 for record in raw['gpu_startup_evidence'].values()]
             if recovery_mode == 'two-level':

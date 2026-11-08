@@ -46,11 +46,18 @@ class OnlineRSExporter:
         max_bytes=256 * 1024**2,
         max_checkpoints=16,
         client_factory=None,
+        protection_scope="chunk",
         allow_fixture=False,
+        transport="rdma",
+        stream_chunk_bytes=4 * 1024**2,
     ):
         limits = (timeout, control_timeout, rdma_timeout, poll_interval)
         if (
-            type(node_id) is not int
+            protection_scope not in ("chunk", "full-prefix")
+            or transport not in ("tcp", "rdma")
+            or type(stream_chunk_bytes) is not int
+            or not 1024**2 <= stream_chunk_bytes <= 64 * 1024**2
+            or type(node_id) is not int
             or node_id not in (0, 1)
             or any(not math.isfinite(v) or v <= 0 for v in limits)
             or any(
@@ -80,6 +87,9 @@ class OnlineRSExporter:
                 raise ValueError("nonempty global identity strings <=128 required")
         if allow_fixture and client_factory is None:
             raise ValueError("fixtures require an explicitly injected mock client")
+        self.protection_scope = protection_scope
+        self.transport = transport
+        self.stream_chunk_bytes = stream_chunk_bytes
         self.node_id, self.run_id = node_id, run_id
         self.checkpoint_version, self.requests = checkpoint_version, dict(requests)
         self.timeout, self.control_timeout = timeout, control_timeout
@@ -90,8 +100,10 @@ class OnlineRSExporter:
         self.max_pending, self.max_bytes = max_pending, max_bytes
         self.max_checkpoints, self.accepted = max_checkpoints, 0
         self.allow_fixture = allow_fixture
+        self.control_semaphore = threading.BoundedSemaphore(1)
         self.client_factory = client_factory or (
-            lambda: RemoteRSClient(remote_host, remote_port, control_timeout)
+            lambda: RemoteRSClient(remote_host, remote_port, control_timeout,
+                                   control_semaphore=self.control_semaphore)
         )
         self.queue = queue.Queue(max_pending)
         self.lock, self.stop = threading.Lock(), threading.Event()
@@ -115,6 +127,22 @@ class OnlineRSExporter:
     def _save(job, state, **fields):
         job["status"].update(global_state=state, updated_at_unix=time.time(), **fields)
         directory = job["directory"]
+        if state == "GLOBAL_COMMITTED":
+            path = directory / "manifest.json"
+            manifest = json.loads(path.read_text())
+            # Older/manual export users need not have the v2 cost fields.
+            if "memory_ledger" in manifest:
+                manifest["memory_ledger"]["stable_remote_parity_bytes"] = fields.get("remote_parity_bytes")
+                manifest["memory_ledger"]["remote_retained_node_snapshot_bytes"] = fields.get("remote_retained_node_block_bytes")
+                manifest["memory_ledger"]["persisted_node_snapshot_bytes"] = (directory / "global_node.bin").stat().st_size
+                manifest["timing_ms"]["global_commit"] = (time.monotonic() - job["created"]) * 1000
+                manifest["protection_state"] = "GLOBAL_COMMITTED"
+                if manifest["protection_mode"] == "rs-only":
+                    manifest["state"] = "COMMITTED"
+                marker = directory / "manifest.global.tmp"
+                marker.write_text(json.dumps(manifest, indent=2, allow_nan=False))
+                marker.replace(path)
+        # Publish the global completion marker LAST, after its cost/state ledger.
         temporary = directory / "global_status.tmp"
         temporary.write_text(json.dumps(job["status"], indent=2, allow_nan=False))
         temporary.replace(directory / "global_status.json")
@@ -123,6 +151,7 @@ class OnlineRSExporter:
         """Nonblocking admission on the CPU manager, never packs/hashes/networks."""
         directory = Path(directory)
         first = entries[0]
+        local = json.loads((directory / "manifest.json").read_text()) if (directory / "manifest.json").exists() else {}
         now = time.monotonic()
         job = dict(
             directory=directory,
@@ -130,11 +159,12 @@ class OnlineRSExporter:
             deadline=now + self.timeout,
             status=dict(
                 format="kv-online-rs-status-v1",
-                local_state="LOCAL_COMMITTED",
+                local_state="LOCAL_SNAPSHOT" if local.get("protection_mode") == "rs-only" else "LOCAL_COMMITTED",
+                protection_mode=local.get("protection_mode", "xor-rs"),
                 local_snapshot_id=first["snapshot_id"],
                 created_at_unix=time.time(),
                 node_id=self.node_id,
-                transport="CPU_MOCK" if self.allow_fixture else "rdma",
+                transport="CPU_MOCK" if self.allow_fixture else self.transport,
                 remote_outcome="NOT_SUBMITTED",
                 metrics={},
             ),
@@ -144,7 +174,8 @@ class OnlineRSExporter:
             self._save(job, "SKIPPED_UNMAPPED")
             return "SKIPPED_UNMAPPED"
         identity = identity_for(
-            self.run_id, protection_id, self.checkpoint_version, first
+            self.run_id, protection_id, self.checkpoint_version, first,
+            full_prefix=self.protection_scope == "full-prefix"
         )
         sid = stripe_id(identity)
         job["status"].update(stripe_id=sid, global_protection=identity)
@@ -257,16 +288,24 @@ class OnlineRSExporter:
         self._save(job, "UPLOADING", **key, remote_outcome="UNKNOWN")
         client.timeout = min(self.control_timeout, self._check(job))
         started = time.perf_counter()
-        status, tx_stats, disposition = client.rdma_submit_node_block(
-            sid,
-            self.node_id,
-            block,
-            **key,
-            **self.rdma,
-            timeout=min(self.rdma_timeout, self._check(job)),
-        )
-        metrics["rdma_upload_wall_ms"] = (time.perf_counter() - started) * 1000
-        metrics["rdma_native"] = tx_stats
+        if self.transport == "tcp":
+            status, tx_stats, disposition = client.tcp_submit_node_block_streaming(
+                sid, self.node_id, block, **key,
+                chunk_bytes=self.stream_chunk_bytes,
+            )
+            metrics["tcp_streaming_upload_wall_ms"] = (time.perf_counter() - started) * 1000
+            metrics["tcp_streaming"] = tx_stats
+        else:
+            status, tx_stats, disposition = client.rdma_submit_node_block(
+                sid,
+                self.node_id,
+                block,
+                **key,
+                **self.rdma,
+                timeout=min(self.rdma_timeout, self._check(job)),
+            )
+            metrics["rdma_upload_wall_ms"] = (time.perf_counter() - started) * 1000
+            metrics["rdma_native"] = tx_stats
         # upload_wall includes control, remote validation/polling and may include
         # RS encode. Native verbs timings are separate; do not add them together.
         self._check(job)
@@ -291,6 +330,8 @@ class OnlineRSExporter:
             "GLOBAL_COMMITTED",
             remote_outcome="COMMITTED",
             parity_sha256=status["parity_sha256"],
+            remote_parity_bytes=status.get("parity_bytes", max(d["length"] for d in status["manifest"]["nodes"])),
+            remote_retained_node_block_bytes=status.get("retained_node_block_bytes"),
             remote_retention="volatile_store_ttl",
             recovery_byte_exact="NOT_YET_VERIFIED",
         )

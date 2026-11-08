@@ -130,6 +130,7 @@ class ColdGPUBindingTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp:
                 hook = GPUColdResumeHook.__new__(GPUColdResumeHook)
                 hook.cold_mode, hook.prefill_seen = 'capture', False
+                hook.prefix_tokens = 256
                 hook.scheduler, hook.rank, hook.run_id = scheduler(rank), rank, 'cpu-regression'
                 hook.generation, hook.req = 1, NS()
                 hook.cfg = dict(record, capture_bundle=temp)
@@ -178,6 +179,7 @@ class ColdGPUBindingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             hook = GPUColdResumeHook.__new__(GPUColdResumeHook)
             hook.cold_mode, hook.prefill_seen = 'capture', False
+            hook.prefix_tokens = 256
             hook.scheduler, hook.rank, hook.run_id = scheduler(0), 0, 'cpu-rejected'
             hook.generation, hook.req = 1, NS()
             hook.cfg = dict(record, capture_bundle=temp)

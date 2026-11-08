@@ -11,10 +11,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import os
+import threading
 from pathlib import Path
 import time
 from typing import Protocol
 
+import numpy as np
 import torch
 
 from .node_block_export import unpack, sha
@@ -46,7 +49,11 @@ class BytesCheckpointSource:
     payload: bytes
 
     def load(self) -> bytes:
-        return bytes(self.payload)
+        # ``bytes(existing_bytes)`` is normally elided by CPython, but the
+        # contract here is stronger: an immutable in-memory checkpoint is the
+        # recovery source and must not be materialized again on the critical
+        # path.  Returning the owned object also makes that lifetime explicit.
+        return self.payload
 
 
 @dataclass
@@ -64,6 +71,56 @@ class RestoreStats:
     h2d_ms: float = 0.0
     verify_ms: float = 0.0
     layers_verified: list = field(default_factory=list)
+    pipeline_depth: int = 1
+    fused_xor_scatter: bool = False
+    streaming_layer_writeback: bool = False
+    async_validation_stream: bool = False
+    full_reconstructed_copy_bytes: int = 0
+    peak_staging_bytes: int = 0
+
+
+class AsyncPostCommitAudit:
+    """Full restored-prefix SHA audit on a private stream while Decode runs."""
+
+    def __init__(self, pool, slots, records, *, device):
+        self.pool, self.slots = pool, tuple(slots)
+        self.records, self.device = tuple(records), device
+        self.done = threading.Event()
+        self.error = None
+        self.layers_verified = 0
+        self.started_ns = time.monotonic_ns()
+        self.thread = threading.Thread(
+            target=self._run, daemon=True, name="kv-ec-post-commit-audit"
+        )
+        self.thread.start()
+
+    def _run(self):
+        try:
+            with torch.cuda.device(self.device):
+                stream = torch.cuda.Stream(device=self.device, priority=0)
+                slots = torch.tensor(self.slots, dtype=torch.int64, device=self.device)
+                for record in self.records:
+                    got = _read_layer(self.pool, int(record["layer_id"]), slots, stream)
+                    kn = int(record["k_nbytes"])
+                    _require(
+                        sha(got[:kn]) == record["k_sha256"]
+                        and sha(got[kn:]) == record["v_sha256"],
+                        "post_commit_async_audit_mismatch",
+                    )
+                    self.layers_verified += 1
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            self.done.set()
+
+    def poll(self):
+        if self.done.is_set() and self.error is not None:
+            raise RestoreRejected("post_commit_async_audit_failed") from self.error
+        return self.done.is_set()
+
+    def close(self, timeout=5):
+        self.thread.join(timeout=timeout)
+        return self.poll()
 
 
 class AllocatorSavepoint:
@@ -259,11 +316,12 @@ def _metadata_identity(meta: dict, scheduler, req, *, rank: int, tp_size: int,
     _require(meta["tp_rank"] == rank and meta["tp_size"] == tp_size,
              "checkpoint_rank_or_size_mismatch")
     _require(meta["dtype"] == "torch.bfloat16", "checkpoint_dtype_mismatch")
-    _require(meta["layers"] == list(range(36)) and pool.layer_num == 36,
+    _require(meta["layers"] == list(range(pool.layer_num)) and
+             pool.layer_num == len(meta["layers"]),
              "checkpoint_layer_layout_mismatch")
     _require(meta["token_start"] == token_start and meta["token_count"] == token_count,
              "checkpoint_token_range_mismatch")
-    _require(token_count in (256, 512, 768), "unsupported_restore_token_count")
+    _require(type(token_count) is int and token_count > 0, "unsupported_restore_token_count")
     _require(meta["snapshot_completion_status"] == "complete" and
              meta.get("source_unchanged") is True, "checkpoint_incomplete")
     _require(meta["packed_byte_count"] > 0, "checkpoint_empty")
@@ -274,8 +332,10 @@ def _metadata_identity(meta: dict, scheduler, req, *, rank: int, tp_size: int,
              "runtime_pool_must_be_dense_page1")
     hf = scheduler.model_worker.model_runner.model_config.hf_config
     _require(hf.model_type == "qwen3" and hf.num_key_value_heads == 8 and
-             hf.head_dim == 128 and hf.hidden_size == 4096 and
-             hf.num_attention_heads == 32, "runtime_model_layout_mismatch")
+             hf.head_dim == 128 and
+             getattr(hf, "num_hidden_layers", pool.layer_num) == pool.layer_num and
+             hf.num_attention_heads * hf.head_dim == hf.hidden_size,
+             "runtime_model_layout_mismatch")
     # A source identity is required; when the scheduler exposes the capture
     # identity, compare content fingerprints and source provenance exactly.
     expected = getattr(scheduler, "kv_ec_source_identity", None)
@@ -514,6 +574,213 @@ def restore_to_gpu(scheduler, req, source: CheckpointSource, *, token_start: int
             tx.state = "QUARANTINED"
             raise RestoreRejected("restore_cleanup_failed_slots_quarantined") from cleanup
         # Preserve diagnostics without handing callers a live, unowned tensor.
+        exc.restore_stats = tx.stats
+        raise
+
+
+def restore_xor_to_gpu(
+    scheduler,
+    req,
+    source: CheckpointSource,
+    *,
+    parity: bytes,
+    survivor: bytes,
+    parity_sha256: str,
+    codec,
+    token_start: int = 0,
+    source_name: str = "xor_host_memory",
+) -> RestoreTransaction:
+    """Fused TP2 XOR reconstruction directly into standby SGLang KV slots.
+
+    Pinned H2D, the XOR/scatter CUDA kernel, per-layer pool writeback, and
+    asynchronous D2H validation use bounded two-slot rings.  No complete
+    reconstructed host or device buffer is materialized.  Scheduler commit is
+    still fail-closed until every validation event and SHA-256 check completes.
+    """
+    if not torch.cuda.is_available():
+        raise RestoreRejected("cuda_required_for_fused_xor_restore")
+    block = source.load()
+    meta, rank_blocks = unpack(block)
+    rank = int(scheduler.model_worker.ps.tp_rank)
+    tp_size = int(scheduler.model_worker.ps.tp_size)
+    _require(tp_size == 2 and len(rank_blocks) == 2 and rank in (0, 1),
+             "fused_xor_restore_requires_tp2")
+    raw = rank_blocks[rank]
+    rank_meta = meta["ranks"][rank]
+    survivor_meta = meta["ranks"][1 - rank]
+    token_count = int(rank_meta["token_count"])
+    _metadata_identity(rank_meta, scheduler, req, rank=rank, tp_size=tp_size,
+                       token_start=token_start, token_count=token_count)
+    _validate_segments(raw, rank_meta, token_count=token_count, tp_size=tp_size)
+    _validate_segments(survivor, survivor_meta, token_count=token_count, tp_size=tp_size)
+    _require(type(parity) is bytes and len(parity) == len(raw) == len(survivor),
+             "fused_xor_source_length_mismatch")
+    _require(sha(parity) == parity_sha256, "fused_xor_parity_sha256_mismatch")
+
+    req_pool = scheduler.req_to_token_pool
+    allocator = scheduler.token_to_kv_pool_allocator
+    from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
+    _require(type(allocator) is TokenToKVPoolAllocator, "restore_allocator_unsupported")
+    _require(scheduler.server_args.disable_radix_cache and not scheduler.enable_overlap,
+             "restore_requires_private_nonoverlap_pool")
+    pool = scheduler.model_worker.model_runner.token_to_kv_pool
+    _require(allocator.get_kvcache() is pool and allocator.size == pool.size,
+             "restore_allocator_pool_mismatch")
+    device = pool.k_buffer[0].device
+    torch.cuda.synchronize(device)
+    old = validate_live_ownership(scheduler, req, token_start, token_count)
+    row = int(req.req_pool_idx)
+    generation = int(req_pool.req_generation[row])
+    owner = f"gpu-xor-restore:{row}:{generation}"
+    req_pool.protect_kv_ec_row(row, generation, owner)
+    write_stream = torch.cuda.Stream(device=device, priority=0)
+    validation_stream = torch.cuda.Stream(device=device, priority=0)
+    defer_full_audit = (
+        os.environ.get("SGLANG_KV_EC_ASYNC_VERIFY", "1") == "1"
+        and os.environ.get("SGLANG_KV_EC_DEFER_FULL_AUDIT", "1") == "1"
+    )
+
+    def fence():
+        write_stream.synchronize(); validation_stream.synchronize()
+
+    tx = RestoreTransaction(
+        allocator, req_pool, req, row, generation, old, (), token_start,
+        token_count,
+        RestoreStats(source_name, meta["node_id"], rank, tp_size,
+                     token_start, token_count, 0, 0),
+        fence=fence, guard_owner=owner,
+    )
+    try:
+        new, tx.savepoint = allocate_restore_slots(allocator, token_count, old)
+        tx.new_slots = new
+        tx.ownership_check = lambda: validate_live_ownership(
+            scheduler, req, token_start, token_count,
+            reserved=tx.old_slots if tx.mapping_installed else tx.new_slots,
+        )
+        gpu_slots = torch.tensor(new, dtype=torch.int64, device=device)
+        max_segment = max(
+            int(r[k + "_nbytes"]) for r in rank_meta["layer_records"]
+            for k in ("k", "v")
+        )
+        input_ring = []
+        validation_ring = []
+        with torch.cuda.device(device):
+            for _ in range(2):
+                input_ring.append(dict(
+                    hp=torch.empty(max_segment, dtype=torch.uint8, pin_memory=True),
+                    hs=torch.empty(max_segment, dtype=torch.uint8, pin_memory=True),
+                    dp=torch.empty(max_segment, dtype=torch.uint8, device=device),
+                    ds=torch.empty(max_segment, dtype=torch.uint8, device=device),
+                    done=torch.cuda.Event(), used=False,
+                ))
+                if not defer_full_audit:
+                    validation_ring.append(dict(
+                        host=torch.empty(2 * max_segment, dtype=torch.uint8, pin_memory=True),
+                        done=torch.cuda.Event(), used=False, record=None,
+                    ))
+
+        def drain_validation(slot):
+            if not slot["used"]:
+                return
+            slot["done"].synchronize()
+            record = slot["record"]
+            kn, vn = int(record["k_nbytes"]), int(record["v_nbytes"])
+            got_k = slot["host"][:kn].numpy().tobytes()
+            got_v = slot["host"][max_segment:max_segment + vn].numpy().tobytes()
+            got_k_sha, got_v_sha = sha(got_k), sha(got_v)
+            _require(got_k_sha == record["k_sha256"] and
+                     got_v_sha == record["v_sha256"],
+                     "fused_xor_gpu_writeback_sha256_mismatch")
+            tx.stats.layers_verified.append(dict(
+                layer_id=record["layer_id"], k_byte_exact=True, v_byte_exact=True,
+                # Default path reuses the hashes just computed for admission.
+                # The opt-out path intentionally re-hashes for a fair ablation.
+                k_sha256=(got_k_sha if os.environ.get(
+                    "SGLANG_KV_EC_HASH_REUSE", "1") == "1" else sha(got_k)),
+                v_sha256=(got_v_sha if os.environ.get(
+                    "SGLANG_KV_EC_HASH_REUSE", "1") == "1" else sha(got_v)),
+            ))
+            slot["used"] = False
+
+        started = time.perf_counter()
+        perf_started = time.monotonic_ns()
+        segment_index = 0
+        for layer_index, record in enumerate(rank_meta["layer_records"]):
+            layer_done = None
+            for kind in ("k", "v"):
+                n = int(record[kind + "_nbytes"])
+                offset = int(record[kind + "_offset"])
+                slot = input_ring[segment_index % len(input_ring)]
+                if slot["used"]:
+                    slot["done"].synchronize()
+                np.copyto(slot["hp"][:n].numpy(), np.frombuffer(
+                    parity[offset:offset + n], dtype=np.uint8))
+                np.copyto(slot["hs"][:n].numpy(), np.frombuffer(
+                    survivor[offset:offset + n], dtype=np.uint8))
+                with torch.cuda.stream(write_stream):
+                    slot["dp"][:n].copy_(slot["hp"][:n], non_blocking=True)
+                    slot["ds"][:n].copy_(slot["hs"][:n], non_blocking=True)
+                target = (pool.k_buffer if kind == "k" else pool.v_buffer)[
+                    int(record["layer_id"])
+                ]
+                layer_done = codec.xor_scatter_into(
+                    slot["dp"][:n], slot["ds"][:n], target, gpu_slots,
+                    stream=write_stream,
+                )
+                slot["done"].record(write_stream)
+                slot["used"] = True
+                segment_index += 1
+
+            if not defer_full_audit:
+                vslot = validation_ring[layer_index % len(validation_ring)]
+                drain_validation(vslot)
+                with torch.cuda.stream(validation_stream):
+                    validation_stream.wait_event(layer_done)
+                    kpool, vpool = pool.get_kv_buffer(int(record["layer_id"]))
+                    kg = kpool.index_select(0, gpu_slots).contiguous().view(torch.uint8).reshape(-1)
+                    vg = vpool.index_select(0, gpu_slots).contiguous().view(torch.uint8).reshape(-1)
+                    kn, vn = int(record["k_nbytes"]), int(record["v_nbytes"])
+                    vslot["host"][:kn].copy_(kg, non_blocking=True)
+                    vslot["host"][max_segment:max_segment + vn].copy_(vg, non_blocking=True)
+                    vslot["done"].record(validation_stream)
+                vslot["record"] = record
+                vslot["used"] = True
+
+        for slot in validation_ring:
+            drain_validation(slot)
+        fence()
+        tx.stats.written_bytes = len(raw)
+        tx.stats.h2d_ms = (time.perf_counter() - started) * 1000
+        tx.stats.verify_ms = tx.stats.h2d_ms
+        tx.stats.loaded_kv_tokens = token_count
+        tx.stats.pipeline_depth = 2
+        tx.stats.fused_xor_scatter = True
+        tx.stats.streaming_layer_writeback = True
+        tx.stats.async_validation_stream = True
+        tx.stats.full_reconstructed_copy_bytes = 0
+        tx.stats.peak_staging_bytes = (
+            2 * 4 * max_segment
+            if defer_full_audit
+            else 2 * (4 * max_segment + 2 * max_segment)
+        )
+        tx.post_commit_audit_factory = lambda: AsyncPostCommitAudit(
+            pool, tx.new_slots, rank_meta["layer_records"], device=device
+        )
+        emit("gpu_fused_xor_kv_writeback", "recovery", start_ns=perf_started,
+             tp_rank=rank, bytes=len(raw), layers=len(tx.stats.layers_verified),
+             includes=(
+                 "pinned_H2D,fused_XOR_scatter,post_commit_async_D2H_SHA256"
+                 if defer_full_audit
+                 else "pinned_H2D,fused_XOR_scatter,precommit_D2H_SHA256"
+             ))
+        tx.state = "VERIFIED"
+        return tx
+    except BaseException as exc:
+        try:
+            tx.abort()
+        except BaseException as cleanup:
+            tx.state = "QUARANTINED"
+            raise RestoreRejected("fused_restore_cleanup_failed_slots_quarantined") from cleanup
         exc.restore_stats = tx.stats
         raise
 

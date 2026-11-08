@@ -1159,6 +1159,7 @@ class Scheduler(
         self._kv_ec_pause_gate = None
         self._kv_ec_online = None
         self._kv_ec_gpu_restore = None
+        self._kv_ec_live_recovery = None
         if os.environ.get("SGLANG_KV_EC_GPU_RESTORE") == "1":
             from sglang.srt.debug_utils.kv_ec import create_gpu_restore_hook
 
@@ -1167,6 +1168,10 @@ class Scheduler(
             from sglang.srt.debug_utils.kv_ec import create_online_protector
 
             self._kv_ec_online = create_online_protector(self)
+        if os.environ.get("SGLANG_KV_EC_LIVE_RECOVERY") == "1":
+            from sglang.srt.debug_utils.kv_ec import create_live_recovery
+
+            self._kv_ec_live_recovery = create_live_recovery(self)
         if os.environ.get("SGLANG_KV_EC_PAUSE_RESUME") == "1":
             from sglang.srt.debug_utils.kv_ec import create_pause_gate
 
@@ -1737,6 +1742,8 @@ class Scheduler(
             if self.gracefully_exit:
                 if self._kv_ec_online is not None:
                     self._kv_ec_online.close()
+                if self._kv_ec_live_recovery is not None:
+                    self._kv_ec_live_recovery.close()
                 break
 
             # Receive requests
@@ -1745,6 +1752,8 @@ class Scheduler(
                 self._kv_ec_gpu_restore.before_inputs(recv_reqs)
             if self._kv_ec_online is not None:
                 self._kv_ec_online.before_inputs(recv_reqs)
+            if self._kv_ec_live_recovery is not None:
+                self._kv_ec_live_recovery.before_inputs(recv_reqs)
             if self._kv_ec_pause_gate is not None:
                 # Abort requests may mark to_finish; all other mutations are
                 # forbidden during this isolated experiment's ownership window.
@@ -1757,6 +1766,10 @@ class Scheduler(
                     continue
             if self._engine_paused:
                 continue
+            if self._kv_ec_live_recovery is not None:
+                # Recovery runs between forwards, with the request and model
+                # resident.  A completed recovery may have requeued Re-Prefill.
+                self._kv_ec_live_recovery.before_schedule()
 
             # Get the next batch to run
             plan = self.get_next_batch_to_run(
@@ -1788,6 +1801,8 @@ class Scheduler(
             if self._kv_ec_online is not None:
                 # Also retire aborted requests when no further forward runs.
                 self._kv_ec_online.after_result(batch)
+            if self._kv_ec_live_recovery is not None:
+                self._kv_ec_live_recovery.after_result(batch)
 
             # Update last_batch
             self.last_batch = batch
@@ -3675,6 +3690,14 @@ class Scheduler(
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
+        if (
+            os.environ.get("SGLANG_KV_EC_PREFILL_OBSERVE") == "1"
+            and os.environ.get("KV_EC_PERF_DIR")
+            and os.environ.get("KV_EC_PERF_RUN_ID")
+        ):
+            from experiments.kv_ec.prefill_observer import before_decode
+
+            before_decode(self, batch)
         self.forward_ct += 1
         batch.forward_iter = self.forward_ct
         batch.launch_ts = time.monotonic()

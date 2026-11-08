@@ -16,6 +16,7 @@ class TCPTransport(Transport):
         self.retry_timeout = float(retry_timeout)
         self.connect_timeout = float(connect_timeout)
         self.retry_interval = float(retry_interval)
+        self.last_stats = None
 
     def send(self, host, port, payload):
         started = time.perf_counter()
@@ -34,12 +35,23 @@ class TCPTransport(Transport):
                     raise
                 time.sleep(min(self.retry_interval, max(0, deadline - time.monotonic())))
         with sock:
+            sock.settimeout(max(.001, deadline-time.monotonic()))
+            transfer_started = time.perf_counter()
             sock.sendall(struct.pack("!Q", len(payload)))
             sock.sendall(payload)
+            sendall_finished = time.perf_counter()
             response = sock.recv(1)
             if response != b"\x01":
                 raise ConnectionError("TCP worker did not acknowledge complete payload")
-        return time.perf_counter() - started
+        finished = time.perf_counter()
+        self.last_stats = dict(bytes=len(payload), completion_status="SUCCESS",
+            connect_retry_ms=(transfer_started-started)*1000,
+            payload_sendall_ms=(sendall_finished-transfer_started)*1000,
+            ack_wait_ms=(finished-sendall_finished)*1000,
+            acknowledged_unidirectional_ms=(finished-transfer_started)*1000,
+            elapsed_s=finished-started, transport="tcp",
+            note="one payload direction plus 1-byte ACK, not payload echo RTT; sendall is host enqueue, not remote arrival")
+        return finished - started
 
 
 def receive_file(host, port, destination, *, timeout=60, ready_event=None,
@@ -100,8 +112,13 @@ def receive_file(host, port, destination, *, timeout=60, ready_event=None,
             if size <= 0 or size > 256 * 1024**2:
                 raise ValueError("invalid TCP payload length")
             update("receiving", expected_bytes=size)
+            payload_started = time.perf_counter()
             remaining = size
             while remaining:
+                budget = deadline-time.monotonic()
+                if budget <= 0:
+                    raise TimeoutError("TCP receive lifecycle deadline exceeded")
+                conn.settimeout(min(poll_timeout, budget))
                 try:
                     data = conn.recv(min(1024 * 1024, remaining))
                 except socket.timeout:
@@ -114,14 +131,21 @@ def receive_file(host, port, destination, *, timeout=60, ready_event=None,
                     raise ConnectionError("TCP payload ended before expected length")
                 stream.write(data)
                 remaining -= len(data)
+            # Match the native receiver's fflush-before-ACK boundary. This is
+            # userspace flush, not fsync/durable storage or a payload echo.
+            flush_started = time.perf_counter()
+            stream.flush()
             conn.sendall(b"\x01")
-            update("complete", bytes=size)
+            update("complete", bytes=size, receiver_persist_flush_ms=(time.perf_counter()-flush_started)*1000,
+                   receive_payload_and_flush_ms=(time.perf_counter()-payload_started)*1000)
     return time.perf_counter() - started
 
 
 def _recv_exact(sock, size, *, cancel_event=None, deadline=None):
     chunks = []
     while size:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("TCP framed header deadline exceeded")
         try:
             chunk = sock.recv(size)
         except socket.timeout:

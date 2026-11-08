@@ -477,6 +477,7 @@ class SchedulerPauseTests(unittest.TestCase):
                process_batch_result=lambda batch, result: setattr(s, "gracefully_exit", True))
         s._kv_ec_gpu_restore = None
         s._kv_ec_online = None
+        s._kv_ec_live_recovery = None
         namespace["event_loop_normal"](s)
         self.assertEqual(calls, ["forward", "after_result"])
 

@@ -16,7 +16,7 @@ from .gpu_admission import args_mode, environment, metadata
 def read_ids(path):
     value = json.loads(Path(path).read_text())
     ids = value.get('input_ids') if isinstance(value, dict) else value
-    if (not isinstance(ids, list) or len(ids) != 256 or
+    if (not isinstance(ids, list) or len(ids) not in (256, 512, 1024, 2048, 4096) or
             any(type(x) is not int or x < 0 for x in ids)):
         raise ValueError('exactly_256_input_ids_required')
     return ids
@@ -48,13 +48,14 @@ def launch(args):
     selected_mode = args_mode(args)
     check_gpu_resources(args)
     check_port(args.port)
+    os.environ.pop('SGLANG_KV_EC_PREPARED_IDENTITY', None)
     identity = source_identity(args.model)
     resources = check_gpu_resources(args)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     cfg = dict(schema='kv-ec-reprefill-target-v1', run_id=output.name,
                model=args.model, model_identity=identity, gpus=args.gpus,
-               tp_size=args.tp, prefix_tokens=256, generation_tokens=17,
+               tp_size=args.tp, prefix_tokens=getattr(args, "prefix_tokens", 256), generation_tokens=17,
                sampling=sampling(), argv=server_argv(args))
     cfg.update(metadata(selected_mode, args.mem_fraction_static, resources))
     (output / 'run.json').write_text(json.dumps(cfg, indent=2, sort_keys=True))
@@ -78,6 +79,7 @@ def main():
     q.add_argument('--mem-fraction-static', type=float, default=.6)
     q.add_argument('--gpu-admission-mode', choices=('strict', 'shared'), default='strict')
     q.add_argument('--prefill-chunk-size', type=int, default=-1)
+    q.add_argument('--prefix-tokens', type=int, choices=(256, 512, 1024, 2048, 4096), default=256)
     q.add_argument('--tp', type=int, choices=(2, 4), default=2)
     args = parser.parse_args()
     launch(args)

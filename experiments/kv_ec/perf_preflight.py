@@ -85,8 +85,10 @@ def template_path(cfg, node_index):
 
 def validate_config(cfg):
     from .gpu_admission import config_mode
+    from .cold_timing import measurement_config
+    measurement_config(cfg)
     config_mode(cfg)
-    if (type(cfg.get('prefix_tokens')) is not int or cfg['prefix_tokens'] != 256 or
+    if (type(cfg.get('prefix_tokens')) is not int or cfg['prefix_tokens'] not in (256, 512, 1024, 2048, 4096) or
             type(cfg.get('tp_size')) is not int or cfg['tp_size'] not in (2, 4) or
             cfg.get('rs') != [2, 1] or any(type(n) is not int for n in cfg['rs'])):
         raise ValueError('config_requires_256_tokens_TP2_or_TP4_RS_2_1')
@@ -147,14 +149,31 @@ def validate_config(cfg):
     return cfg
 
 
-def listening_inodes(port):
-    result = set()
+def parse_hca_message_limit(stdout):
+    values = re.findall(r'max_msg_sz:\s*(0x[0-9a-fA-F]+|[0-9]+)', stdout)
+    if len(values) != 1:
+        raise ValueError('HCA_MESSAGE_LIMIT_UNAVAILABLE')
+    value = int(values[0], 0)
+    if value < 256 * 1024**2:
+        raise ValueError('HCA_MESSAGE_LIMIT_BELOW_SEGMENT_PROFILE')
+    return value
+
+
+def listening_inode_map(ports):
+    wanted = set(ports)
+    result = {port: set() for port in wanted}
+    # Read each kernel table once for an entire managed native port range.
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
         for line in Path(table).read_text().splitlines()[1:]:
             fields = line.split()
-            if int(fields[1].split(':')[1], 16) == port and fields[3] == '0A':
-                result.add(fields[9])
+            port = int(fields[1].split(':')[1], 16)
+            if fields[3] == '0A' and port in wanted:
+                result[port].add(fields[9])
     return result
+
+
+def listening_inodes(port):
+    return listening_inode_map([port])[port]
 
 
 def free_ports(ports):
@@ -378,6 +397,11 @@ def probe(cfg, node_index, output_root):
                              gid_index=node['gid_index'])
         if not state.startswith('4:') or int(ipaddress.IPv6Address(gid)) == 0:
             raise ValueError('HCA_INACTIVE_OR_ZERO_GID')
+        device_info = command(['ibv_devinfo', '-d', node['rdma_device'], '-i', '1', '-v'])
+        if device_info.get('returncode') != 0:
+            raise ValueError('HCA_MESSAGE_LIMIT_QUERY_FAILED')
+        checks['hca']['max_message_bytes'] = parse_hca_message_limit(device_info['stdout'])
+        checks['hca']['segment_cap_bytes'] = 256 * 1024**2
         # Transport may build its native helper lazily, so check build inputs.
         from .multinode.rdma_transport import RDMATransport
         checks['native_build_available'] = RDMATransport.available()
@@ -391,11 +415,11 @@ def probe(cfg, node_index, output_root):
         template = Path(template_path(cfg, node_index))
         meta = validate_checkpoint(template.read_bytes())
         if (meta['node_id'] != node_index or len(meta['ranks']) != cfg['tp_size'] or
-                any(r['token_start'] != 0 or r['token_count'] != 256 for r in meta['ranks'])):
+                any(r['token_start'] != 0 or r['token_count'] != cfg['prefix_tokens'] for r in meta['ranks'])):
             raise ValueError('TEMPLATE_NODE_TP_OR_TOKEN_RANGE_MISMATCH')
         read_input_ids(node['input_ids'], meta)
         checks['template_bytes'] = template.stat().st_size
-        checks['model_tp_prefix_identity'] = dict(tp_size=cfg['tp_size'], prefix_tokens=256,
+        checks['model_tp_prefix_identity'] = dict(tp_size=cfg['tp_size'], prefix_tokens=cfg['prefix_tokens'],
             model_sha256=checks['model_identity']['model_sha256'],
             input_ids_sha256=meta['ranks'][0]['token_ids_sha256'],
             rank_bytes=[r['packed_byte_count'] for r in meta['ranks']],
@@ -434,6 +458,44 @@ def probe(cfg, node_index, output_root):
     return result
 
 
+def audit_rs_reservations(client, root, expected_metrics):
+    """Read-only audit of a dedicated server via its own stripe status RPCs.
+
+    Local receipts supply IDs only, never byte reservations. Unknown/unrecorded
+    stripes or an epoch/count change reject admission instead of estimating low.
+    """
+    root = Path(root)
+    if not root.is_absolute() or not root.is_dir():
+        raise ValueError('RS_AUDIT_ROOT_INVALID')
+    ids = set()
+    for path in root.rglob('global_status.json'):
+        record = json.loads(path.read_text())
+        if record.get('stripe_id'):
+            ids.add(record['stripe_id'])
+    statuses = []
+    for sid in sorted(ids):
+        status, payload = client.call('get_stripe_status', stripe_id=sid)
+        if payload or status.get('stripe_id') != sid:
+            raise ValueError('RS_AUDIT_STATUS_IDENTITY')
+        reserved = status.get('reserved_bytes')
+        if type(reserved) is not int or reserved < 0:
+            raise ValueError('RS_AUDIT_RESERVATION_INVALID')
+        if status['state'] not in ('REGISTERING', 'EXPIRED'):
+            expected = 3 * max(n['length'] for n in status['manifest']['nodes'])
+            if reserved != expected:
+                raise ValueError('RS_AUDIT_RESERVATION_MANIFEST_MISMATCH')
+        statuses.append(dict(stripe_id=sid, state=status['state'], reserved_bytes=reserved,
+            handle=status.get('handle'), manifest_sha256=status.get('manifest_sha256')))
+    after, payload = client.call('get_metrics')
+    if (payload or len(statuses) != expected_metrics['stripes'] or
+            after['stripes'] != expected_metrics['stripes'] or
+            after['server_epoch'] != expected_metrics['server_epoch']):
+        raise ValueError('RS_AUDIT_INCOMPLETE_OR_SERVER_CHANGED')
+    return dict(server_epoch=after['server_epoch'], stripes=after['stripes'],
+        reserved_bytes=sum(s['reserved_bytes'] for s in statuses if s['state'] != 'EXPIRED'),
+        statuses=statuses, source='server_get_stripe_status', complete=True)
+
+
 def capacity(cfg, reports, health, metrics, repeat):
     """Store reserves 3*max(node length) per live stripe, not resident parity.
 
@@ -454,7 +516,16 @@ def capacity(cfg, reports, health, metrics, repeat):
     # Old stripes may have reserved more than their current resident parity;
     # require a conservative upper bound from protocol MAX_NODE_BYTES instead.
     from .remote_rs_protocol import MAX_NODE_BYTES
-    needed = used * 3 * MAX_NODE_BYTES + repeat * reserve
+    audit = metrics.get('verified_reservation_audit')
+    if audit is not None:
+        if (audit.get('complete') is not True or audit['stripes'] != used or
+                audit['server_epoch'] != metrics['server_epoch'] or
+                type(audit['reserved_bytes']) is not int or audit['reserved_bytes'] < 0):
+            raise ValueError('RS_AUDIT_CAPACITY_BINDING_INVALID')
+        prior = audit['reserved_bytes']
+    else:
+        prior = used * 3 * MAX_NODE_BYTES
+    needed = prior + repeat * reserve
     if needed > p['max_bytes']:
         raise ValueError(f'RS_BYTE_BUDGET: conservative_reserved={needed} max={p["max_bytes"]}; use empty dedicated server or larger capacity')
     if p['ttl'] < cfg['protection_timeout']:
@@ -514,6 +585,8 @@ def preflight(cfg, output_root, repeat, expected_epoch=None):
         metrics, payload2 = client.call('get_metrics')
         if payload or payload2:
             raise ValueError('PREFLIGHT_TCP_PAYLOAD_FORBIDDEN')
+        if cfg.get('rs_audit_root'):
+            metrics['verified_reservation_audit'] = audit_rs_reservations(client, cfg['rs_audit_root'], metrics)
         budget = capacity(cfg, results, health, metrics, repeat)
         disk_required = max(cfg['min_disk_bytes'], repeat * cfg['max_node_bytes'] * 20)
         # Includes retained captures, references, sealed/recovered copies and

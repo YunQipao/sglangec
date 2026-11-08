@@ -69,7 +69,7 @@ def process_identity(pid):
                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
 
 
-def owned_members(owned):
+def owned_members(owned, exit_retries=50):
     """Only the recorded new session, including children with a new PGID.
 
     A session ID cannot be recycled while its original members remain alive.
@@ -94,8 +94,36 @@ def owned_members(owned):
                     environment = (entry / 'environ').read_bytes().split(b'\0')
                 except FileNotFoundError:
                     continue  # exited during enumeration; never signal by PID
+                except PermissionError:
+                    # Linux may deny environ while a child is exiting. Recheck
+                    # the exact instance before treating it as dead; never
+                    # signal or admit a live process without its trial token.
+                    try:
+                        after = process_identity(current['pid'])
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+                    if any(after.get(k) != current.get(k) for k in
+                           ('pid', 'start_ticks', 'uid', 'pgid', 'session', 'sid', 'boot_id')):
+                        raise ValueError('owned_process_changed_during_environment_read')
+                    if after['state'] in ('Z', 'X'):
+                        continue
+                    if not exit_retries:
+                        raise
+                    time.sleep(.01)
+                    return owned_members(owned, exit_retries - 1)
                 token = ('KV_EC_PERF_RUN_ID=' + owned['run_id']).encode()
                 if token not in environment:
+                    try:
+                        after = process_identity(current['pid'])
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+                    if any(after.get(k) != current.get(k) for k in ('pid','start_ticks','uid','pgid','session','sid','boot_id')):
+                        raise ValueError('owned_process_changed_during_environment_read')
+                    if after['state'] in ('Z','X'):
+                        continue
+                    if exit_retries:
+                        time.sleep(.01)
+                        return owned_members(owned, exit_retries - 1)
                     raise ValueError('owned_process_trial_environment_mismatch; refusing signal')
             members.append(current)
     return members
@@ -121,6 +149,11 @@ def verify_signal_identity(member, owned, exit_retries=50):
         time.sleep(.01)
         return verify_signal_identity(member, owned, exit_retries - 1)
     if token not in environment and current['state'] not in ('Z', 'X'):
+        # Environment pages can disappear before /proc reports a zombie.
+        # Retry exact identity; never relax the token for a live process.
+        if exit_retries:
+            time.sleep(.01)
+            return verify_signal_identity(member, owned, exit_retries - 1)
         raise ValueError('owned_process_trial_environment_mismatch; refusing signal')
 
 
@@ -622,7 +655,7 @@ def trial():
             target_started = time.monotonic_ns()
             start(b, 'target', 'experiments.kv_ec.reprefill_server', 'launch',
                 '--model', b.cfg['model'], '--output', remote / 'cold-reprefill',
-                '--gpus', b.cfg['gpus'], '--tp', cfg['tp_size'], '--port', cfg['target_port'],
+                '--gpus', b.cfg['gpus'], '--tp', cfg['tp_size'], '--prefix-tokens', cfg['prefix_tokens'], '--port', cfg['target_port'],
                 '--mem-fraction-static', cfg.get('mem_fraction_static', .60))
             b.run(SELF, 'wait-file', '--path', remote / 'cold-reprefill/run.json',
                   '--service-root', remote / 'target')
@@ -635,30 +668,48 @@ def trial():
             free_ports([a.cfg['origin_port']])
             tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'], local / 'tunnel')
             tunnels.append(tunnel)
-            a.run(B, 'inference', '--scheme', 'reprefill', '--url',
-                f'http://127.0.0.1:{a.cfg["origin_port"]}', '--model', a.cfg['model'],
-                '--server-model', b.cfg['model'],
-                '--input-ids', local / 'node1-reference/submitted_input_ids.json',
-                '--output', local / 'reprefill-inference', '--tp', cfg['tp_size'], '--warmup', 0, '--repeat', 1,
-                '--expected-model-sha256',
-                read(local / 'node1-reference/rank_0.json')['runtime_identity']['model_sha256'],
-                '--expected-input-ids-sha256', read(local / 'node1-reference/rank_0.json')['token_ids_sha256'],
-                '--model-identity-evidence', local / 'reprefill-target-run.json',
-                '--ready-monotonic-ns', ready)
-            request = read(local / 'reprefill-inference/request-000.json')
+            if cfg.get('measurement', {}).get('cold_comparison', False):
+                from .cold_timing import stream_request
+                ids = read(local / 'node1-reference/submitted_input_ids.json')
+                client = stream_request(f'http://127.0.0.1:{a.cfg["origin_port"]}',
+                    ids, rid, rid)
+                save(local / 'client-sse.json', client)
+                request = dict(output_token_ids=client['output_token_ids'],
+                    start_ns=client['request_start_ns'], first_output_token_ns=client['first_output_token_ns'],
+                    full_output_ns=client['full_output_ns'], response_complete_ns=client['response_complete_ns'],
+                    end_ns=client['response_complete_ns'],
+                    request_ms=(client['response_complete_ns']-client['request_start_ns'])/1e6,
+                    prefill_ttft_ms=(client['first_output_token_ns']-client['request_start_ns'])/1e6,
+                    ready_to_first_token_ms=(client['first_output_token_ns']-ready)/1e6,
+                    ready_to_decode_complete_ms=(client['response_complete_ns']-ready)/1e6)
+            else:
+                a.run(B, 'inference', '--scheme', 'reprefill', '--url',
+                    f'http://127.0.0.1:{a.cfg["origin_port"]}', '--model', a.cfg['model'],
+                    '--server-model', b.cfg['model'],
+                    '--input-ids', local / 'node1-reference/submitted_input_ids.json',
+                    '--output', local / 'reprefill-inference', '--tp', cfg['tp_size'], '--warmup', 0, '--repeat', 1,
+                    '--expected-model-sha256',
+                    read(local / 'node1-reference/rank_0.json')['runtime_identity']['model_sha256'],
+                    '--expected-input-ids-sha256', read(local / 'node1-reference/rank_0.json')['token_ids_sha256'],
+                    '--model-identity-evidence', local / 'reprefill-target-run.json',
+                    '--ready-monotonic-ns', ready)
+                request = read(local / 'reprefill-inference/request-000.json')
             reference = read(local / 'node1-reference/rank_0.json')
             if request['output_token_ids'] != reference['output_token_ids']:
                 raise ValueError('reprefill_output_token_ids_mismatch')
             if all(key in request for key in ('start_ns', 'first_output_token_ns',
                                                'full_output_ns', 'response_complete_ns')):
                 validation_complete = time.monotonic_ns()
-                from .cold_timing import build_timing, clock_identity
-                client_identity = clock_identity()
-                client = dict(operation_id=rid, **client_identity,
-                    request_start_ns=request['start_ns'],
-                    first_output_token_ns=request['first_output_token_ns'],
-                    full_output_ns=request['full_output_ns'],
-                    response_complete_ns=request['response_complete_ns'])
+                if cfg.get('measurement', {}).get('cold_comparison', False):
+                    from .cold_timing import build_timing
+                else:
+                    from .cold_timing import build_timing, clock_identity
+                    client_identity = clock_identity()
+                    client = dict(operation_id=rid, **client_identity,
+                        request_start_ns=request['start_ns'],
+                        first_output_token_ns=request['first_output_token_ns'],
+                        full_output_ns=request['full_output_ns'],
+                        response_complete_ns=request['response_complete_ns'])
                 save(local / 'cold-comparison-timing.json', build_timing(
                     rid, 'reprefill', recovery_start, target_started, ready, client,
                     validation_complete))
@@ -709,8 +760,24 @@ def trial():
         b.run(SELF, 'wait-file', '--path', remote / 'cold-new/run.json', '--service-root', remote / 'target')
         b.run(SELF, 'wait-health', '--url', f'http://127.0.0.1:{cfg["target_port"]}', '--service-root', remote / 'target')
         ready = time.monotonic_ns()
-        b.run(E, 'restore', '--output', remote / 'cold-new', '--url', f'http://127.0.0.1:{cfg["target_port"]}')
-        decoded = time.monotonic_ns()
+        if cfg.get('measurement', {}).get('cold_comparison', False):
+            from .cold_timing import stream_request, build_timing
+            b.run('experiments.kv_ec.cold_sse_bridge', 'prepare', '--output', remote / 'cold-new')
+            scp(b, remote / 'cold-new/submitted_input_ids.json', local / 'restored-input-ids.json')
+            scp(b, remote / 'capture/request_state.json', local / 'restored-request-state.json')
+            state = read(local / 'restored-request-state.json')
+            tunnel = local_ssh_tunnel(b, a.cfg['origin_port'], cfg['target_port'], local / 'tunnel')
+            tunnels.append(tunnel)
+            client = stream_request(f'http://127.0.0.1:{a.cfg["origin_port"]}',
+                read(local / 'restored-input-ids.json'), state['request_id'], rid)
+            save(local / 'client-sse.json', client)
+            decoded = client['response_complete_ns']
+            scp(b, remote / 'client-sse.json', local / 'client-sse.json', upload=True)
+            b.run('experiments.kv_ec.cold_sse_bridge', 'finish', '--output', remote / 'cold-new',
+                '--client', remote / 'client-sse.json')
+        else:
+            b.run(E, 'restore', '--output', remote / 'cold-new', '--url', f'http://127.0.0.1:{cfg["target_port"]}')
+            decoded = time.monotonic_ns()
         b.run(E, 'check', '--output', remote / 'cold-new')  # strict live Stage E checker
         if heartbeat_errors:
             raise RuntimeError('SSH_HEARTBEAT_FAILED: ' + str(heartbeat_errors))
@@ -733,14 +800,23 @@ def trial():
             fault_boundary_to_decode_complete_ms=(decoded-recovery_start)/1e6,
             fault_boundary_to_ready_ms=(ready-recovery_start)/1e6,
             timing_note='232 coordinator monotonic; includes remote command and Stage E validation'))
-        save(local / 'cold-comparison-timing-status.json', dict(
-            schema='kv-ec-cold-comparison-timing-status-v1', operation_id=rid,
-            scheme='two-level', functional_correctness_pass=True,
-            performance_measurement_eligible=False,
-            unavailable_metrics=['fault_boundary_to_first_output_token_ms',
-                'fault_boundary_to_response_complete_ms', 'response_stream_ms'],
-            reason='two-level completion is observed by the restore hook and Stage E checker; '
-                'no equivalent client SSE response is issued by this path'))
+        if cfg.get('measurement', {}).get('cold_comparison', False):
+            (local / 'node1-reference').mkdir(exist_ok=True)
+            scp(b, remote / 'node1-reference/rank_0.json', local / 'node1-reference/rank_0.json')
+            reference = read(local / 'node1-reference/rank_0.json')
+            if client['output_token_ids'] != reference['output_token_ids']:
+                raise ValueError('restored_sse_output_token_ids_mismatch')
+            save(local / 'cold-comparison-timing.json', build_timing(
+                rid, 'two-level', recovery_start, target_started, ready, client, time.monotonic_ns()))
+        else:
+            save(local / 'cold-comparison-timing-status.json', dict(
+                schema='kv-ec-cold-comparison-timing-status-v1', operation_id=rid,
+                scheme='two-level', functional_correctness_pass=True,
+                performance_measurement_eligible=False,
+                unavailable_metrics=['fault_boundary_to_first_output_token_ms',
+                    'fault_boundary_to_response_complete_ms', 'response_stream_ms'],
+                reason='two-level completion is observed by the restore hook and Stage E checker; '
+                    'no equivalent client SSE response is issued by this path'))
         if os.environ.get('KV_EC_PAIRED_READY_REPREFILL') == '1':
             b.run(SELF, 'wait-health', '--url', f'http://127.0.0.1:{cfg["target_port"]}',
                   '--service-root', remote / 'target')

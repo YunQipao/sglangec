@@ -1,0 +1,15 @@
+# Keep only bounded metadata/test evidence reviewable; never include KV payloads.
+!artifacts/
+artifacts/*
+!artifacts/cpu-tests.log
+!artifacts/cpu-tests-r2.log
+!artifacts/focused-tests-final.log
+!artifacts/focused-tests-final-r2.log
+!artifacts/historical-real-kv-codec-r1/
+!artifacts/historical-real-kv-codec-r2/
+artifacts/historical-real-kv-codec-r1/*
+artifacts/historical-real-kv-codec-r2/*
+!artifacts/historical-real-kv-codec-r1/raw.json
+!artifacts/historical-real-kv-codec-r1/manifest.json
+!artifacts/historical-real-kv-codec-r2/raw.json
+!artifacts/historical-real-kv-codec-r2/manifest.json

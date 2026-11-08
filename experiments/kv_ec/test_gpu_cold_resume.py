@@ -216,6 +216,7 @@ class ColdStateProtocolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             hook = GPUColdResumeHook.__new__(GPUColdResumeHook)
             hook.req, hook.state, hook.row, hook.generation, hook.rank = req, self.state, 1, 1, 0
+            hook.prefix_tokens = self.state['token_count']
             hook.cold_mode, hook.admitted, hook.done, hook.timeout = 'restore', True, False, 120
             hook.sampled_seed, hook.meta = self.state['pending_token_id'], self.meta
             hook.prefix_slots = tuple(pool.req_to_token[1, :256].tolist())

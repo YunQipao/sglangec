@@ -139,11 +139,17 @@ def source_identity(model_path):
         with path.open("rb") as f:
             for chunk in iter(lambda: f.read(8 * 1024**2), b""):
                 hasher.update(chunk)
-    repo = Path(__file__).resolve().parents[2]
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
-    diff = subprocess.check_output(["git", "diff", "HEAD", "--", "python"], cwd=repo)
+    cohort = os.environ.get("SGLANG_KV_EC_SOURCE_COHORT")
+    if cohort:
+        commit = cohort
+        diff_sha = hashlib.sha256(cohort.encode()).hexdigest()
+    else:
+        repo = Path(__file__).resolve().parents[2]
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+        diff = subprocess.check_output(["git", "diff", "HEAD", "--", "python"], cwd=repo)
+        diff_sha = hashlib.sha256(diff).hexdigest()
     identity = {"model_identifier": str(root), "model_sha256": hasher.hexdigest(),
-                "source_commit": commit, "core_diff_sha256": hashlib.sha256(diff).hexdigest()}
+                "source_commit": commit, "core_diff_sha256": diff_sha}
     _SOURCE_IDENTITY_CACHE[str(root)] = identity
     return dict(identity)
 
@@ -205,7 +211,7 @@ def capture(scheduler, batch, req, config):
     require(not pool.is_quantized_kv_cache and pool.dtype == pool.store_dtype == torch.bfloat16,
             "plain_bfloat16_storage_required")
     hf = runner.model_config.hf_config
-    require(hf.model_type == "qwen3" and hf.num_hidden_layers == pool.layer_num == 36 and
+    require(hf.model_type == "qwen3" and 0 < hf.num_hidden_layers == pool.layer_num <= 128 and
             hf.num_key_value_heads == 8 and hf.head_dim == 128, "qwen3_8b_layout_required")
     require(pool.start_layer == 0 and pool.page_size == 1, "full_model_plain_slots_required")
     layers = config.layers(pool.layer_num)

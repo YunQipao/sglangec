@@ -93,8 +93,16 @@ def validate_manifest(manifest, *, allow_fixture=False):
         raise ValueError(
             "cross-node chunk/model/layout mismatch: " + "; ".join(mismatches)
         )
-    if a["snapshot_id"] == b["snapshot_id"] or a["request_id"] == b["request_id"]:
-        raise ValueError("independent node snapshot/request identities required")
+    online = any("global_protection" in rank for rank in a_ranks + b_ranks)
+    if a["snapshot_id"] == b["snapshot_id"]:
+        raise ValueError("independent node snapshot identities required")
+    # Offline stripes bind two unrelated request captures and therefore require
+    # distinct request IDs.  Online stripes intentionally pair the same logical
+    # request across serving nodes; independence is established by distinct
+    # node-local snapshots while validate_online_manifest() binds every rank to
+    # the same explicit global-protection identity.
+    if not online and a["request_id"] == b["request_id"]:
+        raise ValueError("independent node request identities required")
     from .online_rs_identity import validate_online_manifest
 
     validate_online_manifest(manifest)

@@ -6,6 +6,8 @@ No CUDA synchronization is introduced by this module.
 """
 
 import json
+import hashlib
+import struct
 import math
 import os
 from pathlib import Path
@@ -46,6 +48,8 @@ def stream_request(url, ids, request_id, operation_id, timeout=600):
     after parsing a qualifying SSE item; response-complete after stream close.
     All token correctness checks happen after response-complete is captured.
     """
+    if not math.isfinite(timeout) or not 0 < timeout <= 900:
+        raise ValueError('cold_client_requires_bounded_timeout')
     payload = dict(input_ids=ids, rid=request_id, sampling_params=sampling(),
                    stream=True, return_logprob=False)
     req = urllib.request.Request(url.rstrip('/') + '/generate', data=json.dumps(payload).encode(),
@@ -54,9 +58,15 @@ def stream_request(url, ids, request_id, operation_id, timeout=600):
     span_id = uuid.uuid4().hex
     first = full = final = None
     first_count = None
+    token_events = []
+    first_new_decode_output = None
+    prior_ids = []
     started = time.monotonic_ns()
+    deadline = started + int(timeout*1e9)
     with urllib.request.urlopen(req, timeout=timeout) as response:
-        for line in response:
+        for index, line in enumerate(response):
+            if time.monotonic_ns() > deadline or index >= 100_000 or len(line) > 2*1024**2:
+                raise TimeoutError('cold_client_total_deadline_or_frame_budget_exceeded')
             if not line.startswith(b'data: '):
                 continue
             data = line[6:].strip()
@@ -64,24 +74,42 @@ def stream_request(url, ids, request_id, operation_id, timeout=600):
                 break
             item = json.loads(data)
             count = item.get('meta_info', {}).get('completion_tokens', 0)
+            observed_ids = item.get('output_ids', [])
+            if (type(count) is not int or count < len(prior_ids) or count > 17 or
+                    not isinstance(observed_ids, list) or len(observed_ids) != count or
+                    observed_ids[:len(prior_ids)] != prior_ids):
+                raise ValueError('cold_client_requires_monotonic_cumulative_token_ids')
+            increased = count > len(prior_ids)
+            prior_ids = observed_ids[:]
+            event_ns = None
             if count > 0 and first is None:
                 first = time.monotonic_ns()
+                event_ns = first
                 first_count = count
             if count == 17 and full is None:
                 full = time.monotonic_ns()
+                event_ns = full if event_ns is None else event_ns
+            if increased:
+                event_ns = time.monotonic_ns() if event_ns is None else event_ns
+                token_events.append(dict(received_ns=event_ns, cumulative_tokens=count))
+                if count >= 2 and first_new_decode_output is None:
+                    first_new_decode_output = event_ns
             final = item
     completed = time.monotonic_ns()
     if first is None or full is None or final is None:
         raise ValueError('cold_client_missing_first_or_full_output')
     meta = final.get('meta_info', {})
     output = final.get('output_ids')
-    if (meta.get('completion_tokens') != 17 or meta.get('prompt_tokens') != 256 or
+    if (meta.get('completion_tokens') != 17 or meta.get('prompt_tokens') != len(ids) or
             not isinstance(output, list) or len(output) != 17 or
             any(type(t) is not int for t in output)):
         raise ValueError('cold_client_output_boundary_invalid')
     return dict(schema='kv-ec-cold-client-v1', profile=PROFILE, operation_id=operation_id,
-                span_id=span_id, **identity, request_id=request_id, request_start_ns=started,
+                span_id=span_id, **identity, request_id=request_id, prefix_tokens=len(ids),
+                input_ids_sha256=hashlib.sha256(struct.pack('<' + str(len(ids)) + 'q', *ids)).hexdigest(),
+                request_start_ns=started,
                 first_output_token_ns=first, first_observed_completion_tokens=first_count,
+                first_new_decode_output_ns=first_new_decode_output, token_events=token_events,
                 full_output_ns=full, response_complete_ns=completed,
                 output_token_ids=output, response=final)
 
@@ -98,7 +126,8 @@ def build_timing(operation_id, scheme, fault, launch, ready, client, validated):
     if (any(type(v) is not int for v in ordered) or ordered != sorted(ordered) or
             scheme not in ('two-level', 'reprefill') or client['operation_id'] != operation_id):
         raise ValueError('cold_comparison_event_order_or_identity_invalid')
-    intervals = dict(target_launch_to_ready=('target_launch', 'target_ready'),
+    intervals = dict(fault_boundary_to_ready=('fault_boundary', 'target_ready'),
+        target_launch_to_ready=('target_launch', 'target_ready'),
         fault_boundary_to_first_output_token=('fault_boundary', 'first_output_token'),
         fault_boundary_to_full_output=('fault_boundary', 'full_output'),
         fault_boundary_to_response_complete=('fault_boundary', 'response_complete'),
@@ -107,7 +136,10 @@ def build_timing(operation_id, scheme, fault, launch, ready, client, validated):
         request_to_full_output=('request_start', 'full_output'),
         response_stream=('request_start', 'response_complete'))
     return dict(schema='kv-ec-cold-comparison-timing-v1', profile=PROFILE,
-        operation_id=operation_id, span_id=uuid.uuid4().hex, scheme=scheme, **identity,
+        operation_id=operation_id, request_id=client.get('request_id'),
+        client_span_id=client.get('span_id'), client_pid=client.get('pid'),
+        first_observed_completion_tokens=client.get('first_observed_completion_tokens'),
+        span_id=uuid.uuid4().hex, scheme=scheme, **identity,
         events_ns=events, intervals=intervals,
         **{name + '_ms': (events[end] - events[start]) / 1e6
            for name, (start, end) in intervals.items()},

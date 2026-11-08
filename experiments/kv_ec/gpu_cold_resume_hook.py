@@ -58,8 +58,8 @@ def decode_scheduler_state(req, batch, state, step, phase='READY'):
     state_field(fields, 'cached_fill_len', len(cached), dict(min=minimum, max=len(ids)),
                 minimum <= len(cached) <= len(ids))
     state_field(fields, 'cached_fill_sha256', token_digest(cached), token_digest(ids[:len(cached)]))
-    state_field(fields, 'seq_lens_cpu', batch.seq_lens_cpu.tolist(), [256 + step])
-    state_field(fields, 'kv_committed_len_scheduled', req.kv_committed_len, 256 + step)
+    state_field(fields, 'seq_lens_cpu', batch.seq_lens_cpu.tolist(), [state['token_count'] + step])
+    state_field(fields, 'kv_committed_len_scheduled', req.kv_committed_len, state['token_count'] + step)
     return dict(phase=phase, step=step, fields=fields)
 
 
@@ -100,12 +100,12 @@ def build_decode_batch(s, req, pending):
     row, device = req.req_pool_idx, s.req_to_token_pool.device
     batch.req_pool_indices_cpu = torch.tensor([row], dtype=torch.int64)
     batch.req_pool_indices = batch.req_pool_indices_cpu.to(device)
-    batch.seq_lens_cpu = torch.tensor([256], dtype=torch.int64)
+    batch.seq_lens_cpu = torch.tensor([len(req.origin_input_ids)], dtype=torch.int64)
     batch.seq_lens = batch.seq_lens_cpu.to(device)
-    batch.orig_seq_lens = torch.tensor([256], dtype=torch.int32, device=device)
-    batch.seq_lens_sum = 256
+    batch.orig_seq_lens = torch.tensor([len(req.origin_input_ids)], dtype=torch.int32, device=device)
+    batch.seq_lens_sum = len(req.origin_input_ids)
     batch.multimodal_inputs = [None]
-    batch.prefix_lens, batch.extend_lens = [256], [0]
+    batch.prefix_lens, batch.extend_lens = [len(req.origin_input_ids)], [0]
     batch.extend_num_tokens = 0
     batch.extend_logprob_start_lens = [0]
     batch.input_ids = None  # Native resolve_forward_inputs reads FutureMap.
@@ -162,6 +162,11 @@ class GPUColdResumeHook(GPUResumeHook):
                    mode='reference' if state is None else 'resume', source=source,
                    source_name='stage-d-aligned-capture' if state is not None else None)
         hook.cold_mode, hook.cfg = cfg['cold_mode'], cfg
+        if cfg.get('bootstrap_prefix'):
+            _require(hook.cold_mode == 'capture' and cfg['prefix_tokens'] in (256, 512, 1024, 2048, 4096)
+                     and len(cfg['input_ids']) == cfg['prefix_tokens'], 'bootstrap_capture_invalid')
+            hook.prefix_tokens = cfg['prefix_tokens']
+            hook.request_token_digest = token_digest(cfg['input_ids'])
         hook.state, hook.receipt = state, receipt
         hook.capture_done = False
         hook.process = process_identity()
@@ -184,6 +189,24 @@ class GPUColdResumeHook(GPUResumeHook):
                 origin_processes=receipt['origin_processes'], original_prefill_tokens=0,
                 original_prefill_forward_count=0, new_instance=True)
         return hook
+
+    def _prefill_metadata_identity(self):
+        if not self.cfg.get('bootstrap_prefix'):
+            return super()._prefill_metadata_identity()
+        # Bootstrap is a new capture: validate the immutable template layout
+        # at its own range, and bind the live request to separately sealed IDs.
+        # Never rewrite template metadata to pretend it contains long KV.
+        meta = self.meta['ranks'][self.rank]
+        _require(self.cold_mode == 'capture' and self.mode == 'reference' and
+                 self.cfg.get('template_only_not_runtime_restore_source') is True and
+                 self.cfg['template_prefix_tokens'] == meta['token_count'] and
+                 self.prefix_tokens == self.cfg['prefix_tokens'] == len(self.cfg['input_ids']) and
+                 list(self.req.origin_input_ids) == self.cfg['input_ids'] and
+                 token_digest(self.req.origin_input_ids) == self.request_token_digest,
+                 'bootstrap_capture_identity_mismatch')
+        from .gpu_kv_restore import _metadata_identity
+        _metadata_identity(meta, self.scheduler, self.req, rank=self.rank,
+                           tp_size=self.tp_size, token_start=0, token_count=meta['token_count'])
 
     def before_inputs(self, inputs):
         inputs = list(inputs)
@@ -242,7 +265,7 @@ class GPUColdResumeHook(GPUResumeHook):
             self.prefix_slots = self.tx.new_slots
             self.req.prefix_indices = torch.tensor(self.prefix_slots, dtype=torch.int64,
                 device=s.req_to_token_pool.device)
-            self.evidence.update(committed=True, restored_kv_tokens=256, mapping_version=1,
+            self.evidence.update(committed=True, restored_kv_tokens=self.prefix_tokens, mapping_version=1,
                 transaction_state=self.tx.state, forward_ct_before_restore=0,
                 forward_ct_after_restore=s.forward_ct)
             gate('COLD_REQUEST_READY', lambda: self._live(self.pending_batch))
@@ -328,8 +351,8 @@ class GPUColdResumeHook(GPUResumeHook):
                     step - int(phase == 'READY'))
         observations = self.evidence['forward_observations']
         materialized = observations[-1]['kv_length'] if observations else self.state['materialized_kv_tokens']
-        state_field(fields, 'kv_materialized_len_observed', materialized, 256 + completed)
-        state_field(fields, 'kv_allocated_len', self.req.kv.kv_allocated_len, 256 + step)
+        state_field(fields, 'kv_materialized_len_observed', materialized, self.prefix_tokens + completed)
+        state_field(fields, 'kv_allocated_len', self.req.kv.kv_allocated_len, self.prefix_tokens + step)
         state_field(fields, 'row', self.req.req_pool_idx, self.row)
         state_field(fields, 'generation', int(self.scheduler.req_to_token_pool.req_generation[self.row]), self.generation)
         if phase != 'FORWARD_COMPLETE':
@@ -341,7 +364,7 @@ class GPUColdResumeHook(GPUResumeHook):
             # run_batch has already overwritten the relay with the next sample;
             # the synchronized model observer retains the actual consumed input.
             state_field(fields, 'forward_input_ids', observations[-1]['input_ids'], [int(self.req.output_ids[-1])])
-            state_field(fields, 'forward_positions', observations[-1]['positions'], [255 + step])
+            state_field(fields, 'forward_positions', observations[-1]['positions'], [(self.prefix_tokens - 1) + step])
         report.update(tp_rank=self.rank, forward_ct=self.scheduler.forward_ct)
         failed = any(not field['matches'] for field in fields.values())
         if step <= 3 or failed:
@@ -365,10 +388,10 @@ class GPUColdResumeHook(GPUResumeHook):
                 exporter = OnlineProtector.__new__(OnlineProtector)
                 exporter.scheduler, exporter.run_id = self.scheduler, self.run_id
                 exporter.identity = self.evidence['runtime_identity']
-                exporter.max_bytes = 64 * 1024**2
+                exporter.max_bytes = 512 * 1024**2
                 exporter.stream = torch.cuda.Stream()
                 with span('gpu_kv_snapshot', 'protection', tp_rank=self.rank):
-                    item = exporter._stage(self.req, 0, self.generation)
+                    item = exporter._stage(self.req, 0, self.generation, token_count=self.prefix_tokens)
                     item.done.synchronize()
                 if perf_enabled():
                     emit('gpu_to_host', 'communication', source='cuda_event',
@@ -391,7 +414,7 @@ class GPUColdResumeHook(GPUResumeHook):
     def _seal_capture(self):
         bundle = Path(self.cfg['capture_bundle'])
         def prepare():
-            _require(self.req.kv_committed_len == self.req.kv.kv_allocated_len == 256 and
+            _require(self.req.kv_committed_len == self.req.kv.kv_allocated_len == self.prefix_tokens and
                      list(self.req.output_ids) == [int(self.scheduler.future_map.output_tokens_buf[self.row])]
                      and not self.req.finished() and self.req.decode_batch_idx == 0,
                      'cold_capture_boundary_not_consistent')
@@ -403,15 +426,15 @@ class GPUColdResumeHook(GPUResumeHook):
             self.state = dict(schema=SCHEMA, checkpoint_version=1, request_version=1,
                 boundary='post_prefill_result_before_decode', tp_size=self.tp_size,
                 origin_input_ids=list(self.req.origin_input_ids), output_ids=list(self.req.output_ids),
-                materialized_kv_tokens=256, kv_allocated_len=256,
+                materialized_kv_tokens=self.prefix_tokens, kv_allocated_len=self.prefix_tokens,
                 pending_token_id=self.req.output_ids[0], pending_token_has_kv=False,
-                next_decode_input_ids=list(self.req.output_ids), next_decode_position=256,
-                next_decode_seq_len=257, sampling=SAMPLING, rng_policy='greedy_no_rng',
+                next_decode_input_ids=list(self.req.output_ids), next_decode_position=self.prefix_tokens,
+                next_decode_seq_len=(self.prefix_tokens + 1), sampling=SAMPLING, rng_policy='greedy_no_rng',
                 finished=False, extend_batch_idx=1, decode_batch_idx=0, decode_steps=16,
                 vocab_size=self.scheduler.model_config.vocab_size, request_id=self.req.rid,
                 origin_row=self.row, origin_generation=self.generation,
                 restore_id=metas[0]['snapshot_id'], capture_run_id=self.run_id,
-                token_start=0, token_count=256, node_id=self.meta['node_id'],
+                token_start=0, token_count=self.prefix_tokens, node_id=self.meta['node_id'],
                 input_ids_sha256=token_digest(self.req.origin_input_ids), kv_sha256=sha(block),
                 runtime_identity=source_identity(self.scheduler.server_args.model_path))
             self.evidence['request_id'] = self.req.rid
@@ -423,7 +446,7 @@ class GPUColdResumeHook(GPUResumeHook):
             self.evidence['checkpoint'] = str(bundle / 'global_node.bin')
             write_json(bundle / f'rank_{self.rank}.capture.json', dict(tp_rank=self.rank,
                 process=self.process, cuda_executed=self.evidence['cuda_executed'],
-                state_sha256=sha(canonical(self.state)), materialized_kv_tokens=256,
+                state_sha256=sha(canonical(self.state)), materialized_kv_tokens=self.prefix_tokens,
                 pending_token_id=self.req.output_ids[0]))
         self._barrier('CAPTURE_STATE_PREPARED', prepare)
         self._barrier('CAPTURE_STATE_' + sha(canonical(self.state)), lambda: None)

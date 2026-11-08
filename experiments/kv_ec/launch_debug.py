@@ -70,8 +70,8 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--snapshot-id", required=True)
     p.add_argument("--request-id", default="kv-ec-artificial-request")
-    p.add_argument("--token-count", type=int, choices=(128, 256, 512), default=128)
-    p.add_argument("--chunk-size", type=int, choices=(128, 256, 512),
+    p.add_argument("--token-count", type=int, choices=(128, 256, 512, 1024, 2048, 4096), default=128)
+    p.add_argument("--chunk-size", type=int, choices=(128, 256, 512, 1024, 2048, 4096),
                    help="capture a complete prompt as independent logical chunks")
     p.add_argument("--layers", choices=("0", "all"), default="0")
     p.add_argument("--transfer", choices=("pinned", "blocking"), default="pinned",

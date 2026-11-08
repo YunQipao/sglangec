@@ -31,7 +31,10 @@ def xor(*blocks):
     return result
 
 MAGIC = b"KVNODE01"
-MAX_NODE_BYTES = 160 * 1024**2
+# Qwen3-1.7B BF16 TP=2 needs about 1.75 GiB for a complete 16K-token
+# two-rank node checkpoint.  Keep a finite admission cap, but do not reject the
+# documented long-prefix experiment before the remote service's own byte quota.
+MAX_NODE_BYTES = 4 * 1024**3
 MAX_META_BYTES = 1024**2
 IDENTITY = (
     "format",
@@ -155,11 +158,12 @@ def validate_rank(raw, meta, rank, *, allow_fixture=False):
             ):
                 raise ValueError("invalid segment layout")
             if meta["provenance"] == "sglang_request" and (
-                count not in (128, 256, 512)
+                count <= 0
                 or shape[1:] != [8 // tp_size, 128]
-                or not 0 <= r["layer_id"] < 36
+                or meta["layers"] != list(range(len(meta["layers"])))
+                or not 0 <= r["layer_id"] < len(meta["layers"])
             ):
-                raise ValueError("Qwen3-8B BF16 TP2/TP4 capture geometry required")
+                raise ValueError("supported Qwen3 BF16 TP2/TP4 capture geometry required")
             segment = raw[offset : offset + n]
             if sha(segment) != r[kind + "_sha256"]:
                 raise ValueError("segment checksum mismatch")

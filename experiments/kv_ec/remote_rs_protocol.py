@@ -70,7 +70,7 @@ def send(sock, metadata, payload=b"", observer=None):
     }
 
 
-def receive(sock, timeout, observer=None):
+def receive(sock, timeout, observer=None, max_payload=MAX_NODE_BYTES):
     start = time.perf_counter()
     deadline = time.monotonic() + timeout
 
@@ -98,7 +98,7 @@ def receive(sock, timeout, observer=None):
     if (
         meta.get("protocol") != "kv-remote-rs-v1"
         or type(n) is not int
-        or not 0 <= n <= MAX_NODE_BYTES
+        or not 0 <= n <= min(MAX_NODE_BYTES, max_payload)
     ):
         raise ValueError("invalid protocol/payload length")
     raw = exact(n, True)

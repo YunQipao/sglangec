@@ -182,7 +182,7 @@ class GPUAdmissionModeTests(unittest.TestCase):
                 args = NS(checkpoint=checkpoint, output=Path(tmp) / 'new', gpus='0,1',
                     model='/mock', mem_fraction_static=.6, port=30985, timeout=120,
                     gpu_admission_mode=selected)
-                with patch.object(restore, 'validate_checkpoint', return_value={'ranks': [{'model_sha256': 'mock'}] * 2}), \
+                with patch.object(restore, 'validate_checkpoint', return_value={'ranks': [{'model_sha256': 'mock', 'token_count': 256}] * 2}), \
                         patch('experiments.kv_ec.debug_capture.source_identity', return_value={'model_sha256': 'mock'}), \
                         patch.object(launch_online, 'check_gpu_resources', return_value=mock_gpu_policy(selected)['gpu_resources_before_start']) as check, \
                         patch('experiments.kv_ec.launch_debug.check_port'), \
@@ -658,11 +658,21 @@ class AdmissionTests(unittest.TestCase):
     def reports(self):
         return [dict(checks={}), dict(checks=dict(
             inventory=dict(commit_sha='commit'), rs_disk_free_bytes=100 * 1024**3,
-            rs_process=dict(max_stripes=32, max_bytes=8 * 1024**3, ttl=7200)))]
+            rs_process=dict(max_stripes=32, max_bytes=64 * 1024**3, ttl=7200)))]
 
     def metrics(self, stripes=0):
-        return dict(stripes=stripes, server_epoch='epoch', resident_data_bytes=0,
-                    environment_B=dict(git=dict(returncode=0, stdout='commit\n')))
+        return dict(
+            stripes=stripes,
+            server_epoch='epoch',
+            resident_data_bytes=0,
+            verified_reservation_audit=dict(
+                complete=True,
+                stripes=stripes,
+                server_epoch='epoch',
+                reserved_bytes=stripes * 3 * 64 * 1024**2,
+            ),
+            environment_B=dict(git=dict(returncode=0, stdout='commit\n')),
+        )
 
     def test_capacity_five_and_ten_and_prior_smoke(self):
         cfg = bench.read(EXAMPLE)
@@ -765,7 +775,7 @@ class BindingTests(unittest.TestCase):
 class CoordinatorMockTests(unittest.TestCase):
     """Run the actual trial() ordering with mock Host/SSH/SCP/processes."""
 
-    def run_trial(self, fail=None, selected='strict', recovery='two-level', tp=2, paired=False):
+    def run_trial(self, fail=None, selected='strict', recovery='two-level', tp=2, paired=False, sse=False):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             local = base / 'trial-mock-only'
@@ -774,6 +784,7 @@ class CoordinatorMockTests(unittest.TestCase):
             cfg['remote_root'] = str(base / 'remote')
             cfg['gpu_admission'] = {'mode': selected}
             cfg['tp_size'] = tp
+            cfg['measurement'] = {'cold_comparison': sse}
             for node in cfg['nodes']:
                 node['gpus'] = ','.join(map(str, range(tp)))
             config = base / 'config.json'
@@ -787,6 +798,10 @@ class CoordinatorMockTests(unittest.TestCase):
                 calls.append((host.node, action))
                 if action == fail:
                     raise RuntimeError('MOCK_FAILURE_' + action)
+                if module == 'experiments.kv_ec.cold_sse_bridge':
+                    if action == 'prepare':
+                        bench.save(option(args, 'output') / 'submitted_input_ids.json', [1]*256)
+                    return
                 if action == 'prepare':
                     option(args, 'root').mkdir(parents=True, exist_ok=False)
                 elif action == 'init-trial':
@@ -836,10 +851,10 @@ class CoordinatorMockTests(unittest.TestCase):
                         bench.save(option(tail, 'output') / 'protected/recovery.json', dict(transfer={}))
                         self.done = True
                     elif self.name == 'origin':
-                        bench.save(option(tail, 'bundle') / 'request_state.json', dict(restore_id='mock-restore'))
+                        bench.save(option(tail, 'bundle') / 'request_state.json', dict(restore_id='mock-restore', request_id='original-rid'))
                         self_outer.assertEqual(tail[tail.index('--gpu-admission-mode') + 1], selected)
                         bench.save(option(tail, 'output') / 'run.json', dict(run_id='mock-origin', **mock_gpu_policy(selected, tp=tp)))
-                        bench.save(option(tail, 'output') / 'rank_0.json', dict(output_token_ids=[7],
+                        bench.save(option(tail, 'output') / 'rank_0.json', dict(output_token_ids=([7]*17 if sse else [7]),
                             token_ids_sha256=bench.hashlib.sha256(bench.struct.pack('<256q', *([1] * 256))).hexdigest(),
                             runtime_identity=dict(model_sha256='mock-model')))
                         bench.save(option(tail, 'output') / 'submitted_input_ids.json', [1] * 256)
@@ -864,6 +879,18 @@ class CoordinatorMockTests(unittest.TestCase):
                 if fail == 'scp' and Path(remote).name == 'check.json':
                     raise RuntimeError('MOCK_FAILURE_scp')
                 shutil.copy2(local, remote) if upload else shutil.copy2(remote, local)
+            def mock_stream(url, ids, request_id, operation_id):
+                from experiments.kv_ec.cold_timing import clock_identity
+                if fail == 'sse':
+                    raise RuntimeError('MOCK_FAILURE_sse')
+                self.assertEqual(len(ids), 256)
+                if recovery == 'two-level':
+                    self.assertEqual(request_id, 'original-rid')
+                now = time.monotonic_ns()
+                return dict(operation_id=operation_id, request_id=request_id, **clock_identity(),
+                    output_token_ids=[7]*17, request_start_ns=now,
+                    first_output_token_ns=now, full_output_ns=now, response_complete_ns=now,
+                    response=dict(output_ids=[7]*17, meta_info=dict(prompt_tokens=256, completion_tokens=17)))
             env = dict(KV_EC_BENCH_CONFIG=str(config), KV_EC_BENCH_TRIAL=str(local),
                        KV_EC_PERF_RUN_ID=local.name, KV_EC_PERF_RECOVERY_MODE=recovery,
                        KV_EC_PAIRED_READY_REPREFILL='1' if paired else '0')
@@ -875,7 +902,8 @@ class CoordinatorMockTests(unittest.TestCase):
                     patch.object(stage, 'native_metrics'), patch.object(stage, 'local_ssh_tunnel'), \
                     patch.object(stage, 'check_rs_health', return_value=dict(state='READY', server_epoch='mock')), \
                     patch.object(stage, 'cleanup_process'), patch('experiments.kv_ec.perf_ports.assert_free'), \
-                    patch.object(pf, 'free_ports'), patch('experiments.kv_ec.rs_recovery_source.native_stats'):
+                    patch.object(pf, 'free_ports'), patch('experiments.kv_ec.cold_timing.stream_request', side_effect=mock_stream), \
+                    patch('experiments.kv_ec.rs_recovery_source.native_stats'):
                 if fail:
                     with self.assertRaisesRegex(RuntimeError, 'MOCK_FAILURE'):
                         stage.trial()
@@ -898,6 +926,14 @@ class CoordinatorMockTests(unittest.TestCase):
                 self.assertNotIn('rs-server', [name for _, name in processes])
                 self.assertTrue((local / 'cleanup.json').exists())
                 return calls
+
+    def test_sse_coordinator_uses_same_client_in_both_schemes(self):
+        for scheme in ('two-level', 'reprefill'):
+            with self.subTest(scheme=scheme):
+                self.run_trial(selected='shared', recovery=scheme, sse=True)
+
+    def test_sse_disconnect_preserves_failure_scene(self):
+        self.run_trial(fail='sse', selected='shared', sse=True)
 
     def test_complete_mock_flow_creates_ledger_before_target(self):
         calls = self.run_trial()

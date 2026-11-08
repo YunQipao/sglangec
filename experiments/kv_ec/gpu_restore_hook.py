@@ -67,11 +67,12 @@ def validate_checkpoint(block):
     _require(len(meta['ranks']) in (2, 4) and len(payloads) == len(meta['ranks']),
              "stage_a_requires_complete_tp2_or_tp4_checkpoint")
     for rank in meta["ranks"]:
-        _require(rank["token_start"] == 0 and rank["token_count"] == 256,
+        _require(rank["token_start"] == 0 and type(rank["token_count"]) is int and rank["token_count"] in (256, 512, 1024, 2048, 4096),
                  "stage_a_requires_first_256_token_chunk")
         _require(rank.get("chunk_id") == 0 and rank.get("lifetime") ==
                  "non_overlap_before_result_free_independent_gpu_staging",
                  "stage_a_requires_real_online_checkpoint")
+    _require(len({r["token_count"] for r in meta["ranks"]}) == 1, "checkpoint_prefix_rank_mismatch")
     return meta
 
 
@@ -97,6 +98,7 @@ class GPURestoreHook:
         block = self.source.load()
         self.block_hash = sha(block)
         self.meta = validate_checkpoint(block)
+        self.prefix_tokens = self.meta["ranks"][0]["token_count"]
         _require(len(self.meta['ranks']) == self.tp_size, 'checkpoint_tp_size_mismatch')
         if source is None:
             self.source = LocalCheckpointSource(Path(checkpoint), self.block_hash)
@@ -203,13 +205,18 @@ class GPURestoreHook:
                 _require(name == "TokenizedGenerateReqInput",
                          "stage_a_unsupported_message_type:" + name)
                 _require(not self.admitted, "stage_a_duplicate_generate_request")
-                _require(len(message.input_ids) == 256 and
+                prefix_tokens = getattr(self, "prefix_tokens", None)
+                if prefix_tokens is None:
+                    prefix_tokens = getattr(self, "meta", {"ranks": [{}]})[
+                        "ranks"
+                    ][0].get("token_count", 256)
+                _require(len(message.input_ids) == prefix_tokens and
                          message.sampling_params.max_new_tokens == self.output_token_limit and
                          message.session_id is None and message.mm_inputs is None and
                          message.input_embeds is None,
                          self.input_requirement_reason)
                 token_hash = hashlib.sha256(np.asarray(message.input_ids, dtype="<i8").tobytes()).hexdigest()
-                _require(token_hash == self.meta["ranks"][0]["token_ids_sha256"],
+                _require(token_hash == getattr(self, "request_token_digest", self.meta["ranks"][0]["token_ids_sha256"]),
                          "stage_a_checkpoint_request_token_mismatch")
                 self.admitted = True
                 self.evidence["token_ids_sha256"] = token_hash
@@ -235,14 +242,14 @@ class GPURestoreHook:
             req = batch.reqs[0]
             req_holder.append(req)
             _require(batch.forward_mode.name == "EXTEND" and batch.prefix_lens == [0]
-                     and int(batch.seq_lens_cpu[0]) == req.kv_committed_len == 256
-                     and len(req.origin_input_ids) == 256 and not req.output_ids
+                     and int(batch.seq_lens_cpu[0]) == req.kv_committed_len == self.prefix_tokens
+                     and len(req.origin_input_ids) == self.prefix_tokens and not req.output_ids
                      and req.sampling_params.max_new_tokens == 1
                      and req.extend_batch_idx == 1
                      and not req.finished() and not req.is_retracted
                      and not getattr(req, "to_finish", None), "stage_a_invalid_forward_boundary")
             _require(sha(self.source.load()) == self.block_hash, "checkpoint_changed_after_startup")
-            self.evidence["original_prefill_tokens"] = 256
+            self.evidence["original_prefill_tokens"] = self.prefix_tokens
             self.evidence["original_prefill_forward_count"] = req.extend_batch_idx
             self.forward_ct = self.scheduler.forward_ct
             self.evidence["forward_ct_before_restore"] = self.forward_ct

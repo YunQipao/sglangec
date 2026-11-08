@@ -24,7 +24,8 @@ import uuid
 
 from .node_block_export import descriptor, sha, MAX_NODE_BYTES
 from .remote_rs_protocol import RDMA_NODE_SHA256_FIELD, rdma_diagnostic, receive, send
-from .rs_codec import CODE, encode, recover
+from .rs_codec import CODE
+from .cuda_rs_codec import CudaRSCodec
 from .rs_stripe_builder import manifest_sha, validate_manifest
 
 
@@ -32,7 +33,8 @@ class StripeStore:
     def __init__(
         self, *, ttl=300, max_stripes=16, max_bytes=512 * 1024**2, allow_fixture=False,
         rdma_device="-", rdma_gid_index=None, rdma_port_num=1,
-        rdma_port_base=30400, rdma_timeout=120, rdma_directory=None
+        rdma_port_base=30400, rdma_timeout=120, rdma_directory=None,
+        rs_backend="auto"
     ):
         if (not math.isfinite(ttl) or ttl <= 0 or max_stripes < 1 or max_bytes < 1
                 or not math.isfinite(float(rdma_timeout)) or float(rdma_timeout) <= 0
@@ -67,6 +69,9 @@ class StripeStore:
             "rdma_transfer_ms": 0.0,
         }
         self.epoch = str(uuid.uuid4())
+        # auto prefers the fused CUDA kernel and falls back to the vectorized
+        # CPU oracle on parity-only hosts.  Selection is recorded in status.
+        self.rs_codec = CudaRSCodec(rs_backend)
         from .rs_experiment import command
 
         self.environment = {
@@ -117,7 +122,7 @@ class StripeStore:
             from .perf_observer import span
             with span("rs_parity_encode", "ec_compute", stripe_id=s["manifest"]["stripe_id"]):
                 start = time.perf_counter()
-                parity = encode(s["blocks"][0], s["blocks"][1])
+                parity = self.rs_codec.encode_xor(s["blocks"][0], s["blocks"][1])
                 encode_ms = (time.perf_counter() - start) * 1000
             if time.monotonic() >= s["deadline"]:
                 self.expire()
@@ -134,6 +139,75 @@ class StripeStore:
             # single-erasure protocol, while retrying the original upload is
             # still idempotent through submitted_nodes.
             s["blocks"].clear()
+
+    def _init_streaming_locked(self, s, chunk_bytes):
+        lengths = [d["length"] for d in s["manifest"]["nodes"]]
+        width = max(lengths)
+        chunk = chunk_bytes
+        s["streaming"] = dict(
+            chunk_bytes=chunk,
+            nodes={i: bytearray(lengths[i]) for i in (0, 1)},
+            received={0: set(), 1: set()},
+            parity=bytearray(width),
+            encoded=set(),
+            encode_ms=0.0,
+        )
+
+    def _submit_stream_chunk_locked(self, s, node, offset, payload, chunk_bytes):
+        if s["state"] != "PENDING" or node not in (0, 1):
+            raise ValueError("streaming stripe not pending")
+        if type(chunk_bytes) is not int or not 1024**2 <= chunk_bytes <= 64 * 1024**2:
+            raise ValueError("invalid streaming node chunk size")
+        state = s.get("streaming")
+        if state is None:
+            self._init_streaming_locked(s, chunk_bytes)
+            state = s["streaming"]
+        elif state["chunk_bytes"] != chunk_bytes:
+            raise ValueError("streaming node chunk size changed mid-stripe")
+        chunk = state["chunk_bytes"]
+        expected_len = s["manifest"]["nodes"][node]["length"]
+        expected = min(chunk, expected_len - offset)
+        if (
+            type(offset) is not int or offset < 0 or offset % chunk
+            or expected <= 0 or len(payload) != expected
+        ):
+            raise ValueError("invalid streaming node chunk geometry")
+        index = offset // chunk
+        prior = state["received"][node]
+        if index in prior:
+            if bytes(state["nodes"][node][offset:offset + expected]) != payload:
+                raise ValueError("conflicting streaming chunk retry")
+            return
+        state["nodes"][node][offset:offset + expected] = payload
+        prior.add(index)
+        other = 1 - node
+        if index in state["received"][other] and index not in state["encoded"]:
+            width = min(chunk, len(state["parity"]) - offset)
+            a = bytes(state["nodes"][0][offset:min(offset + width, len(state["nodes"][0]))])
+            b = bytes(state["nodes"][1][offset:min(offset + width, len(state["nodes"][1]))])
+            a += bytes(width - len(a)); b += bytes(width - len(b))
+            started = time.perf_counter()
+            encoded = self.rs_codec.encode_xor(a, b)
+            state["encode_ms"] += (time.perf_counter() - started) * 1000
+            state["parity"][offset:offset + width] = encoded
+            state["encoded"].add(index)
+        total_chunks = (expected_len + chunk - 1) // chunk
+        if len(prior) == total_chunks and node not in s["submitted_nodes"]:
+            raw = bytes(state["nodes"][node])
+            if descriptor(raw, allow_fixture=self.allow_fixture) != s["manifest"]["nodes"][node]:
+                raise ValueError("streamed node integrity differs from manifest")
+            s["submitted_nodes"].append(node); s["submitted_nodes"].sort()
+        max_chunks = (len(state["parity"]) + chunk - 1) // chunk
+        if len(s["submitted_nodes"]) == 2 and len(state["encoded"]) == max_chunks:
+            parity = bytes(state["parity"])
+            s.update(
+                parity=parity, parity_sha256=sha(parity),
+                rs_encode_ms=state["encode_ms"],
+                commit_ms=(time.monotonic() - s["created"]) * 1000,
+                state="COMMITTED", streaming_pipeline=True,
+                streaming_chunk_bytes=chunk,
+            )
+            s["streaming"] = None
 
     def _rdma_receive_worker(self, sid, node, port, expected_length, expected_sha):
         from .multinode.rdma_transport import receive_file
@@ -236,7 +310,7 @@ class StripeStore:
                 from .perf_observer import span
                 with span("rs_decode", "ec_compute", stripe_id=sid):
                     decode_started = time.perf_counter()
-                    raw = recover(blocks, s["parity"], [d["length"] for d in s["manifest"]["nodes"]])
+                    raw = self.rs_codec.recover_xor(blocks, s["parity"], [d["length"] for d in s["manifest"]["nodes"]])
                     decode_ms = (time.perf_counter() - decode_started) * 1000
                 if len(raw) != expected_length or sha(raw) != expected_sha:
                     raise ValueError("recovered node integrity failure")
@@ -281,22 +355,29 @@ class StripeStore:
                 s["state"] = "EXPIRED"
                 s["blocks"].clear()
                 s["parity"] = None
+                s["streaming"] = None
                 s.get("registrations", {}).clear()
 
     def status(self, s):
         result = {
             k: deepcopy(v)
             for k, v in s.items()
-            if k not in ("blocks", "parity", "deadline", "created")
+            if k not in ("blocks", "parity", "streaming", "deadline", "created")
         }
         result["registered_nodes"] = sorted(s.get("registrations", {}).keys())
+        result["retained_node_block_bytes"] = sum(map(len, s.get("blocks", {}).values()))
+        result["parity_bytes"] = len(s["parity"]) if s.get("parity") is not None else 0
         result["rdma_config"] = self._rdma_config()
+        result["rs_backend"] = self.rs_codec.backend
         return result
 
     def usage(self):
         return sum(
             sum(map(len, s["blocks"].values()))
             + (len(s["parity"]) if s["parity"] is not None else 0)
+            + (sum(map(len, s.get("streaming", {}).get("nodes", {}).values()))
+               + len(s.get("streaming", {}).get("parity", ()))
+               if s.get("streaming") else 0)
             for s in self.stripes.values()
         )
 
@@ -304,7 +385,10 @@ class StripeStore:
         with self.lock:
             self.expire()
             op = request["op"]
-            if op not in ("submit_node_block", "reconstruct_missing_node") and payload:
+            if op not in (
+                "submit_node_block", "submit_node_chunk", "reconstruct_missing_node",
+                "reconstruct_node_chunk",
+            ) and payload:
                 raise ValueError("unexpected payload")
             if op == "health":
                 return {"state": "READY", "server_epoch": self.epoch,
@@ -352,6 +436,7 @@ class StripeStore:
                         submitted_nodes=[],
                         registrations={},
                         rdma={},
+                        streaming=None,
                         created=time.monotonic(),
                         deadline=time.monotonic() + self.ttl,
                         reserved_bytes=0,
@@ -422,6 +507,7 @@ class StripeStore:
                     parity=None,
                     submitted_nodes=[],
                     rdma={},
+                    streaming=None,
                     created=time.monotonic(),
                     deadline=time.monotonic() + self.ttl,
                     reserved_bytes=reserved,
@@ -503,6 +589,10 @@ class StripeStore:
                 node = request["node_id"]
                 if type(node) is not int or node not in (0, 1):
                     raise ValueError("invalid node")
+                # Verify every retry's bytes against the immutable manifest,
+                # including after the first commit released source blocks.
+                if descriptor(payload, allow_fixture=self.allow_fixture) != s["manifest"]["nodes"][node]:
+                    raise ValueError("node data/identity differs from manifest")
                 # Exact retry is idempotent, even after original input release.
                 if node in s["submitted_nodes"]:
                     return self.status(s), b""
@@ -511,10 +601,48 @@ class StripeStore:
                     raise ValueError("RDMA upload is active; TCP payload fallback is forbidden")
                 self._commit_block_locked(s, node, payload)
                 return self.status(s), b""
+            if op == "submit_node_chunk":
+                node = request.get("node_id")
+                offset = request.get("offset")
+                self._submit_stream_chunk_locked(
+                    s, node, offset, bytes(payload),
+                    request.get("chunk_bytes", 4 * 1024**2),
+                )
+                return self.status(s), b""
             if s["state"] != "COMMITTED" or s["parity"] is None:
                 raise ValueError("committed parity required")
             if sha(s["parity"]) != s["parity_sha256"]:
                 raise ValueError("stored parity corruption")
+            if op == "reconstruct_node_chunk":
+                lost = request.get("missing_node")
+                offset = request.get("offset")
+                chunk_bytes = request.get("chunk_bytes")
+                if (
+                    lost not in (0, 1) or type(offset) is not int or offset < 0
+                    or type(chunk_bytes) is not int
+                    or not 1024**2 <= chunk_bytes <= 64 * 1024**2
+                    or offset % chunk_bytes
+                ):
+                    raise ValueError("invalid streaming recovery chunk request")
+                lengths = [d["length"] for d in s["manifest"]["nodes"]]
+                lost_n = min(chunk_bytes, max(0, lengths[lost] - offset))
+                survivor_n = min(chunk_bytes, max(0, lengths[1 - lost] - offset))
+                width = min(chunk_bytes, max(lengths) - offset)
+                if lost_n <= 0 or len(payload) != survivor_n or width <= 0:
+                    raise ValueError("streaming recovery chunk geometry mismatch")
+                survivor_chunk = bytes(payload) + bytes(width - len(payload))
+                parity_chunk = s["parity"][offset:offset + width]
+                started = time.perf_counter()
+                raw = self.rs_codec.transform(parity_chunk, survivor_chunk, "xor")[:lost_n]
+                return (
+                    dict(
+                        self.status(s), recovered_node=lost, offset=offset,
+                        chunk_bytes=len(raw), chunk_sha256=sha(raw),
+                        rs_reconstruct_ms=(time.perf_counter() - started) * 1000,
+                        streaming_recovery=True,
+                    ),
+                    raw,
+                )
             if op == "fetch_parity":
                 if time.monotonic() >= s["deadline"]:
                     self.expire()
@@ -566,7 +694,7 @@ class StripeStore:
                 start = time.perf_counter()
                 blocks = [None, None]
                 blocks[1 - lost] = payload
-                raw = recover(
+                raw = self.rs_codec.recover_xor(
                     blocks, s["parity"], [d["length"] for d in s["manifest"]["nodes"]]
                 )
                 reconstruct_ms = (time.perf_counter() - start) * 1000
@@ -632,15 +760,37 @@ class StripeStore:
             raise ValueError("unsupported operation")
 
 
-class RemoteRSServer(socketserver.TCPServer):
-    # Serial bounded processing is deliberate: no unlimited connection threads,
-    # fixed frame budget and fixed store reservation. Slow peers time out.
+class RemoteRSServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    # Receive independent node chunks concurrently. Stripe mutation and codec
+    # execution remain serialized by StripeStore.lock, while socket reads no
+    # longer block the peer node's upload.
     allow_reuse_address = True
+    daemon_threads = True
+    block_on_close = True
 
-    def __init__(self, address, store=None, timeout=30):
+    def __init__(self, address, store=None, timeout=30, workers=4):
         self.store = store or StripeStore()
         self.io_timeout = timeout
+        if not 1 <= int(workers) <= 32:
+            raise ValueError("remote_rs_workers_out_of_range")
+        self.worker_gate = threading.BoundedSemaphore(int(workers))
         super().__init__(address, Handler)
+
+    def process_request(self, request, client_address):
+        if not self.worker_gate.acquire(timeout=self.io_timeout):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.worker_gate.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.worker_gate.release()
 
     def service_actions(self):
         with self.store.lock:
@@ -666,7 +816,8 @@ class Handler(socketserver.BaseRequestHandler):
         received_at = time.perf_counter()
         try:
             req, raw, metrics = receive(
-                self.request, self.server.io_timeout, count("rx")
+                self.request, self.server.io_timeout, count("rx"),
+                max_payload=store.max_bytes,
             )
             with store.lock:
                 store.metrics["receive_ms"] += metrics["receive_ms"]
@@ -707,6 +858,7 @@ def main():
     p.add_argument("--timeout", type=float, default=30)
     p.add_argument("--max-stripes", type=int, default=16)
     p.add_argument("--max-bytes", type=int, default=512 * 1024**2)
+    p.add_argument("--workers", type=int, default=4)
     p.add_argument("--rdma-device", default="-",
                    help="libibverbs device for --transport rdma (e.g. mlx5_0)")
     p.add_argument("--rdma-gid-index", type=int, default=None)
@@ -714,6 +866,10 @@ def main():
     p.add_argument("--rdma-port-base", type=int, default=30400)
     p.add_argument("--rdma-timeout", type=float, default=120)
     p.add_argument("--rdma-directory", type=Path)
+    p.add_argument(
+        "--rs-backend", choices=("auto", "cuda", "cpu"), default="auto",
+        help="auto (default) uses the fused Triton CUDA kernel when available",
+    )
     args = p.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         p.error("positive finite timeout required")
@@ -722,14 +878,18 @@ def main():
         rdma_device=args.rdma_device, rdma_gid_index=args.rdma_gid_index,
         rdma_port_num=args.rdma_port_num, rdma_port_base=args.rdma_port_base,
         rdma_timeout=args.rdma_timeout, rdma_directory=args.rdma_directory,
+        rs_backend=args.rs_backend,
     )
-    with RemoteRSServer((args.host, args.port), store, args.timeout) as server:
+    with RemoteRSServer(
+        (args.host, args.port), store, args.timeout, workers=args.workers
+    ) as server:
         print(
             json.dumps(
                 {
                     "state": "READY",
                     "address": server.server_address,
                     "epoch": store.epoch,
+                    "rs_backend": store.rs_codec.backend,
                     "rdma_upload_sha256_field": RDMA_NODE_SHA256_FIELD,
                 }
             ),

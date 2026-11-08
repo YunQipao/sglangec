@@ -519,8 +519,11 @@ class OnlineRSTests(unittest.TestCase):
 
     def test_global_identity_binding_and_legacy_offline_compatibility(self):
         exported = []
+        logical_request = sha(b"same-online-logical-request")
         for node in (0, 1):
             blocks, ranks = fixture(node)
+            for rank in ranks:
+                rank["request_id"] = logical_request
             identity = identity_for("run", "pair", "epoch", ranks[0])
             exported.append(
                 pack(
@@ -551,6 +554,13 @@ class OnlineRSTests(unittest.TestCase):
                 validate_manifest(bad, allow_fixture=True)
         legacy = build("legacy", [node_fixture(i) for i in (0, 1)], allow_fixture=True)
         validate_manifest(legacy, allow_fixture=True)
+
+        reused_snapshot = deepcopy(good)
+        reused = reused_snapshot["nodes"][0]["metadata"]["ranks"][0]["snapshot_id"]
+        for rank in reused_snapshot["nodes"][1]["metadata"]["ranks"]:
+            rank["snapshot_id"] = reused
+        with self.assertRaisesRegex(ValueError, "independent node snapshot"):
+            validate_manifest(reused_snapshot, allow_fixture=True)
 
     def test_independent_data_and_parity_corruption_are_rejected(self):
         a, b = self.exporter(0), self.exporter(1)

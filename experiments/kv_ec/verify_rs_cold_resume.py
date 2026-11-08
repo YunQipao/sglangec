@@ -69,7 +69,9 @@ def export_capture(args):
         remote_host=args.remote_host, remote_port=args.remote_port,
         rdma_device=args.rdma_device, rdma_gid_index=args.rdma_gid_index,
         rdma_port_num=args.rdma_port_num, timeout=args.timeout,
-        rdma_timeout=min(args.timeout, 180), workers=1, max_pending=1)
+        rdma_timeout=min(args.timeout, 600), workers=1, max_pending=1,
+        max_bytes=1024 * 1024**2, protection_scope="full-prefix",
+        control_timeout=min(args.timeout, 180))
     try:
         manager = OnlineChunkManager(args.output, claim['state']['capture_run_id'],
             test_recovery=True, global_exporter=exporter)

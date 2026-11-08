@@ -15,7 +15,13 @@
 #include <unistd.h>
 
 #define MAGIC 0x4b564543u
-#define MAX_BYTES (256u * 1024u * 1024u)
+#define MAX_BYTES (2048u * 1024u * 1024u)
+#define MAX_SEGMENT_BYTES (256u * 1024u * 1024u)
+
+static size_t segment_length(size_t remaining, size_t port_limit) {
+  size_t limit = port_limit < MAX_SEGMENT_BYTES ? port_limit : MAX_SEGMENT_BYTES;
+  return remaining < limit ? remaining : limit;
+}
 struct wire { uint32_t magic, qpn, psn, lid, rkey; uint64_t addr, length; uint8_t gid[16]; };
 
 static void die(const char *s) { perror(s); exit(2); }
@@ -70,9 +76,10 @@ static void exchange(struct ibv_context *ctx, struct ibv_qp *qp, int fd, struct 
   memset(&a,0,sizeof(a));a.qp_state=IBV_QPS_RTS;a.timeout=14;a.retry_cnt=7;a.rnr_retry=7;a.sq_psn=local->psn;a.max_rd_atomic=1;
   if(ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_TIMEOUT|IBV_QP_RETRY_CNT|IBV_QP_RNR_RETRY|IBV_QP_SQ_PSN|IBV_QP_MAX_QP_RD_ATOMIC))die("QP RTS");
 }
-static void post_receive(struct ibv_qp *qp, void *buf, size_t len, uint32_t lkey) {
-  struct ibv_sge sge={.addr=(uintptr_t)buf,.length=(uint32_t)len,.lkey=lkey};
-  struct ibv_recv_wr wr={.wr_id=2,.sg_list=&sge,.num_sge=1},*bad=NULL;
+static void post_receive(struct ibv_qp *qp) {
+  /* RDMA Write targets the registered remote MR, not the receive SGE. This
+   * WQE provides the credit for the final immediate notification only. */
+  struct ibv_recv_wr wr={.wr_id=2,.sg_list=NULL,.num_sge=0},*bad=NULL;
   if(ibv_post_recv(qp,&wr,&bad))die("ibv_post_recv");
 }
 static struct ibv_wc wait_completion(struct ibv_cq *cq) {
@@ -94,6 +101,24 @@ static void cleanup(struct ibv_qp *qp, struct ibv_mr *mr, struct ibv_cq *cq, str
   free(buf);
 }
 int main(int argc,char **argv) {
+  /* Pure planning test mode: no device access, sockets, memory allocation or
+   * success/CQ evidence. It can never satisfy the production stats checker. */
+  if(argc==4 && !strcmp(argv[1],"plan")) {
+    char *end1=NULL,*end2=NULL; errno=0;
+    unsigned long long total=strtoull(argv[2],&end1,10);
+    unsigned long long port_limit=strtoull(argv[3],&end2,10);
+    if(errno || !end1 || *end1 || !end2 || *end2 || !total || total>MAX_BYTES || !port_limit) {
+      fprintf(stderr,"invalid segment plan\n"); return 2;
+    }
+    size_t offset=0,count=0,last=0;
+    while(offset<(size_t)total) {
+      last=segment_length((size_t)total-offset,(size_t)port_limit);
+      if(!last) return 2;
+      offset+=last;count++;
+    }
+    printf("KV_EC_RDMA_PLAN bytes=%zu segments=%zu last_segment_bytes=%zu\n",offset,count,last);
+    return 0;
+  }
   if(argc<2){fprintf(stderr,"usage: %s send HOST PORT DEVICE FILE | recv PORT DEVICE FILE\n",argv[0]);return 2;}
   int send=!strcmp(argv[1],"send"),fd=-1;
   if(strcmp(argv[1],"send") && strcmp(argv[1],"recv")){fprintf(stderr,"invalid mode\n");return 2;}
@@ -117,19 +142,69 @@ int main(int argc,char **argv) {
   if(send)fd=tcp_connect(host,port);
   if(send){uint64_t n=htobe64(len);full_write(fd,&n,sizeof(n));}
   struct wire local={.magic=MAGIC,.rkey=mr->rkey,.addr=(uintptr_t)buf,.length=len},remote={0};
-  if(!send)post_receive(qp,buf,len,mr->lkey);
+  if(!send)post_receive(qp);
+  struct ibv_port_attr transfer_port;
+  if(ibv_query_port(ctx,port_num,&transfer_port))die("ibv_query_port transfer limit");
+  if(!transfer_port.max_msg_sz) {fprintf(stderr,"invalid HCA message limit\n");return 2;}
+  size_t write_segments=0;
   double qp_ms=(now_s()-qp_started)*1000.0;
   double exchange_started=now_s();
   exchange(ctx,qp,fd,&local,&remote,!send,port_num,gid_index);
+  /* Metadata exchange precedes QP RTR/RTS. Do not let the sender post
+   * writes before the receiver finishes its transition (concurrent helpers
+   * can deschedule either peer here). Both helpers must acknowledge ready. */
+  uint8_t ready=1,peer_ready=0;
+  full_write(fd,&ready,1);full_read(fd,&peer_ready,1);
+  if(peer_ready!=1){fprintf(stderr,"peer QP not ready\n");return 3;}
   double exchange_ms=(now_s()-exchange_started)*1000.0;
   double completion_started=now_s();
-  if(send){struct ibv_sge sg={.addr=(uintptr_t)buf,.length=(uint32_t)len,.lkey=mr->lkey};struct ibv_send_wr wr={0},*bad=NULL;wr.wr_id=1;wr.sg_list=&sg;wr.num_sge=1;wr.opcode=IBV_WR_RDMA_WRITE_WITH_IMM;wr.imm_data=htonl((uint32_t)len);wr.send_flags=IBV_SEND_SIGNALED;wr.wr.rdma.remote_addr=remote.addr;wr.wr.rdma.rkey=remote.rkey;if(ibv_post_send(qp,&wr,&bad))die("ibv_post_send");struct ibv_wc wc=wait_completion(cq);if(wc.status!=IBV_WC_SUCCESS){fprintf(stderr,"RDMA send completion failed: %s\n",ibv_wc_status_str(wc.status));exit(3);}uint8_t ack;full_read(fd,&ack,1);if(ack!=1){fprintf(stderr,"receiver rejected payload\n");exit(3);} }
-  else { struct ibv_wc wc=wait_completion(cq);if(wc.status!=IBV_WC_SUCCESS||wc.opcode!=IBV_WC_RECV_RDMA_WITH_IMM||ntohl(wc.imm_data)!=(uint32_t)len){fprintf(stderr,"RDMA receive completion failed: %s\n",ibv_wc_status_str(wc.status));exit(3);}if(fwrite(buf,1,len,f)!=len)die("write payload");uint8_t ack=1;full_write(fd,&ack,1); }
+  double write_cq_ms=0,ack_wait_ms=0,receive_notify_ms=0,persist_ms=0;
+  if(send) {
+    /* Keep the wire struct and one final immediate unchanged. Intermediate
+     * RC writes consume no remote receive WQEs, and QP ordering makes the
+     * final notification cover all preceding writes. Payload never uses TCP. */
+    size_t offset=0;
+    while(offset<len) {
+      size_t n=segment_length(len-offset,transfer_port.max_msg_sz);
+      int final=(offset+n==len);
+      struct ibv_sge sg={.addr=(uintptr_t)buf+offset,.length=(uint32_t)n,.lkey=mr->lkey};
+      struct ibv_send_wr wr={0},*bad=NULL;
+      wr.wr_id=write_segments+1;wr.sg_list=&sg;wr.num_sge=1;
+      wr.opcode=final?IBV_WR_RDMA_WRITE_WITH_IMM:IBV_WR_RDMA_WRITE;
+      wr.imm_data=htonl((uint32_t)len);wr.send_flags=IBV_SEND_SIGNALED;
+      wr.wr.rdma.remote_addr=remote.addr+offset;wr.wr.rdma.rkey=remote.rkey;
+      if(ibv_post_send(qp,&wr,&bad))die("ibv_post_send segment");
+      struct ibv_wc wc=wait_completion(cq);
+      if(wc.status!=IBV_WC_SUCCESS || wc.wr_id!=wr.wr_id || wc.opcode!=IBV_WC_RDMA_WRITE) {
+        fprintf(stderr,"RDMA segment completion failed: %s\n",ibv_wc_status_str(wc.status));exit(3);
+      }
+      offset+=n;write_segments++;
+    }
+    write_cq_ms=(now_s()-completion_started)*1000.0;
+    double ack_started=now_s();
+    uint8_t ack;full_read(fd,&ack,1);
+    ack_wait_ms=(now_s()-ack_started)*1000.0;
+    if(ack!=1){fprintf(stderr,"receiver rejected payload\n");exit(3);}
+  } else {
+    struct ibv_wc wc=wait_completion(cq);
+    if(wc.status!=IBV_WC_SUCCESS || wc.opcode!=IBV_WC_RECV_RDMA_WITH_IMM ||
+       wc.wr_id!=2 || ntohl(wc.imm_data)!=(uint32_t)len) {
+      fprintf(stderr,"RDMA receive completion failed: %s\n",ibv_wc_status_str(wc.status));exit(3);
+    }
+    receive_notify_ms=(now_s()-completion_started)*1000.0;
+    double persist_started=now_s();
+    if(fwrite(buf,1,len,f)!=len)die("write payload");
+    persist_ms=(now_s()-persist_started)*1000.0;
+    uint8_t ack=1;full_write(fd,&ack,1);
+  }
   double completion_ms=(now_s()-completion_started)*1000.0;
   /* This line is deliberately machine readable.  The TCP control channel
    * carries only QP/MR metadata and the acknowledgement; ``bytes`` above was
-   * written by an RDMA work request and completed by the CQ. */
-  printf("KV_EC_RDMA_STATS bytes=%zu device_setup_ms=%.3f memory_registration_ms=%.3f qp_setup_ms=%.3f exchange_ms=%.3f completion_ms=%.3f total_ms=%.3f qp_num=%u remote_qpn=%u gid_index=%d port_num=%u completion_status=SUCCESS\n", len, (mr_started-device_started)*1000.0, mr_ms, qp_ms, exchange_ms, completion_ms, (now_s()-total_started)*1000.0, qp->qp_num, remote.qpn, gid_index, port_num);
+   * written by ordered RDMA work requests and completed by the CQ. */
+  printf("KV_EC_RDMA_STATS bytes=%zu device_setup_ms=%.3f memory_registration_ms=%.3f qp_setup_ms=%.3f exchange_ms=%.3f completion_ms=%.3f total_ms=%.3f qp_num=%u remote_qpn=%u gid_index=%d port_num=%u write_segments=%zu receive_notifications=%d segment_limit_bytes=%zu ", len, (mr_started-device_started)*1000.0, mr_ms, qp_ms, exchange_ms, completion_ms, (now_s()-total_started)*1000.0, qp->qp_num, remote.qpn, gid_index, port_num, write_segments, send?0:1, segment_length(MAX_BYTES,transfer_port.max_msg_sz));
+  if(send)printf("rdma_write_cq_ms=%.3f tcp_ack_wait_ms=%.3f ",write_cq_ms,ack_wait_ms);
+  else printf("rdma_receive_notify_ms=%.3f receiver_persist_ms=%.3f ",receive_notify_ms,persist_ms);
+  printf("completion_status=SUCCESS\n");
   fflush(stdout);
   fclose(f);close(fd);cleanup(qp,mr,cq,pd,ctx,buf);return 0;
 }

@@ -19,8 +19,11 @@ import sys
 import unittest
 
 loader = unittest.TestLoader()
+# The experiment tree is a package and its tests intentionally use relative
+# imports.  Always discover from the repository top level so a fresh clone
+# imports the same module names as explicit ``python -m unittest`` commands.
 suite = loader.discover('experiments/kv_ec', pattern='test_*.py',
-                        top_level_dir=sys.argv[1] or None)
+                        top_level_dir='.')
 if loader.errors:
     raise SystemExit('\\n'.join(loader.errors))
 

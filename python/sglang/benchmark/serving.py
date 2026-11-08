@@ -2104,6 +2104,15 @@ def run_benchmark(args_: argparse.Namespace):
 
     tokenizer = get_tokenizer(tokenizer_id)
     input_requests = get_dataset(args, tokenizer, model_id)
+    rid_prefix = getattr(args, "deterministic_rid_prefix", None)
+    if rid_prefix:
+        if not isinstance(input_requests, list) or any(
+            not hasattr(request, "extra_request_body") for request in input_requests
+        ):
+            raise ValueError("deterministic request IDs require DatasetRow requests")
+        for index, request in enumerate(input_requests):
+            request.extra_request_body = dict(request.extra_request_body or {})
+            request.extra_request_body["rid"] = f"{rid_prefix}-{index}"
 
     # compatible with SimpleNamespace
     if not hasattr(args, "flush_cache"):
@@ -2443,6 +2452,14 @@ def cli_main():
         "Supported with sglang backends (native, oai, oai-chat).",
     )
     parser.add_argument("--seed", type=int, default=42, help="The random seed.")
+    parser.add_argument(
+        "--deterministic-rid-prefix",
+        type=str,
+        help=(
+            "Assign <prefix>-<dataset-index> as each request rid. This enables "
+            "reproducible cross-node EC pairing; use --warmup-requests 0."
+        ),
+    )
     parser.add_argument(
         "--disable-ignore-eos",
         action="store_true",

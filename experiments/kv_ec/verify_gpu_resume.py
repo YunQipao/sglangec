@@ -23,11 +23,11 @@ def reference_identity(path):
 
 def validate_restore_evidence(result, expected, rank):
     old, new = result["old_slots"], result["new_slots"]
-    _require(len(new) == len(set(new)) == 256 and not set(old) & set(new) and
+    _require(len(new) == len(set(new)) == expected['token_count'] and not set(old) & set(new) and
              all(0 < slot <= result["allocator_size"] for slot in new),
              "stage_b_restored_slots_overlap")
     stats = result["stats"]
-    _require(stats["loaded_kv_tokens"] == stats["token_count"] == 256 and
+    _require(stats["loaded_kv_tokens"] == stats["token_count"] == expected['token_count'] and
              stats["token_start"] == stats["recomputed_tokens"] == 0 and
              stats["unexpected_prefill"] is False and
              stats["written_bytes"] == expected["packed_byte_count"] and
@@ -73,7 +73,7 @@ def read_run(output, expected_mode=None):
                  r["generation_before"] == r["generation_after"] > 0 and
                  r["free_slots_after"] == r["allocator_size"] and
                  r["free_rows_after"] == r["request_pool_size"] and
-                 r["original_prefill_tokens"] == 256 and
+                 r["original_prefill_tokens"] == meta['ranks'][0]['token_count'] and
                  r["original_prefill_forward_count"] == 1 and
                  r["recomputed_prefix_tokens"] == 0 and
                  r["token_ids_sha256"] == meta["ranks"][rank]["token_ids_sha256"],
@@ -87,7 +87,7 @@ def read_run(output, expected_mode=None):
                  r["resume_decode_forward_count"] == count - 1,
                  "stage_b_output_count_or_hash_invalid")
         old = r["old_slots"]
-        _require(len(old) == len(set(old)) == 256, "stage_b_old_slots_invalid")
+        _require(len(old) == len(set(old)) == meta['ranks'][0]['token_count'], "stage_b_old_slots_invalid")
         if mode == "reference":
             _require(r["pass_reference"] is True and r["reference_no_restore"] is True and
                      r["committed"] is False and r["restored_kv_tokens"] == 0 and
@@ -98,15 +98,15 @@ def read_run(output, expected_mode=None):
             _require(all(r.get(k) is True for k in (
                 "local_resume_complete", "verified", "committed", "slots_disjoint",
                 "restored_slots_used_by_decode", "request_state_unchanged_by_restore")) and
-                r["restored_kv_tokens"] == 256 and r["transaction_state"] == "COMMITTED" and
+                r["restored_kv_tokens"] == meta['ranks'][0]['token_count'] and r["transaction_state"] == "COMMITTED" and
                 r["mapping_version"] == 1 and
                 r["forward_ct_before_restore"] == r["forward_ct_after_restore"],
                 "stage_b_restore_not_committed")
             state = r["request_state_before_restore"]
             _require(state == r["request_state_after_restore"] and
                      state["output_ids"] == [] and state["pending_token"] == [outputs[0]] and
-                     state["kv_committed_len"] == state["kv_allocated_len"] == 256 and
-                     state["seq_lens"] == [256] and state["extend_batch_idx"] == 1 and
+                     state["kv_committed_len"] == state["kv_allocated_len"] == meta['ranks'][0]['token_count'] and
+                     state["seq_lens"] == [meta['ranks'][0]['token_count']] and state["extend_batch_idx"] == 1 and
                      state["decode_batch_idx"] == 0 and state["row"] == r["row"] and
                      state["generation"] == r["generation_before"] and
                      state["input_sha256"] == r["token_ids_sha256"],
@@ -131,14 +131,14 @@ def read_run(output, expected_mode=None):
             _require(o["step"] == step and o["generation"] == r["generation_before"] and
                      o["req_pool_indices"] == [r["row"]] and
                      o["forward_ct"] == observations[0]["forward_ct"] + step and
-                     o["kv_length"] == 256 + step and
-                     len(o["mapping"]) == len(set(o["mapping"])) == 256 + step and
+                     o["kv_length"] == meta['ranks'][0]['token_count'] + step and
+                     len(o["mapping"]) == len(set(o["mapping"])) == meta['ranks'][0]['token_count'] + step and
                      all(0 < slot <= r["allocator_size"] for slot in o["mapping"]),
                      "stage_b_forward_state_invalid")
             if step == 0:
                 _require(o["mode"] == "EXTEND" and o["mapping"] == old and
-                         o["mapping_version"] == 0 and o["positions"] == list(range(256)) and
-                         len(o["input_ids"]) == 256 and token_digest(o["input_ids"]) ==
+                         o["mapping_version"] == 0 and o["positions"] == list(range(meta['ranks'][0]['token_count'])) and
+                         len(o["input_ids"]) == meta['ranks'][0]['token_count'] and token_digest(o["input_ids"]) ==
                          r["token_ids_sha256"], "stage_b_original_prefill_invalid")
             else:
                 _require(o["mode"] == "DECODE" and
@@ -314,6 +314,7 @@ def main():
     start.add_argument("--gpus", default="auto")
     start.add_argument("--port", type=int, default=30482)
     start.add_argument("--mem-fraction-static", type=float, default=0.6)
+    start.add_argument("--gpu-admission-mode", choices=("strict", "shared"), default=None)
     start.add_argument("--timeout", type=float, default=120)
     send = sub.add_parser("submit")
     send.add_argument("--output", type=Path, required=True)

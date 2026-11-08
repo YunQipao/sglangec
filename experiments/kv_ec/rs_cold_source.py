@@ -20,7 +20,7 @@ from .perf_observer import observed
 
 FILES = ('stage_e.json', 'recovered_node.bin', 'protected/recovery.json',
          'protected/recovered_node.bin')
-MAX_ARCHIVE = 160 * 1024**2
+MAX_ARCHIVE = 2048 * 1024**2
 
 
 def validate_claim(claim):
@@ -48,7 +48,7 @@ def validate_claim(claim):
                  own['metadata']['ranks'][rank]['sha256'] == seal['rank_payload_sha256'][rank] and
                  proof['state_sha256'] == sha(canonical(state)) and
                  proof['process'] == seal['origin_processes'][rank] and
-                 proof['materialized_kv_tokens'] == 256 and
+                 proof['materialized_kv_tokens'] == state['token_count'] and
                  proof['pending_token_id'] == state['pending_token_id'],
                  'stage_e_capture_proof_invalid')
     _require(len(claim['proofs']) == len(claim['proof_documents']) == state['tp_size'],
@@ -68,7 +68,7 @@ def plan_identity(plan):
     validate_manifest(dict(format='kv-rs-stripe-v1', code=CODE,
         stripe_id='stage-e-pair', nodes=[c['descriptor'] for c in plan['captures']]))
     first = plan['captures'][0]['descriptor']['metadata']['ranks'][0]
-    return identity_for(plan['run_id'], sha(canonical(plan)), sha(canonical(plan)), first)
+    return identity_for(plan['run_id'], sha(canonical(plan)), sha(canonical(plan)), first, full_prefix=True)
 
 
 def validate_protection(protection):

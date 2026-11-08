@@ -1,0 +1,15 @@
+{
+  "schema": "ec-three-domain-v1",
+  "transport": "tcp",
+  "nodes": [
+    {"role": "D0", "physical_id": "232", "host": "10.102.0.232", "project": "/media/sda1/iic/luotao"},
+    {"role": "D1", "physical_id": "233", "host": "10.102.0.233", "project": "/media/sda1/iic_data/luotao"},
+    {"role": "P", "physical_id": "243", "host": "10.102.0.243", "project": "/media/home/iic/luotao", "rdma_available": false}
+  ],
+  "parity_port": 32951,
+  "replica_port": 32952,
+  "max_bytes": 536870912,
+  "max_objects": 8,
+  "ttl_s": 900,
+  "timeout_s": 30
+}

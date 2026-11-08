@@ -21,7 +21,8 @@ def read_input_ids(path, meta):
     ids = json.loads(Path(path).read_text())
     if isinstance(ids, dict):
         ids = ids["input_ids"]
-    _require(isinstance(ids, list) and len(ids) == 256 and
+    token_count = meta["ranks"][0].get("token_count", 256)
+    _require(isinstance(ids, list) and len(ids) == token_count and
              all(type(x) is int and x >= 0 for x in ids), "exactly_256_input_ids_required")
     digest = hashlib.sha256(np.asarray(ids, dtype="<i8").tobytes()).hexdigest()
     _require(digest == meta["ranks"][0]["token_ids_sha256"],
@@ -39,13 +40,13 @@ def public_test_inputs(args):
     meta = validate_checkpoint(args.checkpoint.read_bytes())
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
     ids = tokenizer.encode("KV cache research with artificial public test data. " * 160,
-                           add_special_tokens=False)[:256]
+                           add_special_tokens=False)[:meta['ranks'][0]['token_count']]
     digest = hashlib.sha256(np.asarray(ids, dtype="<i8").tobytes()).hexdigest()
-    _require(len(ids) == 256 and digest == meta["ranks"][0]["token_ids_sha256"],
+    _require(len(ids) == meta['ranks'][0]['token_count'] and digest == meta["ranks"][0]["token_ids_sha256"],
              "checkpoint_does_not_match_request_debug_public_prompt")
     with args.output.open("x") as handle:
         json.dump(ids, handle)
-    print(json.dumps(dict(input_ids_file=str(args.output), token_count=256,
+    print(json.dumps(dict(input_ids_file=str(args.output), token_count=meta['ranks'][0]['token_count'],
                           token_ids_sha256=digest, gpu_acceptance=False)))
 
 
@@ -53,7 +54,7 @@ def inspect_checkpoint(path):
     block = Path(path).read_bytes()
     meta = validate_checkpoint(block)
     return dict(checkpoint=str(Path(path).resolve()), checkpoint_sha256=sha(block),
-                node_id=meta["node_id"], tp_size=len(meta['ranks']), token_start=0, token_count=256,
+                node_id=meta["node_id"], tp_size=len(meta['ranks']), token_start=0, token_count=meta['ranks'][0]['token_count'],
                 model_sha256=meta["ranks"][0]["model_sha256"],
                 token_ids_sha256=meta["ranks"][0]["token_ids_sha256"],
                 rank_bytes=[r["packed_byte_count"] for r in meta["ranks"]],
@@ -85,6 +86,9 @@ def check_results(output):
     tp_size = len(meta['ranks'])
     require_complete_rank_reports(output, tp_size)
     results = [json.loads((output / f"rank_{r}.json").read_text()) for r in range(tp_size)]
+    checkpoint_tokens = meta["ranks"][0].get(
+        "token_count", results[0]["stats"]["token_count"]
+    )
     for rank, result in enumerate(results):
         if config.get('rank_gpu_binding_required'):
             from .gpu_admission import validate_rank_binding
@@ -103,19 +107,19 @@ def check_results(output):
                  result["transaction_state"] == "COMMITTED" and
                  result["generation_before"] > 0 and
                  result["generation_before"] == result["generation_after"] and
-                 result["original_prefill_tokens"] == 256 and
+                 result["original_prefill_tokens"] == checkpoint_tokens and
                  result["original_prefill_forward_count"] == 1 and
                  result["original_sampled_output_tokens"] == 1 and
                  result["decode_forward_count"] == result["restore_forward_count"] == 0 and
                  result["forward_ct_before_restore"] == result["forward_ct_after_restore"] and
                  result["free_slots_after"] == result["allocator_size"], "rank_lifecycle_mismatch")
         old, new = result["old_slots"], result["new_slots"]
-        _require(len(set(old)) == len(set(new)) == len(old) == len(new) == 256 and
+        _require(len(set(old)) == len(set(new)) == len(old) == len(new) == checkpoint_tokens and
                  not set(old) & set(new) and
                  all(0 < x <= result["allocator_size"] for x in old + new),
                  "rank_slot_evidence_invalid")
         stats = result["stats"]
-        _require(stats["loaded_kv_tokens"] == stats["token_count"] == 256 and
+        _require(stats["loaded_kv_tokens"] == stats["token_count"] == checkpoint_tokens and
                  stats["token_start"] == stats["recomputed_tokens"] == 0 and
                  stats["unexpected_prefill"] is False and
                  stats["written_bytes"] == expected["packed_byte_count"] and
@@ -124,7 +128,11 @@ def check_results(output):
                  result["runtime_identity"]["model_sha256"] == expected["model_sha256"],
                  "rank_restore_stats_mismatch")
         layers = stats["layers_verified"]
-        _require([x["layer_id"] for x in layers] == list(range(36)), "missing_layer_verification")
+        expected_layers = expected.get(
+            "layers", [x.get("layer_id", i) for i, x in enumerate(expected["layer_records"])]
+        )
+        _require([x["layer_id"] for x in layers] == expected_layers,
+                 "missing_layer_verification")
         for actual, ref in zip(layers, expected["layer_records"]):
             _require(actual["k_byte_exact"] is True and actual["v_byte_exact"] is True and
                      actual["k_sha256"] == ref["k_sha256"] and
@@ -141,8 +149,8 @@ def check_results(output):
                 "generation_before", "generation_after", "row", "transaction_state"):
         _require(all(results[0][key] == r[key] for r in results[1:]), "tp_rank_results_disagree:" + key)
     return dict(pass_stage_a=True, cuda_executed=True, tp_size=tp_size, tp_ranks=list(range(tp_size)),
-                loaded_kv_tokens=256, recomputed_tokens=0, unexpected_prefill=False,
-                original_prefill_tokens=256, decode_forward_count=0,
+                loaded_kv_tokens=checkpoint_tokens, recomputed_tokens=0, unexpected_prefill=False,
+                original_prefill_tokens=checkpoint_tokens, decode_forward_count=0,
                 checkpoint_sha256=sha(block), run_id=config["run_id"], ranks=results)
 
 
@@ -154,6 +162,7 @@ def launch(args, *, extra_config=None, extra_env=None):
     block = args.checkpoint.resolve().read_bytes()
     meta = validate_checkpoint(block)
     args.tp, args.prefill_chunk_size = len(meta['ranks']), -1
+    args.context_length = 8192
     selected_mode = args_mode(args)
     _require(0.05 <= args.mem_fraction_static <= 0.95, "invalid_memory_fraction")
     resources = check_gpu_resources(args)
@@ -169,7 +178,7 @@ def launch(args, *, extra_config=None, extra_env=None):
     output.mkdir(exist_ok=False)  # no existing results can be overwritten
     config = dict(run_id=output.name, checkpoint=str(args.checkpoint.resolve()),
                   checkpoint_sha256=sha(block), gpus=args.gpus, model=args.model,
-                  runtime_identity=identity, tp_size=args.tp, prefix_tokens=256,
+                  runtime_identity=identity, tp_size=args.tp, prefix_tokens=meta['ranks'][0]['token_count'],
                   argv=server_argv(args), rank_gpu_binding_required=True)
     config.update(extra_config or {})
     config.update(metadata(selected_mode, args.mem_fraction_static, resources))
@@ -198,7 +207,12 @@ def submit(args, *, max_new_tokens=1, sampling_overrides=None, request_id=None):
     config = json.loads((output / "run.json").read_text())
     block = Path(config["checkpoint"]).read_bytes()
     _require(sha(block) == config["checkpoint_sha256"], "checkpoint_reference_changed")
-    ids = read_input_ids(args.input_ids, validate_checkpoint(block))
+    if config.get('bootstrap_prefix'):
+        ids = config['input_ids']
+        _require(config['cold_mode'] == 'capture' and config['prefix_tokens'] in (256, 512, 1024, 2048, 4096)
+                 and len(ids) == config['prefix_tokens'], 'bootstrap_submit_invalid')
+    else:
+        ids = read_input_ids(args.input_ids, validate_checkpoint(block))
     deadline = time.monotonic() + args.wait_ready
     while True:
         try:
